@@ -1,0 +1,76 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{if .Keg.ID}}编辑酒桶{{else}}新增酒桶{{end}}</h1>
+    <p>调整桶号、容量、成本或生命周期时间节点。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/kegs">
+  <input type="hidden" name="id" value="{{if .Keg.ID}}{{.Keg.ID}}{{end}}">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-cup-straw" aria-hidden="true"></i>酒桶规格与成本</h2>
+        <span>容量与成本决定本桶盈亏与每杯摊销</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field editor-wide">
+          <label class="label" for="beer_id">酒款<span class="field-required" aria-hidden="true"> *</span></label>
+          <select class="form-select" id="beer_id" name="beer_id" required>
+            <option value="">选择一款酒</option>
+            {{range .Beers}}
+            <option value="{{.ID}}" {{if eq .ID $.Keg.BeerID}}selected{{end}}>{{.Brewery}} · {{.Name}}{{if .No}}（{{.No}}）{{end}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="keg_no">桶号 / 标识</label>
+          <input class="form-control" type="text" id="keg_no" name="keg_no" value="{{.Keg.KegNo}}" placeholder="K-2026-03">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="capacity_ml">容量（毫升）<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="number" id="capacity_ml" name="capacity_ml" value="{{.Keg.CapacityML}}" required placeholder="20000">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="cost">本桶成本（元）</label>
+          <input class="form-control" type="text" id="cost" name="cost" value="{{.Keg.Cost}}" placeholder="1200">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="note">备注</label>
+          <input class="form-control" type="text" id="note" name="note" value="{{.Keg.Note}}" placeholder="供应商、批次、押金…">
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-clock-history" aria-hidden="true"></i>生命周期时间</h2>
+        <span>一般由酒单页「上架 / 下架」自动记录</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="placed_at">上架时间</label>
+          <input class="form-control" type="datetime-local" id="placed_at" name="placed_at" value="{{.Keg.PlacedInput}}">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tapped_at">开桶时间</label>
+          <input class="form-control" type="datetime-local" id="tapped_at" name="tapped_at" value="{{.Keg.TappedInput}}">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="finished_at">结桶时间</label>
+          <input class="form-control" type="datetime-local" id="finished_at" name="finished_at" value="{{.Keg.FinishedInput}}">
+          <div class="description">空桶再填；一般点「下架」自动记</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <a class="button button--secondary" href="/admin/beers">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存酒桶</button>
+  </div>
+</form>
+{{end}}

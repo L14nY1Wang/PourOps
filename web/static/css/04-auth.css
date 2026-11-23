@@ -1,0 +1,319 @@
+/* ---------- 登录 ---------- */
+.auth-layout {
+  min-height: 100vh;
+  background:
+    radial-gradient(900px 420px at 12% -10%, rgba(36, 85, 223, .08), transparent 60%),
+    var(--background);
+}
+
+.auth-layout .app-workspace {
+  min-height: 100vh;
+  margin: 0;
+}
+
+.auth-layout .app-topbar {
+  padding: 16px 24px;
+  background: transparent;
+  border: 0;
+  backdrop-filter: none;
+  position: static;
+}
+
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--foreground);
+}
+
+.auth-brand .brand-mark {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+}
+
+.auth-brand strong {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .16em;
+}
+
+.auth-brand span {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: .1em;
+}
+
+.auth-layout .main-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  max-width: none;
+  padding: 12px 24px 48px;
+}
+
+.auth-layout .app-messages {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto 16px;
+}
+
+.login-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 420px);
+  gap: 28px;
+  align-items: stretch;
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding-bottom: 0;
+}
+
+.login-intro {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 520px;
+  padding: 38px;
+  border-radius: 22px;
+  overflow: hidden;
+  color: #eef3fc;
+  background:
+    radial-gradient(520px 300px at 88% 8%, rgba(84, 119, 255, .4), transparent 65%),
+    linear-gradient(155deg, #1a2c4b 0%, #101c2e 68%);
+}
+
+.login-intro::after {
+  content: "";
+  position: absolute;
+  inset: auto -20% -40% 30%;
+  height: 320px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, .08);
+  pointer-events: none;
+}
+
+.login-whale {
+  position: absolute;
+  right: -20px;
+  bottom: -20px;
+  width: 240px;
+  height: auto;
+  opacity: .18;
+  pointer-events: none;
+}
+
+.login-intro-body {
+  position: relative;
+  z-index: 1;
+}
+
+.login-eyebrow {
+  margin: 0 0 18px;
+  color: #9db9ff;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .22em;
+}
+
+.login-intro h1 {
+  margin: 0 0 14px;
+  font-size: 34px;
+  line-height: 1.28;
+  letter-spacing: -.03em;
+  color: #f6f9ff;
+}
+
+.login-intro p {
+  max-width: 330px;
+  margin: 0;
+  color: rgba(226, 236, 250, .74);
+  font-size: 12.5px;
+  line-height: 1.9;
+}
+
+.login-features {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 0;
+  margin-top: 28px;
+  border-top: 1px solid rgba(255, 255, 255, .12);
+}
+
+.login-features span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 2px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 0;
+  background: transparent;
+  color: rgba(235, 242, 252, .92);
+  font-size: 12.5px;
+}
+
+.login-features span:last-child {
+  border-bottom: 0;
+}
+
+.login-features i {
+  color: #9db9ff;
+  font-size: 15px;
+}
+
+.login-features small {
+  margin-left: auto;
+  color: rgba(226, 236, 250, .48);
+  font-size: 10px;
+}
+
+.login-panel {
+  display: flex;
+  align-items: center;
+}
+
+.login-card {
+  width: 100%;
+  padding: 34px 32px;
+  border-radius: 20px;
+}
+
+.login-card h2 {
+  margin: 0 0 6px;
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -.02em;
+}
+
+.login-card > p {
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.login-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--soft-accent);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+
+.login-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+  padding: 9px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 11px;
+  background: var(--field-background);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.login-identity strong {
+  color: var(--foreground);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.login-card .editor-field {
+  margin-bottom: 14px;
+}
+
+.login-card .label {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.login-card .form-control {
+  min-height: 46px;
+  padding: 10px 13px;
+  border-radius: 11px;
+  font-size: 14px;
+}
+
+.login-card input#code {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: .14em;
+  font-variant-numeric: tabular-nums;
+}
+
+.login-card .button {
+  width: 100%;
+  min-height: 46px;
+  margin-top: 6px;
+  border-radius: 11px;
+  font-size: 13.5px;
+}
+
+.login-card .button--tertiary {
+  margin-top: 10px;
+  min-height: 40px;
+  font-size: 12px;
+}
+
+.login-note {
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+/* 2FA 恢复码：等宽、分组、可换行 */
+.recovery-codes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 22px;
+  margin: 14px 0 16px;
+  padding-left: 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: .02em;
+  overflow-wrap: anywhere;
+}
+
+.setup-secret {
+  display: inline-block;
+  max-width: 100%;
+  padding: 10px 14px;
+  border: 1px dashed var(--separator);
+  border-radius: 10px;
+  background: var(--field-background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  letter-spacing: .12em;
+  overflow-wrap: anywhere;
+}
+
+.security-card {
+  padding: 20px;
+}
+
+.security-card + .security-card {
+  margin-top: 14px;
+}
+
+.security-card h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 650;
+}
+

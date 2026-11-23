@@ -1,0 +1,48 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">账号</h1>
+    <p>BOSS 管理全部账号；店长可进入运营后台；店员仅可使用点餐端。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-people" aria-hidden="true"></i>共 {{len .Users}} 个账号</span>
+    <a class="button button--primary" href="/admin/users/new"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增账号</a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead><tr><th scope="col">用户名</th><th scope="col">角色</th><th scope="col">两步验证</th><th scope="col">状态</th><th class="num" scope="col">操作</th></tr></thead>
+      <tbody>
+        {{range .Users}}
+        <tr>
+          <td>
+            <div class="user-cell">
+              <span class="user-cell-avatar{{if .IsBoss}} user-cell-avatar--boss{{end}}" aria-hidden="true">{{printf "%.1s" .Username}}</span>
+              <strong>{{.Username}}</strong>
+            </div>
+          </td>
+          <td><span class="role-pill role-pill--{{.Role}}">{{.RoleName}}</span></td>
+          <td>{{if .TwoFactor}}<span class="badge bg-success">已开启</span>{{else}}<span class="badge bg-secondary">未开启</span>{{end}}</td>
+          <td>{{if .Active}}<span class="badge bg-success">启用</span>{{else}}<span class="badge bg-secondary">停用</span>{{end}}</td>
+          <td class="data-actions">
+            <div class="table-actions">
+              <a class="button button--secondary button--sm" href="/admin/users/{{.ID}}/edit">编辑<span class="visually-hidden"> {{.Username}}</span></a>
+              <form class="inline-form" method="post" action="/admin/users/{{.ID}}/toggle">
+                <button class="button button--tertiary button--sm" type="submit">{{if .Active}}停用{{else}}启用{{end}}<span class="visually-hidden"> {{.Username}}</span></button>
+              </form>
+              <form class="inline-form" method="post" action="/admin/users/{{.ID}}/delete" onsubmit="return confirm('删掉账号 {{.Username}}？')">
+                <button class="button button--danger-soft button--sm" type="submit">删除<span class="visually-hidden"> {{.Username}}</span></button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {{else}}
+        <tr><td colspan="5"><div class="empty-state"><i class="bi bi-people" aria-hidden="true"></i><p>还没有可管理的账号</p></div></td></tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}

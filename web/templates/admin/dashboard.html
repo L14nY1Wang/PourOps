@@ -1,0 +1,360 @@
+{{define "periodLabel"}}{{if eq .ReportPeriod "today"}}今日{{else if eq .ReportPeriod "7d"}}近 7 天{{else if eq .ReportPeriod "30d"}}近 30 天{{else if eq .ReportPeriod "month"}}本月{{else if eq .ReportPeriod "custom"}}自定义{{else}}所选范围{{end}}{{end}}
+
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">经营概览</h1>
+    <p class="overview-sub">销售、POS 实收与库存快照 · {{template "periodLabel" .}} · 北京时间</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-calendar3" aria-hidden="true"></i>{{.ReportStart}} 至 {{.ReportEnd}}</span>
+    <a class="button button--secondary" href="/admin/records"><i class="bi bi-receipt" aria-hidden="true"></i>销售订单</a>
+    <a class="button button--secondary" href="/admin/beers"><i class="bi bi-cup-straw" aria-hidden="true"></i>酒单 · 桶装</a>
+    <a class="button button--primary" href="/admin/retail/new"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增商品</a>
+  </div>
+</div>
+
+<form class="card overview-filter" method="get" action="/admin/" role="search" aria-label="选择统计时间范围">
+  <nav class="period-tabs" aria-label="快捷时间范围">
+    <a class="period-tab{{if eq .ReportPeriod "today"}} active" aria-current="true{{end}}" href="/admin/?period=today">今日</a>
+    <a class="period-tab{{if eq .ReportPeriod "7d"}} active" aria-current="true{{end}}" href="/admin/?period=7d">近 7 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "30d"}} active" aria-current="true{{end}}" href="/admin/?period=30d">近 30 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "month"}} active" aria-current="true{{end}}" href="/admin/?period=month">本月</a>
+  </nav>
+  <div class="period-form">
+    <label class="period-field">开始日期<input type="date" name="start" value="{{.ReportStart}}" aria-describedby="period-hint"></label>
+    <label class="period-field">结束日期<input type="date" name="end" value="{{.ReportEnd}}" aria-describedby="period-hint"></label>
+    <button class="button button--primary" type="submit">应用日期</button>
+    <span class="visually-hidden" id="period-hint">最多 366 天，含结束日</span>
+  </div>
+</form>
+
+{{if not .Err}}
+<div class="section-head">
+  <div>
+    <h2>销售事实</h2>
+    <p>含 POS 已结账销售与手工补录 · 毛利非净利</p>
+  </div>
+  <a class="subtle-link" href="/admin/records">销售订单记录<i class="bi bi-chevron-right" aria-hidden="true"></i></a>
+</div>
+
+<div class="stats-grid overview-stats">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>营业额</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Current.RevenueText}}</strong>
+    <div class="stat-meta">销量 {{.Sales.Current.Qty}} 杯/件 · 上期 {{.Sales.Previous.RevenueText}} · 环比 <strong>{{.Sales.RevenueChangeText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>毛利</span><i class="bi bi-graph-up-arrow stat-icon--success" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Current.ProfitText}}</strong>
+    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>桶装精酿</span><i class="bi bi-cup-straw stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Draft.RevenueText}}</strong>
+    <div class="stat-meta">{{.Sales.Draft.Qty}} 杯 · 毛利 {{.Sales.Draft.ProfitText}} · 含手工补录</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>零售商品</span><i class="bi bi-box-seam stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Retail.RevenueText}}</strong>
+    <div class="stat-meta">{{.Sales.Retail.Qty}} 件 · 毛利 {{.Sales.Retail.ProfitText}} · 毛利率 {{.Sales.Retail.MarginText}}</div>
+  </div>
+</div>
+
+<div class="dashboard-main">
+  <section class="card chart-panel" aria-labelledby="trend-title">
+    <div class="panel-heading">
+      <div>
+        <h2 id="trend-title">销售走势</h2>
+        <p>营业额与毛利 · 按北京时间自然日 · 毛利非净利</p>
+      </div>
+      <span class="panel-period">{{template "periodLabel" .}}</span>
+    </div>
+    {{if or .Sales.Top .Sales.Current.Revenue .Sales.Current.Cost}}
+    <div class="chart-container"><canvas id="salesChart" role="img" aria-label="销售走势图，营业额与毛利，数据表见下方">销售走势数据见下方表格。</canvas></div>
+    <details class="overview-data">
+      <summary>查看走势数据表</summary>
+      <table>
+        <thead><tr><th scope="col">日期</th><th class="num" scope="col">营业额</th><th class="num" scope="col">毛利</th></tr></thead>
+        <tbody>{{range .Sales.Trend}}<tr><td>{{.Date}}</td><td class="num">{{.RevenueText}}</td><td class="num">{{.ProfitText}}</td></tr>{{end}}</tbody>
+      </table>
+    </details>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-graph-up" aria-hidden="true"></i><p>所选时间内还没有销售记录</p></div>
+    {{end}}
+  </section>
+
+  <section class="card chart-panel" aria-labelledby="pos-title">
+    <div class="panel-heading">
+      <div>
+        <h2 id="pos-title">POS 实收</h2>
+        <p>按支付流水统计 · 拆单不重复计订单</p>
+      </div>
+      <a class="subtle-link" href="/admin/records">销售订单<i class="bi bi-chevron-right" aria-hidden="true"></i></a>
+    </div>
+    <div class="pos-figures">
+      <div class="pos-figure"><span>实收金额</span><strong>{{.POS.ReceivedText}}</strong></div>
+      <div class="pos-figure"><span>有收款订单数</span><strong>{{.POS.Orders}}</strong></div>
+      <div class="pos-figure"><span>支付笔数</span><strong>{{.POS.Payments}}</strong></div>
+      <div class="pos-figure"><span>客单价</span><strong>{{.POS.AverageText}}</strong></div>
+    </div>
+    {{if .POS.Orders}}
+    <div class="pos-chart"><canvas id="posHoursChart" role="img" aria-label="POS 分时段实收与支付笔数图，数据表见下方">POS 分时段数据见下方表格。</canvas></div>
+    <details class="overview-data">
+      <summary>查看分时段数据表</summary>
+      <table>
+        <thead><tr><th scope="col">时段</th><th class="num" scope="col">实收</th><th class="num" scope="col">支付笔数</th></tr></thead>
+        <tbody>{{range .POS.Hours}}<tr><td>{{.Label}}</td><td class="num">{{.ReceivedText}}</td><td class="num">{{.Payments}}</td></tr>{{end}}</tbody>
+      </table>
+    </details>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-clock-history" aria-hidden="true"></i><p>所选时间内还没有 POS 收款</p></div>
+    {{end}}
+  </section>
+</div>
+{{end}}
+
+<div class="dashboard-bottom">
+  {{if not .Err}}
+  <section class="card overview-top" aria-labelledby="top-title">
+    <div class="panel-heading"><h2 id="top-title">商品榜</h2><span class="panel-period">{{template "periodLabel" .}}</span></div>
+    {{if .Sales.Top}}
+    <div class="rank-list">
+    {{range .Sales.Top}}
+      <div class="rank-row">
+        <span class="rank-number" aria-hidden="true"></span>
+        <div class="rank-info"><strong>{{.Name}}</strong><small>营业额 {{.RevenueText}} · 毛利 {{.ProfitText}}</small></div>
+        <span class="rank-quantity">{{.Qty}} <small>{{.Unit}}</small></span>
+      </div>
+    {{end}}
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-bar-chart" aria-hidden="true"></i><p>所选时间内还没有售出商品</p></div>
+    {{end}}
+  </section>
+  {{end}}
+
+  <section class="card" aria-labelledby="inventory-title">
+    <div class="panel-heading"><h2 id="inventory-title">库存状态</h2><span class="panel-period">当前快照</span></div>
+    <div class="inventory-counts">
+      <div>库存偏低<strong>{{.Overview.LowCount}}</strong></div>
+      <div>已售罄<strong>{{.Overview.OutCount}}</strong></div>
+      <div>未开桶<strong>{{.Overview.Untapped}}</strong></div>
+    </div>
+    {{if or .Overview.LowCount .Overview.OutCount}}
+    <div class="alert alert-warning">{{.Overview.LowCount}} 种商品库存偏低{{if .Overview.OutCount}}，{{.Overview.OutCount}} 种已售罄{{end}}，记得补货。</div>
+    {{else}}
+    <div class="alert alert-success">零售库存都够卖。</div>
+    {{end}}
+    {{if .Overview.Untapped}}<div class="alert alert-info">{{.Overview.Untapped}} 桶精酿在库未上架，填个号位就能上屏。</div>{{end}}
+    <div class="stat-meta">在售 {{.Overview.ActiveKegs}} 桶 · 在架 {{.Overview.RetailCount}} 件 · 库存成本 <strong>{{.Overview.StockText}}</strong></div>
+    <p class="mt-2 mb-0"><a class="subtle-link" href="/admin/retail">管理库存<i class="bi bi-arrow-right" aria-hidden="true"></i></a></p>
+  </section>
+
+  <section class="card" aria-labelledby="lowstock-title">
+    <div class="panel-heading"><h2 id="lowstock-title">零售库存告警</h2><span class="panel-period">≤ 3 件 · 当前快照</span></div>
+    {{if .Overview.LowStock}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead class="table-light"><tr><th scope="col">商品</th><th class="num" scope="col">库存</th><th class="num" scope="col">售价</th></tr></thead>
+        <tbody>
+        {{range .Overview.LowStock}}
+          <tr>
+            <td><a href="/admin/retail/{{.ID}}/edit">{{.Name}}</a>{{if .Spec}}<div class="text-muted"><small>{{.Spec}}</small></div>{{end}}</td>
+            <td class="num">{{if eq .Stock 0}}<span class="badge bg-danger">售罄</span>{{else}}<span class="badge bg-warning">剩 {{.Stock}}</span>{{end}}</td>
+            <td class="num">{{.Price}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-check2-circle" aria-hidden="true"></i><p>库存都够卖</p></div>
+    {{end}}
+  </section>
+</div>
+
+{{$cfg := .PricingCfg}}
+<section class="card keg-panel" aria-labelledby="kegs-title">
+  <div class="panel-heading">
+    <div>
+      <h2 id="kegs-title">在售的酒桶</h2>
+      <p>当前快照 · 含 {{$cfg.SellablePct}}% 出酒回本进度，不随时间筛选变化</p>
+    </div>
+    <a class="subtle-link" href="/admin/kegs">全部与结桶复盘<i class="bi bi-chevron-right" aria-hidden="true"></i></a>
+  </div>
+  {{if .Kegs}}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead class="table-light"><tr>
+        <th scope="col">酒款</th><th scope="col">状态</th><th scope="col">盈利判定</th><th scope="col">开桶时间</th><th class="num" scope="col">已售</th><th class="num" scope="col">剩余</th><th class="num" scope="col">走量</th><th class="num" scope="col">营收</th><th class="num" scope="col">盈亏</th>
+      </tr></thead>
+      <tbody>
+      {{range .Kegs}}
+        {{$e := .EconomicsWithConfig nil $cfg}}
+        <tr>
+          <td><a href="/admin/kegs/{{.ID}}">{{.Title}}</a></td>
+          <td><span class="badge {{.Badge}}">{{.Status}}</span></td>
+          <td><span class="verdict-pill {{$e.VerdictPillClass}}">{{$e.VerdictLabel}}</span></td>
+          <td class="text-muted">{{.TappedText}}</td>
+          <td class="num">{{.SoldCups}} 杯 / {{.SoldML}}ml</td>
+          <td class="num">{{.RemainingML}}ml</td>
+          <td class="num">
+            <span class="keg-meter" title="已售 {{.SoldPct}}%">
+              <span class="keg-meter-track"><span class="keg-meter-fill{{if ge .SoldPct 90}} is-low{{else if ge .SoldPct 70}} is-high{{end}}" style="width:{{.SoldPct}}%"></span></span>
+              <span class="keg-meter-label">{{.SoldPct}}%</span>
+            </span>
+          </td>
+          <td class="num">{{.Revenue}}</td>
+          <td class="num {{if .Profitable}}text-success{{else}}text-danger{{end}}"><strong>{{.Profit}}</strong></td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state"><i class="bi bi-cup-straw" aria-hidden="true"></i><p>还没有在售的酒桶</p><a class="button button--secondary" href="/admin/beers">去上架一桶</a></div>
+  {{end}}
+</section>
+
+<section class="card overview-notes" aria-labelledby="notes-title">
+  <h2 id="notes-title"><i class="bi bi-info-circle" aria-hidden="true"></i>统计口径说明</h2>
+  <ul>
+    <li>销售分析按销售流水统计，营业额含 POS 已结账销售与手工补录，不再叠加 POS 收款。</li>
+    <li>POS 实收按支付流水统计，同一张订单在区间内拆分付款只算一张，未付款不计。</li>
+    <li>毛利＝营业额 − 商品成本，<strong>不是净利润</strong>（未扣人工、房租、水电、损耗）。</li>
+    <li>库存与在售酒桶为当前快照，不随上方时间筛选变化。</li>
+    <li>明细见<a href="/admin/records">销售订单记录</a>与<a href="/admin/records/operations">营运流水</a>。</li>
+  </ul>
+</section>
+
+{{if not .Err}}
+{{if or .Sales.Top .Sales.Current.Revenue .Sales.Current.Cost}}<script type="application/json" id="sales-trend-data">{{.Sales.TrendJSON}}</script>{{end}}
+{{if .POS.Orders}}<script type="application/json" id="pos-hours-data">{{.POS.HoursJSON}}</script>{{end}}
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/vendor/chart.umd.js"></script>
+<script>
+(() => {
+  if (!window.Chart) return;
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const charts = [];
+  const CSSVAR = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const palette = () => ({
+    muted: CSSVAR('--muted'),
+    separator: CSSVAR('--separator'),
+    accent: CSSVAR('--accent'),
+    success: CSSVAR('--success-color') || '#0f9d76',
+    surface: CSSVAR('--overlay') || '#ffffff',
+    fg: CSSVAR('--foreground') || '#101c2e',
+  });
+  const areaGrad = (ctx, hex, alphaTop) => {
+    const g = ctx.createLinearGradient(0, 0, 0, ctx.canvas.clientHeight || 220);
+    g.addColorStop(0, hex + alphaTop);
+    g.addColorStop(1, hex + '00');
+    return g;
+  };
+  const read = id => {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    try { return JSON.parse(el.textContent); } catch (e) { return null; }
+  };
+  const money = v => '¥' + Number(v || 0).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const common = p => ({
+    responsive: true, maintainAspectRatio: false,
+    animation: reduced ? false : {duration: 420},
+    color: p.muted,
+    interaction: {mode: 'index', intersect: false},
+    plugins: {
+      legend: {position: 'bottom', labels: {boxWidth: 8, boxHeight: 8, usePointStyle: true, padding: 14, color: p.muted, font: {size: 11}}},
+      tooltip: {
+        backgroundColor: p.surface,
+        titleColor: p.fg,
+        bodyColor: p.muted,
+        borderColor: p.separator,
+        borderWidth: 1,
+        displayColors: true,
+        boxPadding: 4,
+        padding: 10,
+        cornerRadius: 10,
+        callbacks: {label: c => ` ${c.dataset.label}：${c.dataset.yAxisID === 'y1' ? c.parsed.y + ' 笔' : money(c.parsed.y)}`},
+      },
+    },
+  });
+  const xAxis = p => ({grid: {display: false}, border: {display: false}, ticks: {color: p.muted, font: {size: 10}, maxRotation: 0, autoSkipPadding: 12}});
+  const yAxis = (p, fmt) => ({beginAtZero: true, border: {display: false}, grid: {color: p.separator}, ticks: {color: p.muted, font: {size: 10}, maxTicksLimit: 5, callback: fmt}});
+
+  const trend = read('sales-trend-data');
+  const trendCanvas = document.getElementById('salesChart');
+  if (trend && trend.length && trendCanvas) {
+    const p = palette();
+    const ctx = trendCanvas.getContext('2d');
+    charts.push({kind: 'trend', keys: ['accent', 'success'], chart: new Chart(trendCanvas, {
+      type: 'line',
+      data: {
+        labels: trend.map(r => r.date),
+        datasets: [
+          {label: '营业额', data: trend.map(r => r.revenue), borderColor: p.accent, backgroundColor: areaGrad(ctx, p.accent, '24'), fill: true, pointBackgroundColor: p.accent, borderWidth: 2.2, tension: .34, pointRadius: 2.5, pointHoverRadius: 5},
+          {label: '毛利', data: trend.map(r => r.profit), borderColor: p.success, backgroundColor: areaGrad(ctx, p.success, '16'), fill: true, pointBackgroundColor: p.success, borderWidth: 2, borderDash: [5, 3], tension: .34, pointRadius: 2, pointHoverRadius: 4},
+        ],
+      },
+      options: {...common(p), scales: {x: xAxis(p), y: yAxis(p, v => '¥' + v)}},
+    })});
+  }
+
+  const hours = read('pos-hours-data');
+  const hoursCanvas = document.getElementById('posHoursChart');
+  if (hours && hours.length && hoursCanvas) {
+    const p = palette();
+    charts.push({kind: 'hours', keys: ['accent', 'muted'], chart: new Chart(hoursCanvas, {
+      type: 'bar',
+      data: {
+        labels: hours.map(h => h.hour),
+        datasets: [
+          {label: '实收', data: hours.map(h => h.received), backgroundColor: p.accent, borderRadius: 5, maxBarThickness: 16},
+          {label: '支付笔数', data: hours.map(h => h.payments), type: 'line', yAxisID: 'y1', borderColor: p.muted, pointBackgroundColor: p.muted, borderWidth: 1.5, tension: .3, pointRadius: 2, pointHoverRadius: 4},
+        ],
+      },
+      options: {...common(p), scales: {
+        x: xAxis(p),
+        y: yAxis(p, v => '¥' + v),
+        y1: {position: 'right', beginAtZero: true, border: {display: false}, grid: {drawOnChartArea: false}, ticks: {color: p.muted, font: {size: 10}, maxTicksLimit: 4, precision: 0}},
+      }},
+    })});
+  }
+
+  Chart.defaults.color = palette().muted;
+  Chart.defaults.borderColor = palette().separator;
+  document.addEventListener('pourops:theme-change', () => {
+    const p = palette();
+    Chart.defaults.color = p.muted;
+    Chart.defaults.borderColor = p.separator;
+    for (const {kind, chart, keys} of charts) {
+      chart.options.color = p.muted;
+      if (chart.options.plugins?.legend) chart.options.plugins.legend.labels.color = p.muted;
+      if (chart.options.plugins?.tooltip) {
+        chart.options.plugins.tooltip.backgroundColor = p.surface;
+        chart.options.plugins.tooltip.titleColor = p.fg;
+        chart.options.plugins.tooltip.bodyColor = p.muted;
+        chart.options.plugins.tooltip.borderColor = p.separator;
+      }
+      for (const scale of Object.values(chart.options.scales || {})) {
+        if (scale.ticks) scale.ticks.color = p.muted;
+        if (scale.grid) scale.grid.color = p.separator;
+      }
+      chart.data.datasets.forEach((ds, i) => {
+        const color = p[keys[i]];
+        if (!color) return;
+        ds.borderColor = color;
+        if (ds.pointBackgroundColor) ds.pointBackgroundColor = color;
+        if (kind === 'trend') ds.backgroundColor = areaGrad(chart.ctx, color, i === 0 ? '24' : '16');
+        else if (ds.backgroundColor) ds.backgroundColor = color;
+      });
+      chart.update('none');
+    }
+  });
+})();
+</script>
+{{end}}

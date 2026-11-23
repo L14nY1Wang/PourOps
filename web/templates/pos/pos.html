@@ -1,0 +1,747 @@
+{{define "pos"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f2f5fa">
+<title>点餐 - {{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</title>
+<link rel="icon" href="{{asset "/static/brand/pourops.svg"}}" type="image/svg+xml">
+<style>
+  :root{
+    --ink:#0f1c2e; --ink-2:#475871; --ink-3:#7a8aa2;
+    --bg:#f2f5fa; --card:#ffffff; --inset:#f7f9fd;
+    --line:#dce4f0; --line-soft:#e9eff7;
+    --cobalt:#2251d8; --cobalt-ink:#16389c; --cobalt-soft:#eaf0ff;
+    --foam:#0b8a68; --foam-soft:#e2f6ef;
+    --amber:#a86a0c; --amber-soft:#fef4e2;
+    --danger:#b42937; --danger-soft:#fdecef;
+    --r-sm:10px; --r:13px; --r-lg:16px;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --shadow:0 1px 2px rgba(15,28,46,.04),0 8px 22px -12px rgba(15,28,46,.14);
+    --shadow-hover:0 3px 8px rgba(15,28,46,.06),0 14px 28px -12px rgba(34,81,216,.22);
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.5 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit;color:inherit;cursor:pointer;touch-action:manipulation}
+  a{color:inherit;text-decoration:none}
+  h1,h2,h3,h4,p,ul{margin:0}
+  :focus-visible{outline:3px solid var(--cobalt);outline-offset:2px}
+  @media(prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:.75rem;min-height:62px;
+    padding:.55rem clamp(1rem,3vw,1.6rem);
+    background:rgba(255,255,255,.9);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex;align-items:center;gap:.65rem;min-width:0}
+  .mark{
+    display:grid;place-items:center;flex:none;width:36px;height:36px;border-radius:11px;
+    background:linear-gradient(145deg,#1b2e4d,var(--ink));
+    box-shadow:0 4px 12px -4px rgba(15,28,46,.45);
+  }
+  .mark img{width:24px;height:24px;display:block}
+  .brand-name{font-size:.88rem;font-weight:800;letter-spacing:.15em;white-space:nowrap}
+  .brand-tag{
+    font-size:.7rem;font-weight:700;color:var(--cobalt-ink);background:var(--cobalt-soft);
+    border:1px solid rgba(34,81,216,.16);border-radius:999px;padding:.16rem .55rem;white-space:nowrap;
+  }
+  .topbar-side{margin-left:auto;display:flex;align-items:center;gap:.5rem;min-width:0}
+  .who{
+    display:flex;align-items:center;gap:.5rem;padding:.25rem .65rem .25rem .35rem;
+    border:1px solid var(--line-soft);border-radius:999px;background:var(--inset);min-width:0;
+  }
+  .who-avatar{
+    display:grid;place-items:center;width:24px;height:24px;border-radius:50%;
+    background:var(--cobalt);color:#fff;font-size:.72rem;font-weight:750;text-transform:uppercase;flex:none;
+  }
+  .who-txt{display:flex;flex-direction:column;line-height:1.18;min-width:0}
+  .who b{max-width:7.5rem;font-size:.74rem;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .who i{font-style:normal;font-size:.64rem;color:var(--ink-3);white-space:nowrap}
+
+  /* ---------- 按钮 ---------- */
+  .btn{
+    display:inline-flex;align-items:center;justify-content:center;gap:.35rem;min-height:40px;padding:.45rem .9rem;
+    border:1px solid transparent;border-radius:var(--r-sm);background:var(--line-soft);color:var(--ink);
+    font-size:.84rem;font-weight:650;transition:background .15s,border-color .15s,color .15s,transform .12s,box-shadow .15s;
+  }
+  .btn:hover{background:#e1e9f5}
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{
+    background:linear-gradient(180deg,#2c5ee8,var(--cobalt));color:#fff;
+    box-shadow:0 1px 2px rgba(15,28,46,.12),0 10px 22px -8px rgba(34,81,216,.55);
+  }
+  .btn.primary:hover{background:linear-gradient(180deg,#2251d8,var(--cobalt-ink))}
+  .btn.primary:disabled{background:#dce3ee;color:#8493a8;box-shadow:none;cursor:not-allowed;transform:none}
+  .btn.ghost{background:var(--card);border-color:var(--line);color:var(--ink-2)}
+  .btn.ghost:hover{background:var(--inset);border-color:#c6d3e6;color:var(--ink)}
+  .btn.small{min-height:34px;padding:.26rem .72rem;font-size:.78rem}
+  .btn.block{width:100%}
+  .mini{
+    min-height:30px;padding:.18rem .62rem;border:1px solid var(--line);border-radius:999px;background:var(--card);
+    color:var(--ink-2);font-size:.73rem;font-weight:650;transition:background .14s,border-color .14s,color .14s;
+  }
+  .mini:hover{background:var(--cobalt-soft);border-color:#bfd0f5;color:var(--cobalt-ink)}
+  .back{
+    display:inline-flex;align-items:center;gap:.35rem;min-height:32px;padding:.2rem .75rem .2rem .55rem;
+    border:1px solid var(--line);border-radius:999px;background:var(--inset);color:var(--ink-2);
+    font-size:.76rem;font-weight:650;transition:background .14s,color .14s,border-color .14s;
+  }
+  .back:hover{background:var(--cobalt-soft);border-color:#bfd0f5;color:var(--cobalt-ink)}
+
+  .alert{
+    display:block;margin:0 0 .9rem;padding:.7rem .85rem;border:1px solid #f2c4cb;border-radius:var(--r-sm);
+    background:var(--danger-soft);color:var(--danger);font-size:.82rem;font-weight:600;
+  }
+  .alert.ok{border-color:#b7e5d4;background:var(--foam-soft);color:var(--foam)}
+
+  /* ---------- 骨架 ---------- */
+  .pos{display:grid;grid-template-columns:25rem minmax(0,1fr);align-items:start}
+  .side{
+    position:sticky;top:62px;display:flex;flex-direction:column;max-height:calc(100dvh - 62px);
+    background:var(--card);border-right:1px solid var(--line);
+    box-shadow:4px 0 24px -18px rgba(15,28,46,.12);
+  }
+  .side-head{
+    padding:1rem 1.2rem .9rem;border-bottom:1px solid var(--line-soft);
+    background:linear-gradient(180deg,var(--inset),var(--card));
+  }
+  .side-head-row{display:flex;align-items:center;justify-content:space-between;gap:.6rem;margin-top:.55rem}
+  .side-head h1{margin:.2rem 0 0;font-size:1.22rem;font-weight:800;letter-spacing:-.025em}
+  .side-body{flex:1;min-height:0;overflow:auto;padding:1rem 1.2rem 1.2rem;scrollbar-gutter:stable}
+  .eyebrow{margin:0 0 .18rem;font-size:.66rem;font-weight:750;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+  .side-note{margin:.3rem 0 0;font-size:.78rem;color:var(--ink-2)}
+
+  /* ---------- 台位 ---------- */
+  .spot-group + .spot-group{margin-top:1.45rem}
+  .group-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.7rem}
+  .group-head h2{display:flex;align-items:center;gap:.45rem;font-size:.9rem;font-weight:750}
+  .group-head h2::before{content:"";width:4px;height:14px;border-radius:2px;background:var(--cobalt)}
+  .spots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.65rem}
+  .spot-form{display:contents}
+  .spot{
+    position:relative;display:flex;flex-direction:column;justify-content:space-between;gap:.5rem;width:100%;min-height:94px;
+    padding:.82rem .88rem;text-align:left;background:var(--inset);border:1px solid var(--line);border-radius:var(--r);
+    color:var(--ink);overflow:hidden;transition:border-color .15s,background .15s,transform .12s,box-shadow .15s;
+  }
+  .spot:hover{border-color:var(--cobalt);background:var(--cobalt-soft);box-shadow:0 6px 16px -10px rgba(34,81,216,.35)}
+  .spot:active{transform:translateY(1px)}
+  .spot.is-busy{
+    background:linear-gradient(155deg,#f2f6ff,#e7effe);
+    border-color:#b2c7f7;box-shadow:0 6px 18px -12px rgba(34,81,216,.35);
+  }
+  .spot.is-busy::before{
+    content:"";position:absolute;left:0;top:10px;bottom:10px;width:3.5px;border-radius:0 3px 3px 0;background:var(--cobalt);
+  }
+  .spot-top{display:flex;align-items:center;justify-content:space-between;gap:.35rem}
+  .spot-name{font-size:1rem;font-weight:750;letter-spacing:-.01em}
+  .spot-meta{font-family:var(--mono);font-size:.76rem;color:var(--ink-2);font-variant-numeric:tabular-nums}
+  .spot.is-busy .spot-meta{color:var(--cobalt-ink);font-weight:650}
+
+  .pill{
+    display:inline-flex;align-items:center;gap:.28rem;padding:.16rem .5rem;border-radius:999px;
+    background:var(--line-soft);color:var(--ink-2);font-size:.67rem;font-weight:700;white-space:nowrap;
+  }
+  .pill::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+  .pill-live{background:var(--cobalt-soft);color:var(--cobalt-ink)}
+  .pill-paid{background:var(--foam-soft);color:var(--foam)}
+  .pill-muted{background:#ebf0f6;color:var(--ink-3)}
+  .pill-muted::before{display:none}
+
+  /* ---------- 账单 ---------- */
+  .basket-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin:.1rem 0 .75rem}
+  .basket-head h2{display:flex;align-items:center;gap:.45rem;font-size:.94rem;font-weight:750}
+  .basket-head h2::before{content:"";width:4px;height:14px;border-radius:2px;background:var(--cobalt)}
+  .pick{display:flex;gap:.32rem}
+  .group{
+    margin-bottom:.65rem;padding:.7rem .78rem;
+    border:1px solid var(--line-soft);border-radius:var(--r);background:var(--inset);
+  }
+  .group-line{
+    display:flex;align-items:baseline;justify-content:space-between;gap:.5rem;
+    padding-bottom:.4rem;margin-bottom:.32rem;border-bottom:1px dashed var(--line);
+    font-size:.84rem;font-weight:700;color:var(--ink);
+  }
+  .group-line .g-amount{font-family:var(--mono);color:var(--cobalt-ink);font-variant-numeric:tabular-nums}
+  .line{
+    display:grid;grid-template-columns:24px minmax(0,1fr) auto auto;grid-template-areas:"c d a s";
+    align-items:center;gap:.48rem;padding:.26rem 0;transition:opacity .15s;
+  }
+  .line.is-unchecked{opacity:.44}
+  .line.is-unchecked .line-amount{text-decoration:line-through}
+  .line-check{grid-area:c;width:20px;height:20px;accent-color:var(--cobalt);cursor:pointer;margin:0}
+  .line-detail{grid-area:d;font-size:.79rem;color:var(--ink-2);overflow-wrap:anywhere}
+  .line-amount{grid-area:a;font-family:var(--mono);font-size:.84rem;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .stepper{
+    grid-area:s;display:inline-flex;align-items:center;overflow:hidden;
+    border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);
+  }
+  .step{
+    min-width:34px;min-height:34px;border:0;background:none;color:var(--cobalt);
+    font-size:1.05rem;font-weight:700;line-height:1;transition:background .12s;
+  }
+  .step:hover{background:var(--cobalt-soft)}
+  .step:active{background:#d4e1fc}
+  .step-qty{min-width:2rem;text-align:center;font-family:var(--mono);font-size:.78rem;font-weight:650;color:var(--ink)}
+
+  .state{
+    margin:.2rem 0 1rem;padding:1.3rem 1rem;border:1px dashed var(--line);border-radius:var(--r);
+    background:var(--inset);text-align:center;
+  }
+  .state-title{display:block;margin:0 0 .25rem;font-size:.92rem;font-weight:750}
+  .state-note{margin:0;font-size:.8rem;line-height:1.6;color:var(--ink-2)}
+
+  .paid{margin-top:.9rem;border:1px solid var(--line);border-radius:var(--r);background:var(--inset)}
+  .paid summary{
+    display:flex;align-items:center;gap:.45rem;padding:.65rem .85rem;font-size:.79rem;font-weight:650;
+    color:var(--ink-2);cursor:pointer;list-style:none;
+  }
+  .paid summary::-webkit-details-marker{display:none}
+  .paid summary::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:var(--foam)}
+  .paid summary::after{content:"展开";margin-left:auto;font-size:.7rem;font-weight:650;color:var(--cobalt-ink)}
+  .paid[open] summary::after{content:"收起"}
+  .paid ul{list-style:none;margin:0;padding:0 .85rem .7rem}
+  .paid li{
+    display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:.45rem;align-items:baseline;
+    padding:.32rem 0;border-top:1px dashed var(--line);font-size:.76rem;color:var(--ink-2);
+  }
+  .paid li .p-name{overflow-wrap:anywhere}
+  .paid li .p-amount{font-family:var(--mono);color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+  .paid-note{margin:.2rem 0 0;padding:0 .85rem .7rem;font-size:.72rem;color:var(--ink-3)}
+
+  .dock{
+    position:sticky;bottom:0;margin:.95rem -.2rem 0;padding:.9rem .2rem .2rem;
+    border-top:1px solid var(--line);background:var(--card);
+  }
+  .dock-sum{display:flex;align-items:baseline;flex-wrap:wrap;gap:.35rem .55rem;margin-bottom:.7rem}
+  .dock-label{font-size:.78rem;color:var(--ink-2)}
+  .dock-label b{font-family:var(--mono);color:var(--ink)}
+  .dock-sum strong{
+    font-family:var(--mono);font-size:1.6rem;font-weight:800;letter-spacing:-.035em;
+    font-variant-numeric:tabular-nums;color:var(--ink);
+  }
+  .dock-note{margin-left:auto;font-size:.71rem;color:var(--ink-3)}
+  .btn.pay{width:100%;min-height:52px;border-radius:var(--r);font-size:.98rem;letter-spacing:.02em}
+
+  /* ---------- 目录 ---------- */
+  .catalog{
+    min-width:0;min-height:calc(100dvh - 62px);
+    background:radial-gradient(900px 420px at 96% -8%,rgba(34,81,216,.07),transparent 62%),var(--bg);
+  }
+  .catalog-head{
+    display:flex;align-items:flex-end;justify-content:space-between;gap:.9rem 1.2rem;flex-wrap:wrap;
+    padding:1.2rem clamp(1rem,3vw,2rem) 1rem;border-bottom:1px solid var(--line);
+    background:rgba(255,255,255,.6);
+  }
+  .catalog-head h2{font-size:1.35rem;font-weight:800;letter-spacing:-.03em}
+  .catalog-tools{display:flex;align-items:center;gap:.6rem;flex-wrap:wrap}
+  .seg{
+    display:inline-flex;gap:2px;padding:3px;border:1px solid var(--line);border-radius:10px;background:var(--inset);
+  }
+  .seg button{
+    padding:.3rem .72rem;border:0;border-radius:7px;background:transparent;color:var(--ink-2);
+    font-size:.76rem;font-weight:650;transition:background .14s,color .14s,box-shadow .14s;
+  }
+  .seg button:hover{color:var(--ink)}
+  .seg button.active{background:var(--card);color:var(--cobalt);box-shadow:0 1px 3px rgba(15,28,46,.12)}
+  .filter-input{
+    width:11.5rem;min-height:34px;padding:.3rem .7rem;border:1px solid var(--line);border-radius:10px;
+    background:var(--card);color:var(--ink);font-size:.78rem;outline:none;transition:border-color .15s,box-shadow .15s;
+  }
+  .filter-input:focus{border-color:var(--cobalt);box-shadow:0 0 0 3px rgba(34,81,216,.14)}
+  .filter-input::placeholder{color:var(--ink-3)}
+  .hint{
+    margin:0;max-width:100%;padding:.34rem .78rem;border:1px solid #c4d5f7;border-radius:999px;
+    background:var(--cobalt-soft);color:var(--cobalt-ink);font-size:.75rem;font-weight:650;line-height:1.45;
+  }
+  .hint.is-off{border-color:var(--line);background:#ebf0f6;color:var(--ink-2)}
+
+  .catalog-body{padding:1.25rem clamp(1rem,3vw,2rem) 3rem}
+  .cat + .cat{margin-top:2rem}
+  .cat[hidden]{display:none}
+  .cat-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:.35rem .65rem;margin-bottom:.9rem}
+  .cat-head h3{display:flex;align-items:center;gap:.5rem;font-size:.96rem;font-weight:800}
+  .cat-head h3::before{content:"";width:4px;height:15px;border-radius:2px;background:var(--cobalt)}
+  .cat-head--retail h3::before{background:var(--foam)}
+  .cat-note{font-size:.75rem;color:var(--ink-3)}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(13rem,1fr));gap:.85rem}
+  .tiles .state{grid-column:1/-1;margin:0;max-width:28rem;text-align:left}
+  .side-cta{margin-top:1rem}
+  .paid-title{margin:0;padding:.65rem .85rem 0;font-size:.88rem;font-weight:700}
+  .rows{list-style:none;margin:0;padding:0}
+  .form-reset{margin:0}
+
+  .tile-form{display:contents}
+  .tile-form[hidden]{display:none}
+  .tile{
+    position:relative;display:flex;flex-direction:column;gap:.34rem;min-width:0;min-height:10.8rem;
+    padding:1rem;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);
+    box-shadow:var(--shadow);overflow:hidden;
+    transition:border-color .16s,box-shadow .16s,transform .14s;
+  }
+  .tile::before{
+    content:"";position:absolute;left:0;right:0;top:0;height:3px;
+    background:linear-gradient(90deg,var(--cobalt),rgba(34,81,216,.18) 65%,transparent);
+  }
+  .tile:not(.tile--off):hover{border-color:#b4c7f5;box-shadow:var(--shadow-hover)}
+  .tile-no{
+    display:inline-flex;align-self:flex-start;padding:.12rem .44rem;border-radius:6px;
+    background:var(--cobalt-soft);color:var(--cobalt-ink);
+    font-family:var(--mono);font-size:.68rem;font-weight:750;letter-spacing:.06em;
+  }
+  .tile-name{
+    font-size:.98rem;font-weight:750;line-height:1.35;letter-spacing:-.01em;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+  .tile-meta{font-size:.75rem;color:var(--ink-2);overflow-wrap:anywhere}
+  .tile-meta b{font-family:var(--mono);font-weight:700}
+  .tile-meta .low-stock{color:var(--amber);background:var(--amber-soft);padding:.05rem .35rem;border-radius:5px;font-weight:700}
+  .cups{display:flex;flex-wrap:wrap;gap:.42rem;margin-top:auto;padding-top:.6rem}
+  .cup{
+    flex:1 1 3.1rem;display:flex;flex-direction:column;align-items:center;gap:.1rem;min-height:52px;padding:.42rem .25rem;
+    background:var(--cobalt-soft);border:1px solid #cad8f8;border-radius:var(--r-sm);color:var(--cobalt-ink);
+    transition:background .14s,border-color .14s,transform .1s,box-shadow .14s;
+  }
+  .cup:hover:not(:disabled){background:#dbe6fe;border-color:var(--cobalt);box-shadow:0 4px 10px -6px rgba(34,81,216,.45)}
+  .cup:active:not(:disabled){transform:scale(.97);background:#ceddfd}
+  .cup:disabled{background:#f2f5f9;border-color:var(--line);color:#93a1b5;cursor:not-allowed}
+  .cup-ml{font-family:var(--mono);font-size:.72rem;font-weight:650;font-variant-numeric:tabular-nums}
+  .cup-ml i{font-style:normal;font-weight:500;opacity:.7;margin-left:1px}
+  .cup-price{font-family:var(--mono);font-size:.85rem;font-weight:800;font-variant-numeric:tabular-nums}
+
+  .tile--off{background:#f8fafd;box-shadow:none}
+  .tile--off::before{background:#cfd9e8}
+  .tile--off .tile-no{background:#edf1f7;color:var(--ink-3)}
+  .tile--off .tile-name,.tile--off .tile-meta{color:#8593a7}
+  .tile-off{font-size:.78rem;color:var(--ink-3);padding:.85rem 0}
+
+  .tile-retail{width:100%;cursor:pointer}
+  .tile-retail::before{background:linear-gradient(90deg,var(--foam),rgba(11,138,104,.18) 65%,transparent)}
+  .tile-retail .tile-no{background:var(--foam-soft);color:var(--foam)}
+  .tile-retail:hover:not(:disabled){transform:translateY(-2px);border-color:var(--foam);box-shadow:0 4px 10px rgba(15,28,46,.05),0 14px 26px -12px rgba(11,138,104,.28)}
+  .tile-retail:active:not(:disabled){transform:translateY(0)}
+  .tile-retail:disabled{background:#f8fafd;box-shadow:none;cursor:not-allowed}
+  .tile-retail:disabled::before{background:#cfd9e8}
+  .tile-retail:disabled .tile-no{background:#edf1f7;color:var(--ink-3)}
+  .tile-price{
+    margin-top:auto;padding-top:.55rem;padding-right:2.1rem;
+    font-family:var(--mono);font-size:1.15rem;font-weight:800;letter-spacing:-.02em;font-variant-numeric:tabular-nums;
+  }
+  .tile-plus{
+    position:absolute;right:.75rem;bottom:.75rem;display:grid;place-items:center;width:28px;height:28px;
+    border-radius:9px;background:var(--foam-soft);color:var(--foam);font-size:1.05rem;font-weight:700;line-height:1;
+    transition:background .14s,color .14s;
+  }
+  .tile-retail:hover:not(:disabled) .tile-plus{background:var(--foam);color:#fff}
+  .tile-retail:disabled .tile-plus{background:#eef2f7;color:#93a1b5}
+
+  /* ---------- 手机快速跳转 ---------- */
+  .jump{display:none}
+  .jump a{
+    display:inline-flex;align-items:center;min-height:34px;padding:.2rem .75rem;border:1px solid var(--line);
+    border-radius:999px;background:#fff;color:var(--ink-2);font-size:.76rem;font-weight:650;white-space:nowrap;
+  }
+  .jump a:hover{border-color:#c9d7f4;background:var(--cobalt-soft);color:var(--cobalt-ink)}
+  #spots,#bill,#menu{scroll-margin-top:130px}
+
+  @media(prefers-reduced-motion:reduce){
+    *{transition:none!important;scroll-behavior:auto!important}
+  }
+
+  @media(max-width:1080px){
+    .pos{grid-template-columns:22rem minmax(0,1fr)}
+    .tiles{grid-template-columns:repeat(auto-fill,minmax(11.5rem,1fr))}
+  }
+
+  @media(max-width:900px){
+    .pos{grid-template-columns:1fr}
+    .side{position:static;max-height:none;border-right:0;border-bottom:1px solid var(--line);box-shadow:none}
+    .side-body{overflow:visible}
+    .side-head{padding:1rem clamp(1rem,4vw,1.3rem) .85rem}
+    .side-body{padding:1rem clamp(1rem,4vw,1.3rem) 1.2rem}
+    .jump{
+      display:flex;gap:.4rem;position:sticky;top:62px;z-index:15;overflow-x:auto;
+      padding:.5rem clamp(.9rem,4vw,1.3rem);background:rgba(255,255,255,.94);backdrop-filter:blur(8px);
+      border-bottom:1px solid var(--line);
+    }
+    .catalog-head{padding:1.1rem clamp(1rem,4vw,1.3rem) .9rem;align-items:flex-start}
+    .catalog-body{padding:1rem clamp(1rem,4vw,1.3rem) 3rem}
+    body.with-dock{padding-bottom:calc(8.5rem + env(safe-area-inset-bottom))}
+    .dock{
+      position:fixed;left:0;right:0;bottom:0;z-index:30;margin:0;
+      padding:.75rem clamp(.9rem,4vw,1.3rem) calc(.75rem + env(safe-area-inset-bottom));
+      background:#fff;border-top:1px solid var(--line);box-shadow:0 -10px 28px rgba(15,28,46,.14);
+    }
+    .dock-sum{margin-bottom:.45rem}
+    .dock-sum strong{font-size:1.4rem}
+    .btn.pay{min-height:50px}
+  }
+
+  @media(max-width:560px){
+    .topbar{min-height:56px;gap:.45rem}
+    .jump{top:56px}
+    .brand-tag,.top-spots,.top-safety{display:none}
+    .who{padding:.2rem .45rem .2rem .25rem}
+    .who b{max-width:5.5rem}
+    .who i{display:none}
+    .filter-input{width:100%}
+    .catalog-tools{width:100%}
+    .tiles{grid-template-columns:repeat(2,minmax(0,1fr));gap:.65rem}
+    .tile{min-height:0;padding:.82rem}
+    .tile-name{font-size:.9rem}
+    .cup{min-height:48px}
+    #spots,#bill,#menu{scroll-margin-top:118px}
+  }
+
+  @media(max-width:430px){
+    .line{grid-template-columns:24px minmax(0,1fr) auto;grid-template-areas:"c d a" "c s s";row-gap:.35rem}
+    .stepper{justify-self:start}
+    .dock-note{display:none}
+  }
+</style>
+</head>
+<body{{if and .Order (not .Order.Closed) .Order.Unpaid}} class="with-dock"{{end}}>
+{{$canAdd := .PosOrderID}}{{if .Order}}{{if .Order.Closed}}{{$canAdd = 0}}{{end}}{{end}}
+<header class="topbar">
+  <a class="brand" href="/pos/">
+    <span class="mark"><img src="{{asset "/static/brand/pourops-dark.svg"}}" alt=""></span>
+    <span class="brand-name">{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</span>
+    <span class="brand-tag">点餐台</span>
+  </a>
+  <div class="topbar-side">
+    {{if .Order}}<a class="btn ghost small top-spots" href="/pos/">台位</a>{{end}}
+    {{if .Me}}
+      <span class="who">
+        <span class="who-avatar" aria-hidden="true">{{printf "%.1s" .Me.Username}}</span>
+        <span class="who-txt"><b>{{.Me.Username}}</b><i>{{.Me.RoleName}}</i></span>
+      </span>
+      <a class="btn ghost small top-safety" href="/account/security">安全</a>
+    {{end}}
+    <form class="form-reset" action="/admin/logout" method="post">
+      <button class="btn ghost small" type="submit">退出</button>
+    </form>
+  </div>
+</header>
+
+<nav class="jump" aria-label="页内跳转">
+  {{if .Order}}<a href="#bill">账单</a>{{else}}<a href="#spots">台位</a>{{end}}
+  <a href="#menu">菜单</a>
+  {{if .Order}}<a href="/pos/">全部台位</a>{{end}}
+  {{if .Me}}<a href="/account/security">安全</a>{{end}}
+</nav>
+
+<div class="pos">
+  <aside class="side" id="{{if .Order}}bill{{else}}spots{{end}}">
+    {{if .Order}}
+    <div class="side-head">
+      <a class="back" href="/pos/">← 全部台位</a>
+      <div class="side-head-row">
+        <h1>{{.Order.Label}}</h1>
+        {{if .Order.Closed}}<span class="pill pill-paid">已结清</span>
+        {{else if .Order.Paid}}<span class="pill pill-paid">{{len .Order.Paid}} 行已付</span>
+        {{else}}<span class="pill pill-live">在用</span>{{end}}
+      </div>
+    </div>
+
+    <div class="side-body">
+      {{if .Err}}<p class="alert" role="alert">{{.Err}}</p>{{end}}
+      {{if .Msg}}<p class="alert ok" role="status">{{.Msg}}</p>{{end}}
+
+      {{if .Order.Closed}}
+        <div class="state">
+          <p class="state-title">这张单已经结清</p>
+          <p class="state-note">台位已释放，不能再加菜或改量。要继续点单，回台位开新单。</p>
+        </div>
+        {{if .Order.Paid}}
+        <section class="paid">
+          <p class="paid-title">已付 · {{len .Order.Paid}} 行</p>
+          <ul>
+            {{range .Order.Paid}}
+            <li><span class="p-name">{{.Name}}</span><span>{{.Detail}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.AmountText}}</span></li>
+            {{end}}
+          </ul>
+        </section>
+        {{end}}
+        <p class="side-cta"><a class="btn primary block" href="/pos/">回台位开新单</a></p>
+      {{else}}
+        <form method="post" action="/pos/order/{{.Order.ID}}/pay" id="pay-form">
+          <div class="basket-head">
+            <h2>待结账</h2>
+            {{if .Order.Unpaid}}
+            <div class="pick">
+              <button class="mini" type="button" data-pick="all">全选</button>
+              <button class="mini" type="button" data-pick="none">清空</button>
+            </div>
+            {{end}}
+          </div>
+
+          <ul class="rows">
+            {{range .Order.UnpaidGroups}}
+            <li class="group">
+              <div class="group-line"><span class="g-name">{{.Name}}</span><span class="g-amount">{{.TotalText}}</span></div>
+              {{range .Lines}}
+              <div class="line" data-amount="{{.Amount}}">
+                <input class="line-check" type="checkbox" name="items" value="{{.ID}}" checked aria-label="结 {{.Name}} {{.Detail}}">
+                <span class="line-detail">{{.Detail}}</span>
+                <span class="line-amount">{{.AmountText}}</span>
+                <span class="stepper">
+                  <button class="step" type="submit" formaction="/pos/order/{{$.Order.ID}}/item/{{.ID}}/less" aria-label="减一份 {{.Name}} {{.Detail}}">−</button>
+                  <span class="step-qty">{{.QtyText}}</span>
+                  <button class="step" type="submit" formaction="/pos/order/{{$.Order.ID}}/item/{{.ID}}/more" aria-label="加一份 {{.Name}} {{.Detail}}">+</button>
+                </span>
+              </div>
+              {{end}}
+            </li>
+            {{else}}
+            <li class="state">
+              <p class="state-title">篮子还是空的</p>
+              <p class="state-note">在右侧目录点杯型或零售商品，就会加到 {{.Order.Label}}。</p>
+            </li>
+            {{end}}
+          </ul>
+
+          {{if .Order.Paid}}
+          <details class="paid">
+            <summary>已付 {{len .Order.Paid}} 行 · 已锁定，不能改量</summary>
+            <ul>
+              {{range .Order.Paid}}
+              <li><span class="p-name">{{.Name}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.AmountText}}</span></li>
+              {{end}}
+            </ul>
+            <p class="paid-note">这些行已经结过账，不会再计入下面的小计。</p>
+          </details>
+          {{end}}
+
+          {{if .Order.Unpaid}}
+          <div class="dock">
+            <div class="dock-sum" aria-live="polite">
+              <span class="dock-label">已选 <b id="sel-count">0</b> 行</span>
+              <strong id="sel-total">{{.Order.TotalText}}</strong>
+              <span class="dock-note">合计 = 勾选行</span>
+            </div>
+            <button id="pay-btn" class="btn primary pay" type="submit">结账所选</button>
+          </div>
+          {{end}}
+        </form>
+      {{end}}
+    </div>
+    {{else}}
+    <div class="side-head">
+      <p class="eyebrow">台位管理</p>
+      <h1>选台位</h1>
+      <p class="side-note">点空台开新单，点蓝底台位继续点单或拆单结账。</p>
+    </div>
+
+    <div class="side-body">
+      {{if .Err}}<p class="alert" role="alert">{{.Err}}</p>{{end}}
+      {{if .Msg}}<p class="alert ok" role="status">{{.Msg}}</p>{{end}}
+
+      <section class="spot-group">
+        <div class="group-head">
+          <h2>吧台</h2>
+          <form class="form-reset" method="post" action="/pos/bar/add"><button class="mini" type="submit">+ 加位</button></form>
+        </div>
+        <div class="spots">
+          {{range .Spots}}{{if eq .Kind "bar"}}
+          <form class="spot-form" method="post" action="/pos/open">
+            <input type="hidden" name="spot" value="{{.Key}}">
+            <button class="spot{{if .Busy}} is-busy{{end}}" type="submit" aria-label="{{.Label}}，{{if .Busy}}在用，{{.Items}} 件，{{.TotalText}}{{else}}空台，点一下开单{{end}}">
+              <span class="spot-top">
+                <span class="spot-name">{{.Label}}</span>
+                <span class="pill {{if .Busy}}pill-live{{else}}pill-muted{{end}}">{{if .Busy}}在用{{else}}空台{{end}}</span>
+              </span>
+              <span class="spot-meta">{{if .Busy}}{{.Items}} 件 · {{.TotalText}}{{else}}点一下开单{{end}}</span>
+            </button>
+          </form>
+          {{end}}{{end}}
+        </div>
+      </section>
+
+      <section class="spot-group">
+        <div class="group-head">
+          <h2>小桌</h2>
+          <form class="form-reset" method="post" action="/pos/table/add"><button class="mini" type="submit">+ 加位</button></form>
+        </div>
+        <div class="spots">
+          {{range .Spots}}{{if eq .Kind "table"}}
+          <form class="spot-form" method="post" action="/pos/open">
+            <input type="hidden" name="spot" value="{{.Key}}">
+            <button class="spot{{if .Busy}} is-busy{{end}}" type="submit" aria-label="{{.Label}}，{{if .Busy}}在用，{{.Items}} 件，{{.TotalText}}{{else}}空台，点一下开单{{end}}">
+              <span class="spot-top">
+                <span class="spot-name">{{.Label}}</span>
+                <span class="pill {{if .Busy}}pill-live{{else}}pill-muted{{end}}">{{if .Busy}}在用{{else}}空台{{end}}</span>
+              </span>
+              <span class="spot-meta">{{if .Busy}}{{.Items}} 件 · {{.TotalText}}{{else}}点一下开单{{end}}</span>
+            </button>
+          </form>
+          {{end}}{{end}}
+        </div>
+      </section>
+    </div>
+    {{end}}
+  </aside>
+
+  <main class="catalog" id="menu">
+    <div class="catalog-head">
+      <div>
+        <p class="eyebrow">点单目录</p>
+        <h2>酒与零售</h2>
+      </div>
+      <div class="catalog-tools">
+        <div class="seg" role="tablist" aria-label="目录分类">
+          <button type="button" class="active" data-cat-tab="all" role="tab" aria-selected="true">全部</button>
+          <button type="button" data-cat-tab="beer" role="tab" aria-selected="false">桶装</button>
+          <button type="button" data-cat-tab="retail" role="tab" aria-selected="false">零售</button>
+        </div>
+        <input class="filter-input" id="menu-filter" type="search" placeholder="快搜酒名 / 风格 / 商品…" aria-label="筛选菜单">
+        <p class="hint{{if not $canAdd}} is-off{{end}}">
+          {{if .Order}}{{if .Order.Closed}}这张单已结清，不能再加{{else}}点一下加到 {{.Order.Label}}{{end}}{{else}}先选台位，再点菜{{end}}
+        </p>
+      </div>
+    </div>
+
+    <div class="catalog-body">
+      <section class="cat" data-cat="beer">
+        <div class="cat-head">
+          <h3>桶装 · 按杯</h3>
+          <span class="cat-note">点杯型直接落单，价格就是这一杯</span>
+        </div>
+        <div class="tiles">
+          {{range .PosBeers}}
+          <form class="tile-form" data-search="{{.No}} {{.Label}} {{.Style}}" method="post" action="/pos/order/{{$.PosOrderID}}/add">
+            <input type="hidden" name="kind" value="beer">
+            <input type="hidden" name="ref" value="{{.KegID}}">
+            <article class="tile{{if or (not $canAdd) (not .Sold)}} tile--off{{end}}">
+              <span class="tile-no">No.{{.No}}</span>
+              <h4 class="tile-name">{{.Label}}</h4>
+              <p class="tile-meta">{{.Style}}{{if not .Sold}} · 未在售{{end}}</p>
+              <div class="cups">
+                {{if .Sold}}
+                  {{range .Cups}}
+                  <button class="cup" type="submit" name="ml" value="{{.ML}}" {{if not $canAdd}}disabled{{end}} aria-label="{{.ML}} 毫升 {{.Price}}">
+                    <span class="cup-ml">{{.ML}}<i>ml</i></span><span class="cup-price">{{.Price}}</span>
+                  </button>
+                  {{end}}
+                {{else}}
+                <span class="tile-off">这桶现在不在售</span>
+                {{end}}
+              </div>
+            </article>
+          </form>
+          {{else}}
+          <p class="state"><span class="state-title">还没有在售的酒桶</span><br><span class="state-note">去后台上架并开桶后，这里会出现杯型。</span></p>
+          {{end}}
+        </div>
+      </section>
+
+      <section class="cat" data-cat="retail">
+        <div class="cat-head cat-head--retail">
+          <h3>零售 · 按件</h3>
+          <span class="cat-note">整件卖出，库存不够时不显示</span>
+        </div>
+        <div class="tiles">
+          {{range .PosItems}}
+          <form class="tile-form" data-search="{{.Name}} {{.Spec}} {{.Category}}" method="post" action="/pos/order/{{$.PosOrderID}}/add">
+            <input type="hidden" name="kind" value="retail">
+            <input type="hidden" name="ref" value="{{.ID}}">
+            <button class="tile tile-retail" type="submit" {{if not $canAdd}}disabled{{end}} aria-label="{{.Name}} {{.Spec}}，余 {{.Stock}}，{{.Price}}">
+              <span class="tile-no">{{if .Category}}{{.Category}}{{else}}零售{{end}}</span>
+              <span class="tile-name">{{.Name}}</span>
+              <span class="tile-meta">{{if .Spec}}{{.Spec}} · {{end}}{{if le .Stock 3}}<span class="low-stock">剩 {{.Stock}}</span>{{else}}剩 <b>{{.Stock}}</b>{{end}}</span>
+              <span class="tile-price">{{.Price}}</span>
+              <span class="tile-plus" aria-hidden="true">+</span>
+            </button>
+          </form>
+          {{else}}
+          <p class="state"><span class="state-title">没有可卖的零售商品</span><br><span class="state-note">上架并补库存后这里才会出现，缺货的商品不显示。</span></p>
+          {{end}}
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script>
+  // 勾选多少行，底部小计就跟着变；提交时后端按勾选的整行算钱。
+  (() => {
+    const form = document.getElementById('pay-form');
+    if (form) {
+      const out = document.getElementById('sel-total');
+      const count = document.getElementById('sel-count');
+      const pay = document.getElementById('pay-btn');
+      if (out && count) {
+        const rows = () => Array.from(form.querySelectorAll('.line'));
+        const money = c => '¥ ' + (c % 100 ? (c / 100).toFixed(2) : c / 100);
+        const sync = () => {
+          let cents = 0, n = 0;
+          rows().forEach(line => {
+            const box = line.querySelector('input[name="items"]');
+            const checked = Boolean(box && box.checked);
+            line.classList.toggle('is-unchecked', !checked);
+            if (!checked) return;
+            cents += parseInt(line.dataset.amount, 10) || 0;
+            n += 1;
+          });
+          out.textContent = money(cents);
+          count.textContent = String(n);
+          if (pay) {
+            pay.disabled = n === 0;
+            pay.textContent = n === 0 ? '先勾选要结的行' : '结账所选 · ' + money(cents);
+          }
+        };
+        form.addEventListener('change', ev => {
+          if (ev.target && ev.target.name === 'items') sync();
+        });
+        form.querySelectorAll('[data-pick]').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const on = btn.dataset.pick === 'all';
+            rows().forEach(line => {
+              const box = line.querySelector('input[name="items"]');
+              if (box) box.checked = on;
+            });
+            sync();
+          });
+        });
+        sync();
+      }
+    }
+
+    // 目录分类切换与即时快搜（纯客户端渐进增强）
+    const tabs = document.querySelectorAll('[data-cat-tab]');
+    const cats = document.querySelectorAll('.cat[data-cat]');
+    const filterInput = document.getElementById('menu-filter');
+    let activeCat = 'all';
+    const applyFilter = () => {
+      const q = (filterInput ? filterInput.value : '').trim().toLowerCase();
+      cats.forEach(sec => {
+        const matchCat = activeCat === 'all' || sec.dataset.cat === activeCat;
+        sec.hidden = !matchCat;
+        if (!matchCat) return;
+        sec.querySelectorAll('.tile-form[data-search]').forEach(item => {
+          const hay = (item.dataset.search || '').toLowerCase();
+          item.hidden = Boolean(q) && !hay.includes(q);
+        });
+      });
+    };
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => {
+        activeCat = tab.dataset.catTab;
+        tabs.forEach(t => {
+          const on = t === tab;
+          t.classList.toggle('active', on);
+          t.setAttribute('aria-selected', String(on));
+        });
+        applyFilter();
+      });
+    });
+    if (filterInput) filterInput.addEventListener('input', applyFilter);
+  })();
+</script>
+</body>
+</html>
+{{end}}

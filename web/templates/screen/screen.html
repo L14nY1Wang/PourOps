@@ -1,0 +1,568 @@
+{{define "screen"}}<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>酒单 - {{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</title>
+<link rel="icon" href="{{asset "/static/brand/pourops.svg"}}" type="image/svg+xml">
+<!--
+  数字酒单板 · PourOps（电视全屏，无滚动）
+  信息层级：出酒编号 → 供应状态 → 厂牌 → 酒款 → 风格 → ABV/IBU/杯型 → 价格
+  数据源（按顺序取第一个能用的）: ?src=xxx → /api/screen/playlist → playlist.json
+  协议:
+    { "brand": "PourOps", "show_clock": true,
+      "items": [ {
+        "no": "07",                        // 可选，缺省按顺序 01..N
+        "brewery": "酿酒狗", "brewery_en": "BREWDOG",
+        "name": "朋克 IPA", "name_en": "PUNK IPA",
+        "style": "IPA - American",         // 决定色条颜色（可被 category 覆盖）
+        "tags": ["美式IPA", "热带水果"],    // 风格描述，取前 3 个
+        "sales_tags": ["新品"],            // 可选，最多展示 2 个
+        "abv": 5.2, "ibu": 35, "size": "330ml",
+        "sold": true,                      // false = 售罄（仍保留全部信息）
+        "price": "¥ 45 / 杯",
+        "poster": "https://..."            // 可选，作低调水印，无图不影响排版
+      } ] }
+  实时更新: 默认监听 /api/screen/events 的 SSE（任意 message 即重拉），断则退回 60s 轮询
+  快捷键: Esc 退出全屏，双击切换全屏
+-->
+<style>
+  :root{
+    --bg:#091220; --bg-deep:#0f1c30;
+    --card:#142237; --card-hi:#1b2d49;
+    --ink:#f4f7fc; --ink-2:#b0c0d6; --ink-3:#7f93ae;
+    --cobalt:#2758e6; --cobalt-hi:#93b0ff;
+    --foam:#52dfa9; --alert:#ff9675;
+    --line:rgba(255,255,255,.10); --line-soft:rgba(255,255,255,.07);
+    --head:clamp(64px,8.4vh,98px);
+    --pad-x:clamp(14px,1.6vw,36px);
+    --pad-y:clamp(10px,1.4vh,26px);
+    --gx:clamp(10px,1vw,20px);
+    --gy:clamp(8px,.9vh,16px);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%; margin:0; overflow:hidden; color:var(--ink);}
+  body{
+    font-family:"PingFang SC","Hiragino Sans GB","Source Han Sans SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased; user-select:none;
+    background:
+      radial-gradient(88vw 58vh at 6% -12%, rgba(39,88,230,.34), transparent 62%),
+      radial-gradient(72vw 52vh at 102% 108%, rgba(82,223,169,.13), transparent 60%),
+      radial-gradient(50vw 40vh at 52% 48%, rgba(164,139,240,.06), transparent 70%),
+      linear-gradient(180deg,var(--bg-deep),var(--bg) 64%,#070f1b);
+  }
+
+  /* ---------- 顶栏：品牌标识 + PourOps + 今日供应 + 时间 ---------- */
+  body > .top{
+    position:fixed; z-index:3; top:0; left:0; right:0; height:var(--head);
+    display:flex; align-items:center; justify-content:space-between;
+    padding:0 var(--pad-x);
+    border-bottom:1px solid var(--line-soft);
+    background:linear-gradient(180deg,rgba(14,25,43,.94),rgba(14,25,43,.62) 74%,transparent);
+    backdrop-filter:blur(10px);
+  }
+  .brand{display:flex; align-items:center; gap:clamp(10px,1vw,18px); min-width:0;}
+  .whale{height:clamp(32px,5.2vh,58px); width:auto; flex:none; filter:drop-shadow(0 0 22px rgba(82,223,169,.28));}
+  .brand-txt{min-width:0;}
+  .mark{
+    font-size:clamp(15px,1.15vw,26px); font-weight:800; line-height:1.05;
+    letter-spacing:.26em; text-transform:uppercase; white-space:nowrap;
+  }
+  .kicker{
+    display:inline-flex; align-items:center; gap:.55em;
+    margin-top:.48em; font-size:clamp(9px,.62vw,12px); font-weight:600;
+    letter-spacing:.32em; text-transform:uppercase; color:var(--ink-3); white-space:nowrap;
+  }
+  .kicker::before{
+    content:""; width:6px; height:6px; border-radius:50%; background:var(--foam);
+    box-shadow:0 0 10px var(--foam);
+  }
+  .head-r{display:flex; align-items:center; gap:clamp(14px,1.6vw,30px); min-width:0;}
+  .summary{
+    padding:.32em .8em; border-radius:999px; border:1px solid var(--line-soft);
+    background:rgba(255,255,255,.035);
+    font-size:clamp(10px,.72vw,14px); letter-spacing:.12em; color:var(--ink-3); white-space:nowrap;
+  }
+  .summary b{font-size:1.12em; color:var(--ink); letter-spacing:.04em; font-variant-numeric:tabular-nums;}
+  .clock{
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:clamp(18px,1.52vw,32px); font-weight:650; letter-spacing:.06em;
+    font-variant-numeric:tabular-nums; color:var(--ink); white-space:nowrap;
+    padding-left:clamp(10px,1vw,20px); border-left:1px solid var(--line);
+  }
+
+  /* ---------- 酒单网格：4×3（12 酒头），窄屏由 JS 收列 ---------- */
+  .board{
+    --cols:4; --rows:3; --fit:1;
+    --cw:calc((100vw - 2 * var(--pad-x) - (var(--cols) - 1) * var(--gx)) / var(--cols));
+    --ch:calc((100vh - var(--head) - 2 * var(--pad-y) - (var(--rows) - 1) * var(--gy)) / var(--rows));
+    --u:min(calc(var(--cw) * .62), calc(var(--ch) * .82));
+    position:fixed; inset:0;
+    padding:calc(var(--head) + var(--pad-y)) var(--pad-x) var(--pad-y);
+    display:grid; gap:var(--gy) var(--gx);
+    grid-template-columns:repeat(var(--cols),minmax(0,1fr));
+    grid-template-rows:repeat(var(--rows),minmax(0,1fr));
+  }
+
+  .card{
+    position:relative; display:flex; flex-direction:column;
+    min-width:0; min-height:0; overflow:hidden;
+    padding:calc(var(--u) * .085) calc(var(--u) * .102);
+    border-radius:clamp(11px,.78vw,16px);
+    background:
+      radial-gradient(120% 72% at 0% 0%, color-mix(in srgb,var(--tone) 14%,transparent), transparent 60%),
+      linear-gradient(160deg,var(--card-hi),var(--card) 56%,#101c2f);
+    border:1px solid var(--line);
+    box-shadow:0 16px 34px rgba(3,9,18,.44), inset 0 1px 0 rgba(255,255,255,.08);
+    animation:rise .55s cubic-bezier(.2,.7,.3,1) both;
+    animation-delay:calc(var(--i,0) * 42ms);
+  }
+  .card::before{
+    content:""; position:absolute; left:0; right:0; top:0; height:3.5px; opacity:.92;
+    background:linear-gradient(90deg,var(--tone),color-mix(in srgb,var(--tone) 32%,transparent) 60%,transparent 86%);
+  }
+  @keyframes rise{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:none;} }
+  @media (prefers-reduced-motion:reduce){ .card{animation:none;} }
+
+  .card-top{position:relative; z-index:2; display:flex; align-items:center; gap:calc(var(--u) * .058); min-width:0; flex:none;}
+  .tap{display:inline-flex; align-items:baseline; gap:.32em; flex:none;}
+  .tap b{
+    display:inline-grid; place-items:center; min-width:1.58em; padding:.18em .32em;
+    border-radius:calc(var(--u) * .055);
+    background:linear-gradient(160deg,#3a6cf5,var(--cobalt)); color:#fff;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:calc(var(--u) * .185 * var(--fit)); font-weight:800; line-height:1; letter-spacing:.01em;
+    font-variant-numeric:tabular-nums;
+    box-shadow:0 6px 16px rgba(39,88,230,.42), inset 0 1px 0 rgba(255,255,255,.28);
+  }
+  .tap small{
+    font-size:calc(var(--u) * .045 * var(--fit)); font-weight:700;
+    letter-spacing:.2em; color:var(--ink-3); line-height:1;
+  }
+  .chips{display:flex; gap:.35em; flex:1; min-width:0; overflow:hidden;}
+  .chip{
+    flex:none; padding:.18em .58em; border-radius:999px; white-space:nowrap;
+    border:1px solid rgba(147,176,255,.32); background:rgba(39,88,230,.2); color:var(--cobalt-hi);
+    font-size:calc(var(--u) * .049 * var(--fit)); font-weight:650; letter-spacing:.04em;
+  }
+  .status{
+    display:inline-flex; align-items:center; gap:.4em;
+    flex:none; padding:.34em .72em; border-radius:999px; line-height:1; white-space:nowrap;
+    font-size:calc(var(--u) * .053 * var(--fit)); font-weight:700; letter-spacing:.1em;
+    border:1px solid transparent;
+  }
+  .status::before{content:""; width:.42em; height:.42em; border-radius:50%; background:currentColor;}
+  .status.on{color:var(--foam); border-color:rgba(82,223,169,.42); background:rgba(7,16,29,.72);}
+  .status.on::before{box-shadow:0 0 8px var(--foam);}
+  .status.off{color:var(--alert); border-color:rgba(255,150,117,.48); background:rgba(24,14,18,.78);}
+
+  /* 酒标仅作水印，不参与排版；无图时卡片照常满排 */
+  .art{
+    position:absolute; right:-4%; top:52%; translate:0 -50%; z-index:0;
+    width:44%; height:80%; object-fit:contain; pointer-events:none;
+    opacity:.12; filter:invert(1) grayscale(1) contrast(1.1); mix-blend-mode:screen;
+  }
+  .card::after{
+    content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
+    background:linear-gradient(to top,rgba(10,19,33,.94) 0%,rgba(10,19,33,.56) 32%,rgba(10,19,33,.14) 64%,transparent 86%);
+  }
+
+  .info{position:relative; z-index:2; display:flex; flex-direction:column; flex:1; min-height:0; margin-top:calc(var(--u) * .055);}
+  .brew{
+    flex:none; font-size:calc(var(--u) * .061 * var(--fit)); font-weight:650;
+    letter-spacing:.15em; text-transform:uppercase; color:var(--ink-2);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .name{
+    flex:none; margin:calc(var(--u) * .02) 0 0; color:var(--ink);
+    font-size:calc(var(--u) * .158 * var(--fit)); font-weight:800; line-height:1.12;
+    letter-spacing:.01em; white-space:nowrap;
+    text-shadow:0 2px 10px rgba(4,10,20,.35);
+  }
+  .style-line{
+    flex:none; margin-top:calc(var(--u) * .026);
+    font-size:calc(var(--u) * .064 * var(--fit)); line-height:1.35; color:var(--ink-2);
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .style-line .cat{
+    color:color-mix(in srgb,var(--tone) 78%,#fff); font-weight:750;
+  }
+
+  .foot{
+    display:flex; align-items:flex-end; justify-content:space-between; gap:.6em;
+    margin-top:auto; padding-top:calc(var(--u) * .054); border-top:1px solid var(--line-soft);
+  }
+  .meta{display:flex; flex:none; align-items:flex-end; gap:calc(var(--u) * .06); min-width:0;}
+  .spec{
+    display:flex; flex-direction:column; gap:.22em; min-width:0;
+    padding-right:calc(var(--u) * .055); border-right:1px solid var(--line-soft);
+  }
+  .spec:last-child{padding-right:0; border-right:0;}
+  .spec b{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    font-size:calc(var(--u) * .088 * var(--fit)); font-weight:750; line-height:1.15;
+    color:var(--ink); font-variant-numeric:tabular-nums; white-space:nowrap;
+  }
+  .spec small{
+    font-size:calc(var(--u) * .045 * var(--fit)); font-weight:650; line-height:1.35;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--ink-3); white-space:nowrap;
+  }
+  .price{
+    margin-left:auto; flex:none; text-align:right; white-space:nowrap;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    font-size:calc(var(--u) * .18 * var(--fit)); font-weight:800; line-height:1.15;
+    letter-spacing:-.01em; color:#ffffff; font-variant-numeric:tabular-nums;
+    text-shadow:0 0 22px rgba(147,176,255,.22);
+  }
+
+  /* 售罄：信息保持可读，降对比 + 状态标红；编号徽章去色 + 轻微斜纹氛围 */
+  .card.off{
+    background:
+      repeating-linear-gradient(-45deg,rgba(255,255,255,.016) 0 10px,transparent 10px 20px),
+      linear-gradient(160deg,#141e2e,#101926 56%,#0d1521);
+    border-color:rgba(255,255,255,.065);
+  }
+  .card.off::before{opacity:.28;}
+  .card.off .info{opacity:.58;}
+  .card.off .art{opacity:.05;}
+  .card.off .tap b{background:#2d3a50; box-shadow:none;}
+  .card.off .price{color:var(--ink-2); text-shadow:none;}
+
+  .hint{
+    position:fixed; inset:var(--head) 0 0; z-index:2; display:none; place-items:center;
+    color:var(--ink-2); font-size:clamp(18px,1.5vw,32px); letter-spacing:.3em; text-indent:.3em;
+  }
+  .empty .hint{display:grid;}
+  .empty .board{display:none;}
+
+  :focus-visible{outline:2px solid var(--foam); outline-offset:3px;}
+
+  @media (max-width:720px){
+    .kicker,.summary{display:none;}
+  }
+</style>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img class="whale" src="{{asset "/static/brand/pourops-dark.svg"}}" alt="" onerror="this.style.visibility='hidden'">
+      <div class="brand-txt">
+        <div class="mark" id="brand"></div>
+        <div class="kicker">TAP LIST · 精酿生啤</div>
+      </div>
+    </div>
+    <div class="head-r">
+      <div class="summary">今日酒单 <b id="count"></b></div>
+      <div class="clock" id="clock"></div>
+    </div>
+  </header>
+
+  <main class="board" id="board"></main>
+  <div class="hint">正在同步酒单</div>
+
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  var SOURCES = [q.get('src'), '/api/screen/playlist', 'playlist.json'].filter(Boolean);
+  var EVENTS = q.get('events') || '/api/screen/events';
+  var CACHE_KEY = 'screen:menu:v3';
+
+  var board = document.getElementById('board');
+  var brandEl = document.getElementById('brand');
+  var clockEl = document.getElementById('clock');
+  var countEl = document.getElementById('count');
+  var hintEl = document.querySelector('.hint');
+
+  var data = null;
+  var signature = '';
+  var es = null;
+
+  /* 风格 → 顶栏色条。刻意粗分五类，够用；要精确就传 category */
+  var TONES = {
+    fresh:  '#e2c476',  // 清爽 / 拉格 / 小麦
+    hop:    '#57cf9b',  // 酒花 / IPA / Pale Ale
+    sour:   '#a48bf0',  // 酸 / 野菌 / 贵兹
+    dark:   '#d9925c',  // 深色麦芽 / 世涛 / 四料
+    strong: '#e8765f'   // 修道院 / 烈性 / 过桶
+  };
+  var LABELS = { fresh: '清爽', hop: '酒花', sour: '酸野菌', dark: '深色', strong: '烈性' };
+
+  function tone(style, category) {
+    if (category && TONES[category]) return category;
+    var s = String(style || '').toLowerCase();
+    if (/lambic|gueuze|geuze|sour|berliner|wild|brett/.test(s)) return 'sour';
+    if (/ipa|pale ale|pilsner|pale lager/.test(s)) return 'hop';
+    if (/stout|porter|quadrupel|dubbel|barleywine|brown ale|schwarz/.test(s)) return 'dark';
+    if (/tripel|strong|barley wine|abbey|trappist|imperial|barrel/.test(s)) return 'strong';
+    if (/lager|wheat|weiss|kölsch|kolsch|blonde|saison|pale/.test(s)) return 'fresh';
+    return 'fresh';
+  }
+
+  /* 12 酒头首选 4×3；窄屏按画面比例收列，避免卡片被压成竖条 */
+  var GRID = {
+    1: [1, 1], 2: [2, 1], 3: [3, 1], 4: [2, 2], 5: [3, 2], 6: [3, 2],
+    7: [4, 2], 8: [4, 2], 9: [3, 3], 10: [5, 2], 11: [4, 3], 12: [4, 3],
+    13: [5, 3], 14: [5, 3], 15: [5, 3], 16: [4, 4]
+  };
+
+  function layout(n) {
+    if (!n) return { cols: 1, rows: 1 };            /* 空酒单：不留 0 行，避免非法 CSS */
+    var g = GRID[n] || [6, Math.ceil(n / 6)];
+    var w = window.innerWidth || 1920, h = window.innerHeight || 1080;
+    var cols = Math.min(g[0], Math.max(1, Math.round(Math.sqrt(n * (w / h)))));
+    return { cols: cols, rows: Math.ceil(n / cols) };
+  }
+
+  function num(v) {
+    if (v == null || v === '') return null;
+    var n = parseFloat(String(v).replace(/[^\d.-]/g, ''));
+    return isFinite(n) ? n : null;
+  }
+
+  // 结构不对（不是数组、也不是带 items 数组的对象）返回 null，调用方换下一个源；
+  // 合法但 items 为空必须放行，否则删光酒之后屏幕还留着旧的一屏。
+  function normalize(raw) {
+    var items = Array.isArray(raw) ? raw : raw && raw.items;
+    if (!Array.isArray(items)) return null;
+    items = items.filter(function (s) { return s && (s.name || s.name_en || s.poster); });
+    return {
+      brand: (raw && raw.brand) || '',
+      show_clock: !(raw && raw.show_clock === false),
+      items: items.map(function (s, i) {
+        return {
+          no: s.no != null ? String(s.no) : ('0' + (i + 1)).slice(-2),
+          brewery: s.brewery || '',
+          brewery_en: s.brewery_en || '',
+          name: s.name || s.name_en || '',
+          style: s.style || '',
+          tone: tone(s.style, s.category),
+          abv: num(s.abv),
+          ibu: num(s.ibu),
+          size: s.size || '',
+          price: s.price != null ? String(s.price) : '',
+          poster: s.poster || '',
+          sold: s.sold !== false,
+          tags: Array.isArray(s.tags) ? s.tags.filter(function (t) { return t; }) : [],
+          sales_tags: Array.isArray(s.sales_tags) ? s.sales_tags.filter(function (t) { return typeof t === 'string' && t.trim(); }) : []
+        };
+      })
+    };
+  }
+
+  function preload(items) {
+    items.forEach(function (s) {
+      if (!s.poster) return;
+      var img = new Image();
+      img.src = s.poster;
+      if (img.decode) img.decode().catch(function () {});
+    });
+  }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  function spec(value, label) {
+    var box = el('div', 'spec');
+    box.appendChild(el('b', null, value));
+    box.appendChild(el('small', null, label));
+    return box;
+  }
+
+  function render() {
+    var items = data.items;
+    var grid = layout(items.length);
+    board.style.setProperty('--cols', grid.cols);
+    board.style.setProperty('--rows', grid.rows);
+    board.style.setProperty('--fit', '1');
+
+    var frag = document.createDocumentFragment();
+    items.forEach(function (s, i) {
+      var card = el('article', s.sold ? 'card' : 'card off');
+      card.style.setProperty('--i', i);
+      card.style.setProperty('--tone', TONES[s.tone]);
+
+      var top = el('div', 'card-top');
+      var no = el('div', 'tap');
+      no.appendChild(el('b', null, s.no));
+      no.appendChild(el('small', null, 'TAP'));
+      top.appendChild(no);
+
+      var chips = el('div', 'chips');
+      s.sales_tags.slice(0, 2).forEach(function (t) { chips.appendChild(el('span', 'chip', t)); });
+      top.appendChild(chips);
+
+      top.appendChild(el('span', s.sold ? 'status on' : 'status off', s.sold ? '在售' : '售罄'));
+      card.appendChild(top);
+
+      if (s.poster) {
+        var art = el('img', 'art');
+        art.src = s.poster;
+        art.alt = '';
+        art.decoding = 'async';
+        art.onerror = function () { art.style.display = 'none'; };
+        card.appendChild(art);
+      }
+
+      var info = el('div', 'info');
+      info.appendChild(el('div', 'brew', [s.brewery, s.brewery_en].filter(Boolean).join(' · ')));
+      info.appendChild(el('h2', 'name', s.name));
+
+      var words = [LABELS[s.tone]].concat(s.tags).slice(0, 4);
+      var styleLine = el('div', 'style-line');
+      words.forEach(function (t, k) {
+        if (k) styleLine.appendChild(el('span', null, ' · '));
+        styleLine.appendChild(el('span', k ? null : 'cat', t));
+      });
+      info.appendChild(styleLine);
+
+      var foot = el('div', 'foot');
+      var meta = el('div', 'meta');
+      meta.appendChild(spec(s.abv != null ? s.abv + '%' : '—', 'ABV'));
+      meta.appendChild(spec(s.ibu != null ? String(s.ibu) : '—', 'IBU'));
+      meta.appendChild(spec(s.size || '—', '杯型'));
+      foot.appendChild(meta);
+      if (s.price) foot.appendChild(el('div', 'price', s.price));
+      info.appendChild(foot);
+      card.appendChild(info);
+
+      frag.appendChild(card);
+    });
+
+    board.replaceChildren(frag);
+    fit();
+  }
+
+  /* 统一字号：以内容最高的一张为准缩到不溢出；长酒名再单独收一点，不截断 */
+  function fit() {
+    var cards = Array.prototype.slice.call(board.children);
+    if (!cards.length) return;
+
+    var scale = 1;
+    for (var k = 0; k < 16; k++) {
+      board.style.setProperty('--fit', scale.toFixed(3));
+      var fits = cards.every(function (card) {
+        var info = card.querySelector('.info');
+        var foot = card.querySelector('.foot');
+        return (!info || info.scrollHeight <= info.clientHeight + 1) &&
+          (!foot || foot.scrollWidth <= foot.clientWidth + 1);
+      });
+      if (fits) break;
+      scale *= .93;
+    }
+    cards.forEach(function (card) {
+      var name = card.querySelector('.name');
+      if (!name) return;
+      var box = name.clientWidth;
+      if (box > 0 && name.scrollWidth > box) {
+        var fs = parseFloat(getComputedStyle(name).fontSize);
+        name.style.fontSize = Math.max(fs * box / name.scrollWidth, fs * .38) + 'px';
+      }
+      var price = card.querySelector('.price');
+      var meta = card.querySelector('.meta');
+      if (price && meta) {
+        for (var n = 0; n < 12; n++) {
+          if (meta.getBoundingClientRect().right + 4 <= price.getBoundingClientRect().left) break;
+          price.style.fontSize = (parseFloat(getComputedStyle(price).fontSize) * .92) + 'px';
+        }
+      }
+    });
+  }
+
+  function tick() {
+    if (!data || !data.show_clock) return;
+    var d = new Date();
+    clockEl.textContent = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2);
+  }
+
+  function apply(raw) {
+    var next = normalize(raw);
+    if (!next) return false;
+
+    var sig = JSON.stringify(next.items) + '|' + next.brand;
+    var changed = sig !== signature;
+    signature = sig;
+    data = next;
+
+    var sold = next.items.filter(function (s) { return !s.sold; }).length;
+    if (countEl) countEl.textContent = next.items.length ? next.items.length + ' 款' + (sold ? ' · ' + sold + ' 售罄' : '') : '';
+    brandEl.textContent = next.brand || 'PourOps';
+    clockEl.style.display = next.show_clock ? 'block' : 'none';
+    tick();
+
+    document.body.classList.toggle('empty', !next.items.length);
+    hintEl.textContent = next.items.length ? '正在同步酒单' : '暂无酒款';
+
+    preload(next.items);
+    if (changed) render();
+    return true;
+  }
+
+  function load() {
+    var i = 0;
+    (function attempt() {
+      if (i >= SOURCES.length) { giveUp(); return; }
+      var url = SOURCES[i++];
+      fetch(url, { cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+        .then(function (json) {
+          var ok = apply(json);                        /* 先上屏，缓存坏了不影响展示 */
+          if (ok) {
+            try { localStorage.setItem(CACHE_KEY, JSON.stringify(json)); } catch (e) {}
+          }
+          if (url.indexOf('/api/') !== -1) subscribe();   /* 静态文件没有 SSE */
+          if (!ok) throw new Error('bad payload');         /* 结构不对：换下一个源 */
+        })
+        .catch(attempt);
+    })();
+  }
+
+  function giveUp() {
+    if (signature) return;                        /* 有内容就留着，别黑屏 */
+    try {
+      var cached = localStorage.getItem(CACHE_KEY);
+      if (cached && apply(JSON.parse(cached))) return;
+    } catch (e) {}
+    document.body.classList.add('empty');
+  }
+
+  function subscribe() {
+    if (es || !('EventSource' in window)) return;
+    try {
+      es = new EventSource(EVENTS);
+      es.onmessage = function () { load(); };
+      es.onerror = function () { es.close(); es = null; };
+    } catch (e) { es = null; }
+  }
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && document.fullscreenElement) document.exitFullscreen();
+  });
+  document.body.addEventListener('dblclick', function () {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  });
+
+  /* 本地缓存先上屏，再静默同步 */
+  try {
+    var cached = localStorage.getItem(CACHE_KEY);
+    if (cached) apply(JSON.parse(cached));
+  } catch (e) {}
+
+  load();
+  var rt;
+  window.addEventListener('resize', function () {
+    clearTimeout(rt);
+    rt = setTimeout(function () { if (data) render(); }, 120);
+  });
+  setInterval(load, 60000);
+  setInterval(tick, 10000);
+  tick();
+})();
+</script>
+</body>
+</html>
+{{end}}

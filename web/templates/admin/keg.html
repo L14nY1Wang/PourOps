@@ -1,0 +1,249 @@
+{{define "content"}}
+{{$econ := .Econ}}
+{{$pricing := .PricingRows}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{.Keg.Brewery}}{{if .Keg.Brewery}} · {{end}}{{.Keg.BeerName}}</h1>
+    <p>{{if .Keg.KegNo}}桶号 {{.Keg.KegNo}} · {{end}}开桶 {{.Keg.TappedText}} · 上架 {{.Keg.PlacedText}}{{if .Keg.FinishedAt}} · 下架结桶 {{.Keg.FinishedText}}{{end}}</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/kegs/{{.Keg.ID}}/edit"><i class="bi bi-pencil" aria-hidden="true"></i>编辑桶信息</a>
+    <a class="button button--secondary" href="/admin/kegs"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>桶装盈亏</a>
+    <a class="button button--primary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
+  </div>
+</div>
+
+<div class="card keg-banner">
+  <div class="keg-banner-head">
+    <span><span class="badge {{.Keg.Badge}} me-2">{{.Keg.Status}}</span>{{$econ.SellablePct}}% 可售出酒进度 · 已售 <strong>{{.Keg.SoldML}}ml</strong> / {{.Keg.CapacityML}}ml（{{$econ.SellablePct}}% 可售线 <strong>{{$econ.SellableML}}ml</strong>，预留损耗 {{$econ.LossBudgetML}}ml）</span>
+    <span>实际出酒 <strong>{{$econ.ActualYieldPct}}%</strong> · 账面余量 {{.Keg.RemainingML}}ml</span>
+  </div>
+  <div class="keg-meter-track keg-meter-track--marked" title="虚线刻度代表 {{$econ.SellablePct}}% 预期可售量">
+    <span class="keg-meter-fill{{if ge .Keg.SoldPct 90}} is-low{{else if ge .Keg.SoldPct 70}} is-high{{end}}" style="width:{{.Keg.SoldPct}}%"></span>
+    <span class="keg-breakeven-mark" style="left:{{$econ.SellablePct}}%" title="{{$econ.SellablePct}}% 可售参考线"></span>
+  </div>
+
+  {{if $econ.HasCost}}
+  <div class="keg-banner-head mt-3">
+    <span>回本线与 {{$econ.TargetMarginPct}}% 毛利进度 · 实收 <strong>{{$econ.RevenueText}}</strong>（回本线 <strong>{{$econ.CostText}}</strong>，已回本 <strong>{{$econ.BreakEvenPct}}%</strong>）</span>
+    <span>{{$econ.TargetMarginPct}}% 目标营收 <strong>{{$econ.TargetRevText}}</strong>{{if $econ.TargetMet}}（已达标）{{else}}（差 {{$econ.TargetGapText}}）{{end}}</span>
+  </div>
+  <div class="keg-meter-track keg-meter-track--marked" title="虚线刻度代表整桶回本线">
+    <span class="keg-meter-fill{{if $econ.TargetMet}} is-target{{else if $econ.BreakEvenReached}} is-high{{end}}" style="width:{{$econ.TargetProgressPct}}%"></span>
+    <span class="keg-breakeven-mark" style="left:{{$econ.BreakEvenTickPct}}%" title="回本线 {{$econ.CostText}}"></span>
+  </div>
+  {{end}}
+</div>
+
+<div class="card keg-verdict-card is-{{$econ.VerdictTone}}">
+  <div class="keg-verdict-body">
+    <div class="keg-verdict-top">
+      <span class="verdict-pill {{$econ.VerdictPillClass}}">{{$econ.VerdictLabel}}</span>
+      <strong>{{if .Keg.FinishedAt}}下架结桶盈利复盘{{else if .Keg.TappedAt}}在售盈利诊断{{else}}开桶前盈亏测算{{end}}</strong>
+    </div>
+    <p class="keg-verdict-desc">{{$econ.Diagnosis}}</p>
+  </div>
+</div>
+
+<div class="stats-grid stats-grid--6">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>营收 / 进价</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Keg.Revenue}}</strong>
+    <div class="stat-meta">进价 <strong>{{.Keg.Cost}}</strong> · {{$econ.TargetMarginPct}}%目标 {{if $econ.HasCost}}{{$econ.TargetRevText}}{{else}}—{{end}}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>整桶盈亏</span><i class="bi bi-graph-up-arrow {{if .Keg.Profitable}}stat-icon--success{{else}}stat-icon--danger{{end}}" aria-hidden="true"></i></div>
+    <strong class="stat-value {{if .Keg.Profitable}}text-success{{else}}text-danger{{end}}">{{.Keg.Profit}}</strong>
+    <div class="stat-meta">实际毛利率 <strong>{{$econ.MarginText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>回本进度</span><i class="bi bi-bullseye {{if $econ.BreakEvenReached}}stat-icon--success{{else}}stat-icon--amber{{end}}" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{if $econ.HasCost}}{{$econ.BreakEvenPct}}%{{else}}—{{end}}</strong>
+    <div class="stat-meta">
+      {{if not $econ.HasCost}}需补填成本{{else if $econ.BreakEvenReached}}已回本，超成本 <strong>{{$econ.ProfitText}}</strong>{{else}}距回本差 <strong>{{$econ.BreakEvenGapText}}</strong>{{end}}
+    </div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>出酒率（vs {{$econ.SellablePct}}%）</span><i class="bi bi-cup-straw" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{$econ.ActualYieldPct}}%</strong>
+    <div class="stat-meta">已售 {{.Keg.SoldML}}ml · {{$econ.SellablePct}}% 可售 <strong>{{$econ.SellableML}}ml</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>理论回本出酒量</span><i class="bi bi-droplet-half stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{if $econ.TheoreticalBreakEven}}{{$econ.TheoreticalBreakEven}}<small>ml</small>{{else}}—{{end}}</strong>
+    <div class="stat-meta">{{if $econ.EstimatedBreakEvenML}}按实售价约 <strong>{{$econ.EstimatedBreakEvenML}}ml</strong> 回本{{else}}按 {{$econ.TargetMarginPct}}% 毛利测算回本出酒量{{end}}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>每杯均价</span><i class="bi bi-tag stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Keg.AvgCupPrice}}</strong>
+    <div class="stat-meta">{{.Keg.SoldCups}} 杯 · 均杯量 <strong>{{.Keg.AvgMLPerCup}}ml</strong></div>
+  </div>
+</div>
+
+<section class="card stack-card mb-3" id="keg-detail-pricing" data-capacity-ml="{{.Keg.CapacityML}}" data-cost-cents="{{.Keg.CostCents}}" data-default-sellable="{{$econ.SellablePct}}" data-default-margin="{{$econ.TargetMarginPct}}">
+  <div class="panel-heading">
+    <div>
+      <h2>单杯成本、回本杯数与 {{$econ.TargetMarginPct}}% 毛利率推荐售价</h2>
+      <p data-role="pricing-subtitle">按整桶 {{$econ.SellablePct}}% 可售（{{$econ.SellableML}}ml / {{.Keg.CapacityML}}ml）摊算单杯成本，以 {{$econ.TargetMarginPct}}% 毛利率向上取整到整元</p>
+    </div>
+    <span class="panel-period">{{if $econ.HasCost}}本桶进价 {{.Keg.Cost}}{{else}}待填进价{{end}}</span>
+  </div>
+  {{if and $econ.HasCost (gt .Keg.CapacityML 0)}}<div id="keg-detail-pricing-controls"></div>{{end}}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>杯型</th>
+          <th class="num" data-role="cost-head">{{$econ.SellablePct}}% 有效成本</th>
+          <th class="num" data-role="rec-head">{{$econ.TargetMarginPct}}% 推荐售价</th>
+          <th class="num">当前设定售价</th>
+          <th class="num">当前毛利率</th>
+          <th class="num">回本所需杯数</th>
+          <th class="num" data-role="cups-head">{{$econ.SellablePct}}% 预计可打</th>
+          <th>达标状态</th>
+        </tr>
+      </thead>
+      <tbody>
+      {{range $pricing}}
+        <tr data-ml="{{.ML}}" data-actual-cents="{{.ActualCents}}">
+          <td><strong>{{.MLText}}</strong></td>
+          <td class="num text-muted" data-role="eff-cost">{{.EffectiveCostText}}</td>
+          <td class="num" data-role="rec-price"><strong class="text-primary">{{.RecommendedText}}</strong></td>
+          <td class="num"><strong>{{.ActualText}}</strong></td>
+          <td class="num {{if and .HasCost (gt .ActualCents 0)}}{{if .TargetMet}}text-success{{else}}text-danger{{end}}{{else}}text-muted{{end}}" data-role="margin">{{.MarginText}}</td>
+          <td class="num" data-role="breakeven">{{.BreakEvenText}}</td>
+          <td class="num text-muted" data-role="sellable-cups">{{.SellableCupsText}}</td>
+          <td data-role="status">
+            {{if not .HasCost}}
+              <span class="verdict-pill verdict-pill--muted">待填成本</span>
+            {{else if eq .ActualCents 0}}
+              <span class="verdict-pill verdict-pill--muted">{{.DiffText}}</span>
+            {{else if .TargetMet}}
+              <span class="verdict-pill verdict-pill--success">{{.DiffText}}</span>
+            {{else}}
+              <span class="verdict-pill verdict-pill--warn">{{.DiffText}}</span>
+            {{end}}
+          </td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="dashboard-main">
+  <section class="card stack-card">
+    <div class="panel-heading">
+      <div>
+        <h2>售出明细</h2>
+        <p>含 POS 结账与本页手工补录</p>
+      </div>
+      <span class="panel-period">{{len .Pours}} 笔</span>
+    </div>
+    {{if .Pours}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light"><tr><th>时间</th><th class="num">杯数</th><th class="num">毫升</th><th class="num">金额</th><th class="num">操作</th></tr></thead>
+        <tbody>
+        {{range .Pours}}
+          <tr>
+            <td class="text-muted">{{.PouredText}}</td>
+            <td class="num">{{.Cups}}</td>
+            <td class="num">{{.ML}}ml</td>
+            <td class="num"><strong>{{.Amount}}</strong></td>
+            <td class="num">
+              <form class="inline-form" method="post" action="/admin/pours/{{.ID}}/delete">
+                <input type="hidden" name="keg_id" value="{{.KegID}}">
+                <button class="button button--danger-soft button--sm" type="submit">撤销</button>
+              </form>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-basket2" aria-hidden="true"></i><p>还没记过账，右边可补录第一笔售出</p></div>
+    {{end}}
+  </section>
+
+  <section class="card stack-card">
+    <div class="panel-heading">
+      <div>
+        <h2>记一笔售出</h2>
+        <p>手工补录会同步计入营收与营运流水</p>
+      </div>
+    </div>
+    {{if .Keg.CanPour}}
+    <form class="admin-form" method="post" action="/admin/kegs/{{.Keg.ID}}/pours">
+      <div class="pour-presets" aria-label="快捷杯型填充">
+        {{range $pricing}}
+        <button class="pour-preset" type="button" data-ml="{{.ML}}" data-price="{{.QuickAmountInput}}"><strong>{{.MLText}}</strong><span>{{.QuickPriceText}}</span></button>
+        {{end}}
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="cups">杯数</label>
+          <input class="form-control" type="number" id="cups" name="cups" value="1" min="1">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="ml">毫升</label>
+          <input class="form-control" type="number" id="ml" name="ml" value="330" step="10">
+        </div>
+        <div class="editor-field editor-wide">
+          <label class="label" for="amount">金额（元）</label>
+          <input class="form-control" type="text" id="amount" name="amount" placeholder="45">
+        </div>
+      </div>
+      <div class="mt-3">
+        <button class="button button--primary w-100" type="submit"><i class="bi bi-plus-circle" aria-hidden="true"></i>记录售出</button>
+      </div>
+    </form>
+    {{else if .Keg.FinishedAt}}
+    <div class="empty-state"><i class="bi bi-slash-circle" aria-hidden="true"></i><p>这桶已停售，只能查看结桶盈利复盘与售出记录</p></div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-hourglass-split" aria-hidden="true"></i><p>这桶还没开桶，先回酒单上架开桶后才能记售出</p></div>
+    {{end}}
+  </section>
+</div>
+
+{{if .Keg.Note}}<div class="card overview-notes mt-3"><p class="mb-0 text-muted small"><i class="bi bi-sticky me-2" aria-hidden="true"></i>备注：{{.Keg.Note}}</p></div>{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+(() => {
+  const cupsEl = document.getElementById('cups');
+  const mlEl = document.getElementById('ml');
+  const amtEl = document.getElementById('amount');
+  if (!mlEl || !amtEl) return;
+  document.querySelectorAll('.pour-preset[data-ml]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parsedCups = parseInt(cupsEl ? cupsEl.value : '1', 10);
+      const cups = Number.isFinite(parsedCups) && parsedCups >= 1 ? parsedCups : 1;
+      if (cupsEl && (!Number.isFinite(parsedCups) || parsedCups < 1)) {
+        cupsEl.value = '1';
+      }
+      const unitML = parseInt(btn.dataset.ml || '0', 10) || 0;
+      mlEl.value = unitML > 0 ? String(unitML * cups) : '';
+
+      const rawPrice = (btn.dataset.price || '').trim();
+      if (!rawPrice) {
+        amtEl.value = '';
+        return;
+      }
+      const unitCents = Math.round(Number(rawPrice) * 100);
+      if (!Number.isFinite(unitCents) || unitCents <= 0) {
+        amtEl.value = '';
+        return;
+      }
+      const totalCents = unitCents * cups;
+      amtEl.value = totalCents % 100 === 0
+        ? String(totalCents / 100)
+        : (totalCents / 100).toFixed(2).replace(/\.?0+$/, '');
+    });
+  });
+})();
+</script>
+<script src="{{asset "/static/js/keg-pricing.js"}}"></script>
+{{end}}

@@ -1,0 +1,50 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{.Title}}</h1>
+    <p>{{if .User.ID}}修改账号信息、角色权限或重置登录密码。{{else}}创建运营后台或点餐端账号。{{end}}</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/users"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回账号</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/users">
+  <input type="hidden" name="id" value="{{.User.ID}}">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-person-badge" aria-hidden="true"></i>账号凭证与角色</h2>
+        <span>改密码或停用后将立即踢掉该账号全部旧会话</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="username">用户名<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="text" id="username" name="username" value="{{.User.Username}}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="password">密码{{if .User.ID}}（留空不改）{{else}}<span class="field-required" aria-hidden="true"> *</span>{{end}}</label>
+          <input class="form-control" type="password" id="password" name="password" autocomplete="new-password" {{if not .User.ID}}required{{end}}>
+          <div class="description">{{if .User.ID}}只有填写新密码才会重置。{{else}}至少 6 位，创建后可让本人自行修改。{{end}}</div>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="role">角色</label>
+          <select class="form-select" id="role" name="role">
+            {{$cur := .User.Role}}
+            {{range .Roles}}<option value="{{.Value}}" {{if eq .Value $cur}}selected{{end}}>{{.Label}}</option>{{end}}
+          </select>
+          <div class="description">角色决定能进入的端和可执行的操作。</div>
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="active"><input class="form-check-input" type="checkbox" id="active" name="active" value="1" {{if .User.Active}}checked{{end}}> 启用该账号</label>
+          <div class="description">停用后立即无法登录，历史记录保留。</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <a class="button button--secondary" href="/admin/users">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存账号</button>
+  </div>
+</form>
+{{end}}

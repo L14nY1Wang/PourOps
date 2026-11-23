@@ -1,0 +1,54 @@
+{{define "content"}}
+<div class="login-layout">
+  <section class="login-intro" aria-labelledby="login-intro-title">
+    <img class="login-whale" src="{{asset "/static/brand/pourops-dark.svg"}}" width="240" height="240" alt="" aria-hidden="true">
+    <div class="login-intro-body">
+      <p class="login-eyebrow">{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}} · 运营后台</p>
+      <h1 id="login-intro-title">一处看清<br>门店这一晚。</h1>
+      <p>销售、库存、桶装盈亏与电视酒单共用同一份数据，账实对得上再打烊。</p>
+      <div class="login-features" role="list" aria-label="后台能力">
+        <span role="listitem"><i class="bi bi-graph-up-arrow" aria-hidden="true"></i>经营概览<small>销售与毛利</small></span>
+        <span role="listitem"><i class="bi bi-box-seam" aria-hidden="true"></i>进销存<small>零售与桶装</small></span>
+        <span role="listitem"><i class="bi bi-tv" aria-hidden="true"></i>电视酒单<small>实时同步</small></span>
+      </div>
+    </div>
+  </section>
+
+  {{if .TwoFactor}}
+  <div class="login-panel">
+    <form class="card login-card" method="post" action="/admin/login" aria-labelledby="login-title">
+      <span class="login-step"><i class="bi bi-shield-lock" aria-hidden="true"></i>第二重验证</span>
+      <h2 id="login-title">两步验证</h2>
+      <p>输入身份验证器里的 6 位动态码，或使用一张一次性恢复码。</p>
+      {{if .Username}}<div class="login-identity"><i class="bi bi-person-check" aria-hidden="true"></i><span>正在验证 <strong>{{.Username}}</strong></span></div>{{end}}
+      <input type="hidden" name="action" value="2fa">
+      <div class="editor-field">
+        <label class="label" for="code">动态码 / 恢复码</label>
+        <input class="form-control" type="text" id="code" name="code" autocomplete="one-time-code" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="64" required autofocus aria-describedby="code-hint">
+        <p class="description" id="code-hint">动态码每 30 秒刷新；恢复码使用一次后即失效。</p>
+      </div>
+      <button class="button button--primary" type="submit">验证并进入</button>
+      <a class="button button--tertiary" href="/admin/login?back=1">返回密码页</a>
+      <p class="login-note">连续输错会暂时锁定验证。遇到问题请联系 BOSS 重置。</p>
+    </form>
+  </div>
+  {{else}}
+  <div class="login-panel">
+    <form class="card login-card" method="post" action="/admin/login" aria-labelledby="login-title">
+      <h2 id="login-title">登录后台</h2>
+      <p>BOSS 与店长进入运营后台，店员请使用点餐端。</p>
+      <div class="editor-field">
+        <label class="label" for="username">用户名</label>
+        <input class="form-control" type="text" id="username" name="username" value="{{.Username}}" autocomplete="username" autocapitalize="off" spellcheck="false" required autofocus>
+      </div>
+      <div class="editor-field">
+        <label class="label" for="password">密码</label>
+        <input class="form-control" type="password" id="password" name="password" autocomplete="current-password" required>
+      </div>
+      <button class="button button--primary" type="submit">登录</button>
+      <p class="login-note">仅限门店内部使用。登录记录会计入账号安全日志。</p>
+    </form>
+  </div>
+  {{end}}
+</div>
+{{end}}

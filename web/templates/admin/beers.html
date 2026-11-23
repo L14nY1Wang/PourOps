@@ -1,0 +1,123 @@
+{{define "content"}}
+{{$cfg := .PricingCfg}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">酒单 · 桶装</h1>
+    <p>入库后填号位上架开桶；下架保留原号位并在电视酒单标为售罄。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-cup-straw" aria-hidden="true"></i>共 {{len .Rows}} 款</span>
+    <a class="button button--secondary" href="/admin/kegs"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>桶装盈亏</a>
+    <a class="button button--secondary" href="/admin/beers/catalog"><i class="bi bi-journal-bookmark" aria-hidden="true"></i>历史酒单</a>
+    <a class="button button--primary" href="/admin/beers/purchase"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增进货</a>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body p-0">
+    {{if .Rows}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:74px">号位</th>
+            <th class="wrap-cell">厂牌 · 酒名</th>
+            <th class="num">参数 / 评分</th>
+            <th class="num">杯型售价</th>
+            <th class="wrap-cell">本桶进度与盈亏</th>
+            <th>上架 / 下架</th>
+            <th class="num">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Rows}}
+          {{$row := .}}
+          <tr>
+            <td>
+              {{if .No}}<span class="tap-badge{{if not .OnScreen}} tap-badge--off{{end}}">{{.No}}</span>{{else}}<span class="text-muted">—</span>{{end}}
+            </td>
+            <td class="wrap-cell">
+              <div class="beer-cell">
+                <div class="beer-thumb" aria-hidden="true">
+                  {{if .PosterURL}}<img src="{{.PosterURL}}" alt="" loading="lazy" onerror="this.remove()">{{else}}<i class="bi bi-cup-straw"></i>{{end}}
+                </div>
+                <div class="beer-info">
+                  <div class="beer-title">{{.Brewery}}{{if .Brewery}} · {{end}}{{.Name}}</div>
+                  {{if .Style}}<div class="text-muted small">{{.Style}}{{if .Category}} · {{.CategoryName}}{{end}}</div>{{end}}
+                </div>
+              </div>
+            </td>
+            <td class="num text-muted">
+              <div>{{.ABVText}}{{if .IBUText}} / {{.IBUText}}{{end}}</div>
+              <div class="small">UT {{.UTText}}</div>
+            </td>
+            <td class="num">
+              <div class="cup-chips">{{range .Cups}}<div>{{.MLText}} {{.Price}}</div>{{else}}<span class="text-muted">—</span>{{end}}</div>
+            </td>
+            <td class="wrap-cell">
+              {{with .Keg}}
+                {{$e := .EconomicsWithConfig nil $cfg}}
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <span class="badge bg-success">在售</span>
+                  <span class="verdict-pill {{$e.VerdictPillClass}}">{{$e.VerdictLabel}}</span>
+                  <a href="/admin/kegs/{{.ID}}">记售出 / 看盈亏</a>
+                  <span class="keg-meter" title="已售 {{.SoldPct}}%">
+                    <span class="keg-meter-track"><span class="keg-meter-fill{{if ge .SoldPct 90}} is-low{{else if ge .SoldPct 70}} is-high{{end}}" style="width:{{.SoldPct}}%"></span></span>
+                    <span class="keg-meter-label">{{.SoldPct}}%</span>
+                  </span>
+                </div>
+                <div class="text-muted small mt-1">
+                  {{.SoldCups}} 杯 · {{.SoldML}}ml · 营收 {{.Revenue}} · 盈亏
+                  <strong class="{{if .Profitable}}text-success{{else}}text-danger{{end}}">{{.Profit}}</strong>
+                </div>
+                {{if $row.Stock}}<div class="text-muted small">库内还有 <strong>{{$row.Stock}}</strong> 桶待开</div>{{end}}
+              {{else}}
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <span class="badge bg-secondary">未开桶</span>
+                  {{if .Stock}}<span class="text-muted small">库存 <strong>{{.Stock}}</strong> 桶待上架</span>{{end}}
+                </div>
+                {{with $row.LastKeg}}
+                {{$le := .EconomicsWithConfig nil $cfg}}
+                <div class="text-muted small mt-1 d-flex flex-wrap align-items-center gap-1">
+                  <span>上次结桶</span>
+                  <span class="verdict-pill {{$le.VerdictPillClass}}">{{$le.VerdictLabel}}</span>
+                  <strong class="{{if .Profitable}}text-success{{else}}text-danger{{end}}">{{.Profit}}</strong>
+                  <span>（出酒 {{$le.ActualYieldPct}}%）· <a href="/admin/kegs/{{.ID}}">复盘</a></span>
+                </div>
+                {{end}}
+              {{end}}
+            </td>
+            <td>
+              <div class="d-flex flex-wrap gap-2 align-items-center">
+                {{if .OnScreen}}
+                <form class="inline-form" method="post" action="/admin/beers/{{.ID}}/untap" onsubmit="return confirm('下架「{{.Name}}」？这一桶会记录为停售。')">
+                  <button class="button button--secondary button--sm" type="submit"><i class="bi bi-stop-circle" aria-hidden="true"></i>下架</button>
+                </form>
+                {{end}}
+                {{if not .Keg}}
+                <form class="inline-action-group" method="post" action="/admin/beers/{{.ID}}/tap">
+                  <input class="form-control" style="width:62px" type="text" name="no" value="{{if .No}}{{.No}}{{else}}{{$.NextNo}}{{end}}" required title="上架到几号" aria-label="上架号位">
+                  <button class="button button--primary button--sm" type="submit">{{if .OnScreen}}开桶{{else}}上架{{end}}</button>
+                </form>
+                {{end}}
+              </div>
+            </td>
+            <td class="num">
+              <div class="table-actions">
+                <a class="button button--secondary button--sm" href="/admin/beers/{{.ID}}/edit">编辑</a>
+                <form class="inline-form" method="post" action="/admin/beers/{{.ID}}/delete" onsubmit="return confirm('删除「{{.Name}}」？')">
+                  <button class="button button--danger-soft button--sm" type="submit">删除</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-cup-straw" aria-hidden="true"></i><p>还没有酒款</p><a class="button button--primary" href="/admin/beers/purchase">新增一款</a></div>
+    {{end}}
+  </div>
+</div>
+{{end}}

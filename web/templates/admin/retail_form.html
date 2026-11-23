@@ -1,0 +1,98 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{if .Item.ID}}编辑商品{{else}}新增商品{{end}}</h1>
+    <p>设置零售商品的分类、规格、售价成本与当前库存。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/retail"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回商品</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/retail">
+  <input type="hidden" name="id" value="{{if .Item.ID}}{{.Item.ID}}{{end}}">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-box-seam" aria-hidden="true"></i>商品基础信息</h2>
+        <span>名称、分类与规格会显示在点餐端卡片</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="name">商品名<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="text" id="name" name="name" value="{{.Item.Name}}" required placeholder="某品牌 IPA 罐装">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="category">分类</label>
+          <select class="form-select" id="category" name="category">
+            {{range .RetailCats}}
+            <option value="{{.}}" {{if eq . $.Item.Category}}selected{{end}}>{{.}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="spec">规格</label>
+          <input class="form-control" type="text" id="spec" name="spec" value="{{.Item.Spec}}" placeholder="330ml / 40g">
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="active"><input class="form-check-input" type="checkbox" id="active" name="active" value="1" {{if .Item.Active}}checked{{end}}> 在架销售</label>
+          <div class="description">0 库存保存时会自动取消</div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-tag" aria-hidden="true"></i>定价与库存</h2>
+        <span>成本用于实时统计零售毛利</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="price">售价（元）</label>
+          <input class="form-control" type="text" id="price" name="price" value="{{.Item.PriceInput}}" placeholder="42">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="cost">成本（元）</label>
+          <input class="form-control" type="text" id="cost" name="cost" value="{{.Item.CostInput}}" placeholder="26">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="stock">库存</label>
+          <input class="form-control" type="number" id="stock" name="stock" value="{{.Item.Stock}}">
+          <div class="description">库存到 0 会自动下架</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    {{if .Item.ID}}<a class="button button--tertiary" href="#moves">库存流水</a>{{end}}
+    <a class="button button--secondary" href="/admin/retail">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存商品</button>
+  </div>
+</form>
+
+{{if .Moves}}
+<div class="card stack-card mt-3" id="moves">
+  <div class="panel-heading">
+    <div>
+      <h2>最近库存变动</h2>
+      <p>入库、POS 售出、调整与撤销记录</p>
+    </div>
+    <span class="panel-period">最近 {{len .Moves}} 条</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light"><tr><th>时间</th><th class="num">变动</th><th>原因</th></tr></thead>
+      <tbody>
+      {{range .Moves}}
+        <tr>
+          <td class="text-muted">{{.When}}</td>
+          <td class="num {{if gt .Delta 0}}text-success{{else}}text-danger{{end}}"><strong>{{.DeltaText}}</strong></td>
+          <td class="text-muted">{{.Reason}}</td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}
+{{end}}

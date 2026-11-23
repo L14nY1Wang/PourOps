@@ -1,0 +1,125 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">账号安全</h1>
+    <p>{{if .Me}}{{.Me.Username}} · {{.Me.RoleName}} · 密码与两步验证管理{{end}}</p>
+  </div>
+  <div class="heading-actions">
+    {{if .Me}}{{if .Me.CanBackend}}<a class="button button--secondary" href="/admin/"><i class="bi bi-arrow-left" aria-hidden="true"></i>回后台</a>{{else}}<a class="button button--secondary" href="/pos/"><i class="bi bi-arrow-left" aria-hidden="true"></i>回点餐端</a>{{end}}{{end}}
+  </div>
+</div>
+
+{{if .Sec.Recovery}}
+<form class="card security-card" method="post" action="/admin/logout">
+  <h2><span class="security-head-icon"><i class="bi bi-key" aria-hidden="true"></i></span>恢复码（只显示这一次）</h2>
+  <p class="description">每张抄一份，分开存放。忘记动态码时用一张恢复码代替 6 位码；每张只能用一次，用过的就作废。</p>
+  <ol class="recovery-codes" id="recovery-list">
+    {{range .Sec.Recovery}}<li><code>{{.}}</code></li>{{end}}
+  </ol>
+  <p class="description">两步验证已开启，旧登录已失效。保存好恢复码后请重新登录。</p>
+  <div class="form-actions d-flex flex-wrap gap-2">
+    <button class="button button--secondary" type="button" id="copy-recovery"><i class="bi bi-clipboard" aria-hidden="true"></i>复制全部恢复码</button>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2-circle" aria-hidden="true"></i>我已保存，重新登录</button>
+  </div>
+</form>
+{{else}}
+
+<div class="card security-card">
+  <h2>
+    <span class="security-head-icon"><i class="bi bi-shield-lock" aria-hidden="true"></i></span>
+    两步验证（2FA）
+    {{if .Sec.TwoFactor}}<span class="badge bg-success">已开启</span>{{else}}<span class="badge bg-secondary">未开启</span>{{end}}
+  </h2>
+  {{if .Sec.Setup}}
+    <p class="description">在验证器 App（Google Authenticator、1Password、微软 Authenticator 等）里手动输入这串密钥，类型选「基于时间」：</p>
+    <div class="secret-box">
+      <code class="setup-secret" id="setup-secret-code">{{.Sec.Secret}}</code>
+      <button class="button button--secondary button--sm" type="button" id="copy-secret"><i class="bi bi-clipboard" aria-hidden="true"></i>复制密钥</button>
+    </div>
+    <form method="post" action="/account/security/2fa/enable">
+      <div class="form-grid">
+        <div class="editor-field">
+          <label class="label" for="enable_code">验证器里的 6 位动态码</label>
+          <input class="form-control" type="text" id="enable_code" name="code" autocomplete="one-time-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autofocus>
+        </div>
+      </div>
+      <p class="description mt-2">验证通过后才会真正开启，并一次性给出一组恢复码。</p>
+      <div class="form-actions"><button class="button button--primary" type="submit">验证并开启</button></div>
+    </form>
+  {{else if .Sec.TwoFactor}}
+    <p class="description">已开启。登录时除密码外还要输入 6 位动态码，或一张没用过的恢复码。</p>
+    <form method="post" action="/account/security/2fa/disable">
+      <div class="form-grid">
+        <div class="editor-field">
+          <label class="label" for="disable_password">当前密码</label>
+          <input class="form-control" type="password" id="disable_password" name="password" autocomplete="current-password" required>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="disable_code">动态码或恢复码</label>
+          <input class="form-control" type="text" id="disable_code" name="code" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" placeholder="6 位动态码或一张恢复码" required>
+        </div>
+      </div>
+      <p class="description mt-2">关闭后只凭密码登录，旧登录会全部失效。</p>
+      <div class="form-actions"><button class="button button--danger-soft" type="submit">关闭两步验证</button></div>
+    </form>
+  {{else}}
+    <p class="description">未开启。开启后登录时要有验证器 App 的 6 位动态码，并会给你一组一次性恢复码。</p>
+    <form method="post" action="/account/security/2fa/setup">
+      <div class="form-grid">
+        <div class="editor-field">
+          <label class="label" for="setup_password">当前密码</label>
+          <input class="form-control" type="password" id="setup_password" name="password" autocomplete="current-password" required>
+        </div>
+      </div>
+      <div class="form-actions"><button class="button button--primary" type="submit"><i class="bi bi-shield-plus" aria-hidden="true"></i>开始设置</button></div>
+    </form>
+  {{end}}
+</div>
+
+<form class="card security-card" method="post" action="/account/security/password">
+  <h2><span class="security-head-icon"><i class="bi bi-lock" aria-hidden="true"></i></span>修改密码</h2>
+  <p class="description">修改密码后所有设备都将自动退出，需重新登录。</p>
+  <div class="form-grid">
+    <div class="editor-field">
+      <label class="label" for="current_password">当前密码</label>
+      <input class="form-control" type="password" id="current_password" name="current_password" autocomplete="current-password" required>
+    </div>
+    <div class="editor-field">
+      <label class="label" for="new_password">新密码（至少 6 位）</label>
+      <input class="form-control" type="password" id="new_password" name="new_password" autocomplete="new-password" minlength="6" required>
+    </div>
+    <div class="editor-field">
+      <label class="label" for="confirm_password">再输一次新密码</label>
+      <input class="form-control" type="password" id="confirm_password" name="confirm_password" autocomplete="new-password" minlength="6" required>
+    </div>
+    {{if .Sec.TwoFactor}}
+    <div class="editor-field">
+      <label class="label" for="pw_code">动态码或恢复码</label>
+      <input class="form-control" type="text" id="pw_code" name="code" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" placeholder="6 位动态码或一张恢复码" required>
+    </div>
+    {{end}}
+  </div>
+  <div class="form-actions"><button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>更新密码</button></div>
+</form>
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+(() => {
+  const bindCopy = (btnId, getText) => {
+    const btn = document.getElementById(btnId);
+    if (!btn || !navigator.clipboard) return;
+    btn.addEventListener('click', () => {
+      navigator.clipboard.writeText(getText()).then(() => {
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="bi bi-check2" aria-hidden="true"></i>已复制';
+        setTimeout(() => { btn.innerHTML = orig; }, 1600);
+      }).catch(() => {});
+    });
+  };
+  bindCopy('copy-secret', () => (document.getElementById('setup-secret-code')?.textContent || '').trim());
+  bindCopy('copy-recovery', () => [...document.querySelectorAll('#recovery-list code')].map(c => c.textContent.trim()).join('\n'));
+})();
+</script>
+{{end}}

@@ -1,0 +1,110 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">零售商品</h1>
+    <p>罐装、瓶装与小食库存管理；库存售罄时自动下架，补货后可一键重新上架。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-box-seam" aria-hidden="true"></i>共 {{len .Retail}} 款</span>
+    <a class="button button--primary" href="/admin/retail/new"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增商品</a>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>今日营收</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Stats.TodayRevText}}</strong>
+    <div class="stat-meta">今日毛利 <strong>{{.Stats.TodayProfitText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>本月营收</span><i class="bi bi-graph-up stat-icon--success" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Stats.MonthRevText}}</strong>
+    <div class="stat-meta">本月毛利 <strong>{{.Stats.MonthProfitText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>库存成本</span><i class="bi bi-archive stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Stats.StockValueText}}</strong>
+    <div class="stat-meta">全部 SKU <strong>{{.Stats.SKUs}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>低库存预警</span><i class="bi bi-exclamation-triangle {{if .Stats.LowCount}}stat-icon--amber{{else}}stat-icon--success{{end}}" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Stats.LowCount}}</strong>
+    <div class="stat-meta">≤ 3 件需及时补货</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="bar">
+      <form class="d-flex flex-wrap gap-2 align-items-center" method="get" action="/admin/retail">
+        <input class="form-control" style="width:260px" type="search" name="q" value="{{.Q}}" placeholder="搜索商品名 / 分类 / 规格">
+        {{if .Cat}}<input type="hidden" name="cat" value="{{.Cat}}">{{end}}
+        {{if .LowOnly}}<input type="hidden" name="low" value="1">{{end}}
+        <button class="button button--secondary" type="submit">搜索</button>
+      </form>
+      <div class="d-flex flex-wrap gap-2 align-items-center spacer">
+        <nav class="filter-pills" aria-label="商品分类筛选">
+          <a class="filter-pill{{if not .Cat}} active{{end}}" href="/admin/retail{{if .LowOnly}}?low=1{{end}}">全部</a>
+          {{range .RetailCats}}
+          <a class="filter-pill{{if eq . $.Cat}} active{{end}}" href="/admin/retail?cat={{.}}{{if $.LowOnly}}&low=1{{end}}">{{.}}</a>
+          {{end}}
+          <a class="filter-pill filter-pill--warn{{if .LowOnly}} active{{end}}" href="/admin/retail?low={{if .LowOnly}}0{{else}}1{{end}}{{if .Cat}}&cat={{.Cat}}{{end}}"><i class="bi bi-exclamation-circle" aria-hidden="true"></i>低库存</a>
+        </nav>
+        {{if or .Q .Cat .LowOnly}}<a class="button button--tertiary button--sm" href="/admin/retail">清空筛选</a>{{end}}
+      </div>
+    </div>
+
+    {{if .Retail}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="wrap-cell">商品</th><th>分类 / 规格</th>
+            <th class="num">售价</th><th class="num">成本</th><th class="num">毛利</th>
+            <th class="num">库存</th><th>状态</th><th class="num">入库 / 操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Retail}}
+          <tr>
+            <td class="wrap-cell"><a href="/admin/retail/{{.ID}}/edit">{{.Name}}</a></td>
+            <td class="text-muted">{{.Category}}{{if .Spec}} · {{.Spec}}{{end}}</td>
+            <td class="num"><strong>{{.Price}}</strong></td>
+            <td class="num text-muted">{{.Cost}}</td>
+            <td class="num {{if ge .ProfitCents 0}}text-success{{else}}text-danger{{end}}">{{.Profit}}</td>
+            <td class="num">
+              {{if eq .Stock 0}}<span class="badge bg-danger">售罄</span>
+              {{else if le .Stock 3}}<span class="badge bg-warning">剩 {{.Stock}}</span>
+              {{else}}{{.Stock}}{{end}}
+            </td>
+            <td>
+              <form class="inline-form" method="post" action="/admin/retail/{{.ID}}/toggle">
+                <button class="status-toggle{{if .Active}} is-on{{end}}" type="submit" title="点一下切换上下架">{{if .Active}}在架{{else}}已下架{{end}}</button>
+              </form>
+            </td>
+            <td class="num">
+              <div class="table-actions">
+                <form class="inline-action-group" method="post" action="/admin/retail/{{.ID}}/stock">
+                  <input class="form-control" style="width:66px" type="number" name="delta" value="1" title="正数入库，负数调整" aria-label="库存变动数量">
+                  <button class="button button--secondary button--sm" type="submit">入库</button>
+                </form>
+                <form class="inline-form" method="post" action="/admin/retail/{{.ID}}/delete" onsubmit="return confirm('删除「{{.Name}}」？库存流水会一起删掉，历史订单保留。')">
+                  <button class="button button--danger-soft button--sm" type="submit">删除</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state">
+      <i class="bi bi-box-seam" aria-hidden="true"></i>
+      <p>没有匹配的商品</p>
+      {{if or .Q .Cat .LowOnly}}<a class="button button--secondary" href="/admin/retail">清空筛选</a>{{else}}<a class="button button--primary" href="/admin/retail/new">新增一个</a>{{end}}
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}

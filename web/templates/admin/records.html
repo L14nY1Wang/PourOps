@@ -1,0 +1,252 @@
+{{define "content"}}
+{{with .Records}}
+{{if eq .Mode "orders"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">销售订单</h1>
+    <p>按开单时间倒序展示；金额分别聚合自订单明细与支付流水，拆单不重复计算。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-info-circle" aria-hidden="true"></i>二维码仅作记账，不是线上收款</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="bar">
+      <nav class="filter-pills" aria-label="订单状态筛选">
+        {{range .Statuses}}
+        <a class="filter-pill{{if eq .Value $.Records.Status}} active{{end}}" href="/admin/records{{if .Value}}?status={{.Value}}{{end}}">{{.Label}}</a>
+        {{end}}
+      </nav>
+      <span class="text-muted small spacer">每页 50 条 · 当前第 {{.Page}} 页</span>
+    </div>
+
+    {{if .Orders}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>单号</th><th>台位</th><th>开单时间</th><th>关单时间</th>
+            <th class="num">已收</th><th class="num">待收</th><th class="num">合计</th>
+            <th>状态</th><th class="num">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Orders}}
+          <tr>
+            <td><a class="mono-num" href="/admin/records/orders/{{.ID}}">#{{.ID}}</a></td>
+            <td><strong>{{.Label}}</strong></td>
+            <td>{{.OpenedText}}</td>
+            <td class="text-muted">{{.ClosedText}}</td>
+            <td class="num text-success">{{.PaidText}}</td>
+            <td class="num{{if gt .Pending 0}} text-danger{{else}} text-muted{{end}}">{{.PendingText}}</td>
+            <td class="num"><strong>{{.TotalText}}</strong></td>
+            <td><span class="badge {{if eq .Status "settled"}}bg-success{{else if eq .Status "partial"}}bg-warning{{else}}bg-secondary{{end}}">{{.StatusText}}</span></td>
+            <td class="num"><a class="button button--secondary button--sm" href="/admin/records/orders/{{.ID}}">详情</a></td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-receipt" aria-hidden="true"></i><p>没有匹配的订单</p></div>
+    {{end}}
+
+    {{if or .PrevURL .NextURL}}
+    <div class="bar mt-3 mb-0">
+      <span class="text-muted small">第 {{.Page}} 页 · 每页 50 条</span>
+      <div class="d-flex gap-2 align-items-center spacer">
+        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>上一页</a>{{end}}
+        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">下一页<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
+      </div>
+    </div>
+    {{end}}
+  </div>
+</div>
+
+{{else if eq .Mode "order"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">订单 #{{.Order.ID}}</h1>
+    <p>商品名、杯型与单价均为下单时的历史快照；二维码仅作记账。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/records"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回销售订单</a>
+  </div>
+</div>
+
+{{with .Order}}
+<div class="card">
+  <div class="card-body">
+    <div class="order-meta-bar">
+      <span class="order-meta-item"><span class="label-muted">台位</span><strong>{{.Label}}</strong></span>
+      <span class="order-meta-item"><span class="label-muted">开单</span><span class="mono-num">{{.OpenedText}}</span></span>
+      <span class="order-meta-item"><span class="label-muted">关单</span><span class="mono-num">{{.ClosedText}}</span></span>
+      <span class="order-meta-item"><span class="label-muted">状态</span><span class="badge {{if eq .Status "settled"}}bg-success{{else if eq .Status "partial"}}bg-warning{{else}}bg-secondary{{end}}">{{.StatusText}}</span></span>
+    </div>
+    <div class="order-summary-grid">
+      <div class="order-summary-box">
+        <span>已收金额</span>
+        <strong class="text-success">{{.PaidText}}</strong>
+      </div>
+      <div class="order-summary-box">
+        <span>待收金额</span>
+        <strong{{if gt .Pending 0}} class="text-danger"{{end}}>{{.PendingText}}</strong>
+      </div>
+      <div class="order-summary-box">
+        <span>订单合计</span>
+        <strong>{{.TotalText}}</strong>
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
+
+{{range $.Records.Checkouts}}
+<div class="card mt-3">
+  <div class="checkout-card-head">
+    <span class="badge bg-success">已结</span>
+    <strong class="mono-num">结账 #{{.Payment.ID}}</strong>
+    <span class="text-muted mono-num">{{.Payment.CreatedText}}</span>
+    <span class="text-muted"><i class="bi bi-person me-1" aria-hidden="true"></i>{{.Payment.ActorText}}</span>
+    <span class="spacer"></span>
+    <span class="text-muted">{{.Payment.Items}} 件</span>
+    <strong class="checkout-card-total">{{.Payment.AmountText}}</strong>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr><th class="wrap-cell">商品快照</th><th>杯型 / 单价</th><th class="num">数量</th><th class="num">金额</th></tr>
+      </thead>
+      <tbody>
+      {{range .Items}}
+        <tr>
+          <td class="wrap-cell"><strong>{{.Name}}</strong><div class="text-muted small">{{.KindText}}</div></td>
+          <td class="text-muted">{{.Detail}}</td>
+          <td class="num">{{.QtyText}}</td>
+          <td class="num"><strong>{{.AmountText}}</strong></td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}
+
+{{if $.Records.Unlinked}}
+<div class="card mt-3">
+  <div class="checkout-card-head">
+    <span class="badge bg-warning">已付 · 未关联支付单</span>
+    <span class="text-muted small">历史数据可能关联了其他订单或不存在的支付记录；按已付展示，不推测补账</span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr><th class="wrap-cell">商品快照</th><th>杯型 / 单价</th><th class="num">数量</th><th class="num">金额</th></tr>
+      </thead>
+      <tbody>
+      {{range $.Records.Unlinked}}
+        <tr>
+          <td class="wrap-cell"><strong>{{.Name}}</strong><div class="text-muted small">{{.KindText}}</div></td>
+          <td class="text-muted">{{.Detail}}</td>
+          <td class="num">{{.QtyText}}</td>
+          <td class="num"><strong>{{.AmountText}}</strong></td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}
+
+{{if $.Records.Unpaid}}
+<div class="card mt-3">
+  <div class="checkout-card-head">
+    <span class="badge bg-secondary">未结明细</span>
+    <span class="spacer"></span>
+    <span class="text-muted">待收</span>
+    <strong class="checkout-card-total text-danger">{{$.Records.Order.PendingText}}</strong>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr><th class="wrap-cell">商品快照</th><th>杯型 / 单价</th><th class="num">数量</th><th class="num">金额</th></tr>
+      </thead>
+      <tbody>
+      {{range $.Records.Unpaid}}
+        <tr>
+          <td class="wrap-cell"><strong>{{.Name}}</strong><div class="text-muted small">{{.KindText}}</div></td>
+          <td class="text-muted">{{.Detail}}</td>
+          <td class="num">{{.QtyText}}</td>
+          <td class="num"><strong>{{.AmountText}}</strong></td>
+        </tr>
+      {{end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+{{end}}
+
+{{if and (not $.Records.Checkouts) (not $.Records.Unpaid) (not $.Records.Unlinked)}}
+<div class="card mt-3"><div class="empty-state"><i class="bi bi-receipt" aria-hidden="true"></i><p>这张单还没有商品</p></div></div>
+{{end}}
+
+{{else}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">营运流水</h1>
+    <p>记录进货、上下架、手工补录/撤销售出与库存变动；与业务同一事务写入。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-journal-text" aria-hidden="true"></i>上线前的旧操作不回填</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="bar">
+      <nav class="filter-pills" aria-label="营运操作类型筛选">
+        {{range .Kinds}}
+        <a class="filter-pill{{if eq .Value $.Records.Kind}} active{{end}}" href="/admin/records/operations{{if .Value}}?kind={{.Value}}{{end}}">{{.Label}}</a>
+        {{end}}
+      </nav>
+    </div>
+
+    {{if .Events}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr><th>发生时间</th><th>类型</th><th class="wrap-cell">对象</th><th class="wrap-cell">详情</th><th>操作者</th></tr>
+        </thead>
+        <tbody>
+        {{range .Events}}
+          <tr>
+            <td class="text-muted mono-num">{{.OccurredText}}</td>
+            <td><span class="op-badge op-badge--{{.Kind}}">{{.KindText}}</span></td>
+            <td class="wrap-cell"><strong>{{.Subject}}</strong></td>
+            <td class="wrap-cell text-muted">{{.Detail}}</td>
+            <td>{{.ActorText}}</td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-journal-text" aria-hidden="true"></i><p>没有匹配的流水</p></div>
+    {{end}}
+
+    {{if or .PrevURL .NextURL}}
+    <div class="bar mt-3 mb-0">
+      <span class="text-muted small">第 {{.Page}} 页 · 每页 50 条</span>
+      <div class="d-flex gap-2 align-items-center spacer">
+        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>上一页</a>{{end}}
+        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">下一页<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
+      </div>
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}
+{{end}}
+{{end}}

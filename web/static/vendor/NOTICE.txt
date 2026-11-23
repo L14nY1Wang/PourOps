@@ -1,0 +1,5 @@
+Vendored frontend dependencies (MIT licensed).
+
+- Bootstrap 5.2.3: https://github.com/twbs/bootstrap (bootstrap-LICENSE)
+- Bootstrap Icons 1.11.3: https://github.com/twbs/icons (bootstrap-icons-LICENSE)
+- Chart.js 4.4.8: https://github.com/chartjs/Chart.js (chartjs-LICENSE)

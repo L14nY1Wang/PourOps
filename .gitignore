@@ -1,0 +1,6 @@
+/pourops
+/bar
+docs/
+.DS_Store
+*.tmp
+*.log

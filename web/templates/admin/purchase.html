@@ -1,0 +1,156 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">新增酒款</h1>
+    <p>进货只入库不上电视，完成后回酒单页填号位上架开桶。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/beers/catalog"><i class="bi bi-journal-bookmark" aria-hidden="true"></i>历史酒单</a>
+    <a class="button button--secondary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/beers/purchase">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-cup-straw" aria-hidden="true"></i>酒款基础信息</h2>
+        <span>优先匹配本店历史酒单，同时联动酒核 UT 同步库自动搜索填充，缺失或需调整时再手动修改</span>
+      </div>
+
+      <div class="basic-info-layout">
+        <div class="poster-panel">
+          <div class="poster-stage">
+            <img id="poster-preview-img" src="{{.Beer.PosterURL}}" alt="酒标预览" referrerpolicy="no-referrer" {{if not .Beer.PosterURL}}hidden{{end}}>
+            <div class="poster-placeholder" id="poster-preview-fallback" {{if .Beer.PosterURL}}hidden{{end}}>
+              <i class="bi bi-image" aria-hidden="true"></i>
+              <span id="poster-placeholder-title">暂无酒标</span>
+              <small id="poster-placeholder-note">搜索酒名自动填充，或粘贴图片地址</small>
+            </div>
+          </div>
+          <div class="editor-field">
+            <label class="label" for="poster_url">酒标图片地址</label>
+            <input class="form-control" type="text" id="poster_url" name="poster_url" value="{{.Beer.PosterURL}}" placeholder="自动填充或粘贴图片地址">
+          </div>
+        </div>
+
+        <div class="basic-info-fields">
+          <div class="editor-grid">
+            <div class="editor-field editor-wide">
+              <label class="label" for="name">酒名<span class="field-required" aria-hidden="true"> *</span></label>
+              <div class="lookup-wrap" id="beer-lookup-wrap" data-mode="purchase">
+                <div class="lookup-row">
+                  <input class="form-control" type="text" id="name" name="name" value="{{.Beer.Name}}" required autocomplete="off" placeholder="输入酒名搜历史酒单或酒核 UT 库，如：树屋 / 星空领航员" aria-autocomplete="list" aria-controls="beer-lookup-menu">
+                  <button class="button button--primary" type="button" id="beer-lookup-btn"><i class="bi bi-search" aria-hidden="true"></i>自动搜索填充</button>
+                </div>
+                <div class="lookup-menu" id="beer-lookup-menu" role="listbox" hidden></div>
+              </div>
+              <div class="lookup-status" id="beer-lookup-status" role="status" aria-live="polite" hidden></div>
+            </div>
+            <div class="editor-field">
+              <label class="label" for="brewery">厂牌</label>
+              <input class="form-control" type="text" id="brewery" name="brewery" value="{{.Beer.Brewery}}" placeholder="酿酒狗">
+            </div>
+            <div class="editor-field">
+              <label class="label" for="style">风格</label>
+              <input class="form-control" type="text" id="style" name="style" value="{{.Beer.Style}}" placeholder="IPA - American">
+            </div>
+            <div class="editor-field">
+              <label class="label" for="category">分类色</label>
+              <select class="form-select" id="category" name="category">
+                <option value="">按风格自动判断</option>
+                {{range .Categories}}
+                <option value="{{.Value}}" {{if eq .Value $.Beer.Category}}selected{{end}}>{{.Label}}</option>
+                {{end}}
+              </select>
+            </div>
+            <div class="editor-field">
+              <label class="label" for="abv">ABV（%）</label>
+              <input class="form-control" type="text" id="abv" name="abv" value="{{.Beer.ABVInput}}" placeholder="5.2">
+            </div>
+            <div class="editor-field">
+              <label class="label" for="ibu">IBU</label>
+              <input class="form-control" type="text" id="ibu" name="ibu" value="{{.Beer.IBUInput}}" placeholder="35">
+            </div>
+          </div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-box-seam" aria-hidden="true"></i>进货与桶装规格</h2>
+        <span>按批写入库存桶，后续上架按桶消耗</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="kegs">进货桶数<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="number" id="kegs" name="kegs" value="{{.KegCount}}" min="1" max="100" required>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="capacity_ml">每桶容量（ml）</label>
+          <input class="form-control" type="number" id="capacity_ml" name="capacity_ml" value="{{.Keg.CapacityML}}" min="1">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="cost">每桶进价（元）</label>
+          <input class="form-control" type="text" id="cost" name="cost" value="{{.CostInput}}" placeholder="1200">
+          <div class="description">用于实时摊销每杯毛利与单桶盈亏</div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-tag" aria-hidden="true"></i>杯型售价</h2>
+        <span>默认按 {{if .Pricing.SellablePct}}{{.Pricing.SellablePct}}{{else}}80{{end}}% 可售与 {{if .Pricing.MarginPct}}{{.Pricing.MarginPct}}{{else}}50{{end}}% 毛利率测算，可拖动滑块实时试算；留空不在点餐端出现</span>
+      </div>
+      <div class="keg-pricing-box" id="keg-pricing-guide" data-default-sellable="{{if .Pricing.SellablePct}}{{.Pricing.SellablePct}}{{else}}80{{end}}" data-default-margin="{{if .Pricing.MarginPct}}{{.Pricing.MarginPct}}{{else}}50{{end}}" aria-live="polite"></div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="price_150">150ml 价（元）</label>
+          <input class="form-control" type="text" id="price_150" name="price_150" value="{{.Beer.Price150Input}}" placeholder="不卖就留空">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="price_330">330ml 价（元）</label>
+          <input class="form-control" type="text" id="price_330" name="price_330" value="{{.Beer.Price330Input}}" placeholder="45">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="price_500">500ml 价（元）</label>
+          <input class="form-control" type="text" id="price_500" name="price_500" value="{{.Beer.Price500Input}}" placeholder="不卖就留空">
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-stars" aria-hidden="true"></i>评分与风味</h2>
+        <span>选填，用于丰富电视酒单展示</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="ut_rating">Untappd 评分</label>
+          <input class="form-control" type="text" id="ut_rating" name="ut_rating" value="{{.Beer.UTInput}}" placeholder="3.70">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="ut_count">评分人数</label>
+          <input class="form-control" type="text" id="ut_count" name="ut_count" value="{{.Beer.UTCountInput}}" placeholder="579855">
+        </div>
+        <div class="editor-field editor-wide">
+          <label class="label" for="tags">风味词</label>
+          <input class="form-control" type="text" id="tags" name="tags" value="{{.Beer.TagsText}}" placeholder="美式IPA、热带水果、苦爽">
+          <div class="description">顿号或逗号分隔，酒单显示前 3 个</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <a class="button button--secondary" href="/admin/beers">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-box-arrow-in-down" aria-hidden="true"></i>入库</button>
+  </div>
+</form>
+{{end}}
+
+{{define "scripts"}}
+<script src="{{asset "/static/js/beer-lookup.js"}}"></script>
+<script src="{{asset "/static/js/keg-pricing.js"}}"></script>
+{{end}}

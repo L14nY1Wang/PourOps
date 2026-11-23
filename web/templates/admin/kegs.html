@@ -1,0 +1,124 @@
+{{define "content"}}
+{{$cfg := .PricingCfg}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">桶装盈亏</h1>
+    <p>按每桶 {{$cfg.SellablePct}}% 可售出酒量与 {{$cfg.MarginPct}}% 目标毛利率核算回本线、推荐售价与下架整桶盈利情况。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>共 {{.KegSummary.TotalCount}} 桶</span>
+    <a class="button button--secondary" href="/admin/beers"><i class="bi bi-cup-straw" aria-hidden="true"></i>酒单 · 桶装</a>
+    <a class="button button--primary" href="/admin/beers/purchase"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增进货</a>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>已开桶总营收</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.KegSummary.TotalRevenueText}}</strong>
+    <div class="stat-meta">已开进价 <strong>{{.KegSummary.TotalCostText}}</strong>{{if gt .KegSummary.StockCostCents 0}} · 在库待开 <strong>{{.KegSummary.StockCostText}}</strong>{{end}} · 在售 {{.KegSummary.ActiveCount}} / 已结 {{.KegSummary.FinishedCount}} / 待开 {{.KegSummary.UntappedCount}}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>已开桶整桶盈亏</span><i class="bi bi-graph-up-arrow {{if .KegSummary.TotalProfitable}}stat-icon--success{{else}}stat-icon--danger{{end}}" aria-hidden="true"></i></div>
+    <strong class="stat-value {{if .KegSummary.TotalProfitable}}text-success{{else}}text-danger{{end}}">{{.KegSummary.TotalProfitText}}</strong>
+    <div class="stat-meta">综合毛利率 <strong>{{.KegSummary.MarginText}}</strong>{{if gt .KegSummary.UncostedCount 0}}（不含 {{.KegSummary.UncostedCount}} 桶待填成本）{{end}}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>已下架桶盈利分布</span><i class="bi bi-clipboard-data stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.KegSummary.FinishedTargetMetCount}} <small>/ {{.KegSummary.FinishedCount}} 达标</small></strong>
+    <div class="stat-meta">微利 <strong>{{.KegSummary.FinishedBelowTargetCount}}</strong> · 保本 <strong>{{.KegSummary.FinishedBreakevenCount}}</strong> · 亏损 <strong>{{.KegSummary.FinishedLossCount}}</strong>{{if gt .KegSummary.FinishedUncostedCount 0}} · 待填成本 <strong>{{.KegSummary.FinishedUncostedCount}}</strong>{{end}}</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>已结桶平均出酒率</span><i class="bi bi-cup-straw stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.KegSummary.AvgFinishedYieldText}}</strong>
+    <div class="stat-meta">核算标准：{{$cfg.SellablePct}}% 可售（预留 {{sub 100 $cfg.SellablePct}}% 损耗）</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="bar">
+      <nav class="filter-pills" aria-label="酒桶状态筛选">
+        <a class="filter-pill{{if eq .Status "all"}} active{{end}}" href="/admin/kegs{{if ne .Verdict "all"}}?verdict={{.Verdict}}{{end}}">全部状态</a>
+        <a class="filter-pill{{if eq .Status "active"}} active{{end}}" href="/admin/kegs?status=active{{if ne .Verdict "all"}}&verdict={{.Verdict}}{{end}}">在售中</a>
+        <a class="filter-pill{{if eq .Status "finished"}} active{{end}}" href="/admin/kegs?status=finished{{if ne .Verdict "all"}}&verdict={{.Verdict}}{{end}}">已下架结桶</a>
+        <a class="filter-pill{{if eq .Status "untapped"}} active{{end}}" href="/admin/kegs?status=untapped{{if ne .Verdict "all"}}&verdict={{.Verdict}}{{end}}">库存待开</a>
+      </nav>
+      <div class="d-flex flex-wrap gap-2 align-items-center spacer">
+        <nav class="filter-pills" aria-label="盈利判定筛选">
+          <a class="filter-pill{{if eq .Verdict "all"}} active{{end}}" href="/admin/kegs{{if ne .Status "all"}}?status={{.Status}}{{end}}">全部结论</a>
+          <a class="filter-pill{{if eq .Verdict "target_met"}} active{{end}}" href="/admin/kegs?verdict=target_met{{if ne .Status "all"}}&status={{.Status}}{{end}}">达标盈利</a>
+          <a class="filter-pill filter-pill--warn{{if eq .Verdict "below_target"}} active{{end}}" href="/admin/kegs?verdict=below_target{{if ne .Status "all"}}&status={{.Status}}{{end}}">盈利未达标</a>
+          <a class="filter-pill filter-pill--warn{{if eq .Verdict "loss"}} active{{end}}" href="/admin/kegs?verdict=loss{{if ne .Status "all"}}&status={{.Status}}{{end}}">亏损未回本</a>
+        </nav>
+        {{if or (ne .Status "all") (ne .Verdict "all")}}<a class="button button--tertiary button--sm" href="/admin/kegs">清空筛选</a>{{end}}
+      </div>
+    </div>
+
+    {{if .Kegs}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th class="wrap-cell">酒款 · 桶信息</th>
+            <th class="num">出酒进度（vs {{$cfg.SellablePct}}%）</th>
+            <th class="num">实收 / 回本线</th>
+            <th class="num">{{$cfg.MarginPct}}% 目标营收</th>
+            <th class="num">整桶盈亏 / 毛利率</th>
+            <th>盈利判定</th>
+            <th class="num">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Kegs}}
+          {{$e := .EconomicsWithConfig nil $cfg}}
+          <tr>
+            <td class="wrap-cell">
+              <div class="d-flex flex-wrap align-items-center gap-2">
+                <a href="/admin/kegs/{{.ID}}"><strong>{{.Title}}</strong></a>
+                <span class="badge {{.Badge}}">{{.Status}}</span>
+              </div>
+              <div class="text-muted small mt-1">
+                {{if .FinishedAt}}开 {{.TappedText}} · 结 {{.FinishedText}}{{else if .TappedAt}}开桶 {{.TappedText}}{{else}}入库 {{.PlacedText}}{{end}}
+              </div>
+            </td>
+            <td class="num">
+              <div><strong>{{$e.ActualYieldPct}}%</strong> <span class="text-muted small">({{.SoldML}} / {{.CapacityML}}ml)</span></div>
+              <div class="text-muted small">{{$cfg.SellablePct}}% 可售 {{$e.SellableML}}ml</div>
+            </td>
+            <td class="num">
+              <div><strong>{{.Revenue}}</strong> <span class="text-muted small">/ {{if $e.HasCost}}{{$e.CostText}}{{else}}未填成本{{end}}</span></div>
+              <div class="text-muted small">{{if $e.HasCost}}回本 {{$e.BreakEvenPct}}%{{if not $e.BreakEvenReached}}（差 {{$e.BreakEvenGapText}}）{{end}}{{else}}—{{end}}</div>
+            </td>
+            <td class="num text-muted">
+              {{if $e.HasCost}}{{$e.TargetRevText}}{{else}}—{{end}}
+            </td>
+            <td class="num">
+              <div class="{{if .Profitable}}text-success{{else}}text-danger{{end}}"><strong>{{.Profit}}</strong></div>
+              <div class="text-muted small">毛利率 {{$e.MarginText}}</div>
+            </td>
+            <td>
+              <span class="verdict-pill {{$e.VerdictPillClass}}" title="{{$e.Diagnosis}}">{{$e.VerdictLabel}}</span>
+            </td>
+            <td class="num">
+              <a class="button button--secondary button--sm" href="/admin/kegs/{{.ID}}">{{if .CanPour}}记售出 / 复盘{{else}}看复盘{{end}}</a>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state">
+      <i class="bi bi-bar-chart-steps" aria-hidden="true"></i>
+      <p>当前筛选下没有酒桶记录</p>
+      {{if or (ne .Status "all") (ne .Verdict "all")}}
+      <a class="button button--secondary" href="/admin/kegs">查看全部酒桶</a>
+      {{else}}
+      <a class="button button--primary" href="/admin/beers/purchase">去进货</a>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}

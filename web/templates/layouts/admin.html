@@ -1,0 +1,108 @@
+{{define "layout"}}<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f3f6fa">
+<title>{{.Title}} - {{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</title>
+<link rel="icon" href="{{asset "/static/brand/pourops.svg"}}" type="image/svg+xml">
+<link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
+<link rel="stylesheet" href="/static/vendor/bootstrap-icons.min.css">
+<link rel="stylesheet" href="{{asset "/static/css/admin.bundle.css"}}">
+{{block "styles" .}}{{end}}
+<script src="{{asset "/static/js/theme.js"}}"></script>
+</head>
+<body class="{{if .Auth}}auth-layout{{else}}app-layout{{end}}" data-page="{{.Nav}}">
+<a class="skip-link" href="#main-content">跳转到主要内容</a>
+
+{{if .Me}}{{if .Me.CanBackend}}
+<aside class="app-sidebar" id="app-sidebar" aria-label="主导航">
+  <a class="sidebar-brand" href="/admin/" aria-label="{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}} 概览">
+    <img class="brand-mark brand-mark--light" src="{{asset "/static/brand/pourops-light.svg"}}" width="30" height="30" alt="" aria-hidden="true">
+    <img class="brand-mark brand-mark--dark" src="{{asset "/static/brand/pourops-dark.svg"}}" width="30" height="30" alt="" aria-hidden="true">
+    <span class="brand-copy">
+      <strong class="brand-word">{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</strong>
+      <span class="brand-sub">运营后台</span>
+    </span>
+  </a>
+  <nav class="sidebar-nav">
+    <span class="nav-section">工作空间</span>
+    <a class="sidebar-link {{if eq .Nav "dashboard"}}active{{end}}" href="/admin/"><i class="bi bi-grid-1x2" aria-hidden="true"></i>经营概览</a>
+    <span class="nav-section">门店管理</span>
+    <a class="sidebar-link {{if eq .Nav "beers"}}active{{end}}" href="/admin/beers"><i class="bi bi-cup-straw" aria-hidden="true"></i>酒单 · 桶装</a>
+    <a class="sidebar-link {{if eq .Nav "kegs"}}active{{end}}" href="/admin/kegs"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>桶装盈亏</a>
+    <a class="sidebar-link {{if eq .Nav "catalog"}}active{{end}}" href="/admin/beers/catalog"><i class="bi bi-journal-bookmark" aria-hidden="true"></i>历史酒单</a>
+    <a class="sidebar-link {{if eq .Nav "retail"}}active{{end}}" href="/admin/retail"><i class="bi bi-box-seam" aria-hidden="true"></i>零售商品</a>
+    <span class="nav-section">记录</span>
+    <a class="sidebar-link {{if eq .Nav "orders"}}active{{end}}" href="/admin/records"><i class="bi bi-receipt" aria-hidden="true"></i>销售订单</a>
+    <a class="sidebar-link {{if eq .Nav "operations"}}active{{end}}" href="/admin/records/operations"><i class="bi bi-journal-text" aria-hidden="true"></i>营运流水</a>
+    <span class="nav-section">媒体</span>
+    <a class="sidebar-link" href="/screen/" target="_blank" rel="noopener"><i class="bi bi-tv" aria-hidden="true"></i>电视酒单<span class="nav-shortcut">TV</span><span class="visually-hidden">（在新窗口打开）</span></a>
+    <a class="sidebar-link" href="/pos/" target="_blank" rel="noopener"><i class="bi bi-lightning-charge" aria-hidden="true"></i>点餐端<span class="nav-shortcut">POS</span><span class="visually-hidden">（在新窗口打开）</span></a>
+    <span class="nav-section">系统</span>
+    {{if .Me.IsBoss}}<a class="sidebar-link {{if eq .Nav "users"}}active{{end}}" href="/admin/users"><i class="bi bi-people" aria-hidden="true"></i>账号</a>
+    <a class="sidebar-link {{if eq .Nav "settings"}}active{{end}}" href="/admin/settings"><i class="bi bi-sliders" aria-hidden="true"></i>系统设置</a>{{end}}
+    <a class="sidebar-link {{if eq .Nav "security"}}active{{end}}" href="/account/security"><i class="bi bi-shield-lock" aria-hidden="true"></i>账号安全</a>
+  </nav>
+  <div class="sidebar-foot" aria-hidden="true">
+    <span class="sidebar-foot-dot"></span>
+    <span>{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}} · 门店端</span>
+  </div>
+</aside>
+<button class="sidebar-backdrop" type="button" tabindex="-1" aria-label="关闭导航" hidden></button>
+{{end}}{{end}}
+
+<div class="app-workspace" id="app-workspace">
+  <header class="app-topbar">
+    <div class="topbar-leading">
+      {{if .Auth}}
+      <span class="auth-brand">
+        <img class="brand-mark brand-mark--light" src="{{asset "/static/brand/pourops-light.svg"}}" width="26" height="26" alt="" aria-hidden="true">
+        <img class="brand-mark brand-mark--dark" src="{{asset "/static/brand/pourops-dark.svg"}}" width="26" height="26" alt="" aria-hidden="true">
+        <strong>{{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</strong>
+        <span>运营后台</span>
+      </span>
+      {{else}}
+      <div class="breadcrumbs">
+        {{if .Me}}{{if .Me.CanBackend}}<button class="button button--tertiary button--icon-only mobile-menu-toggle" type="button" aria-controls="app-sidebar" aria-expanded="false" aria-label="展开导航"><i class="bi bi-list" aria-hidden="true"></i></button>{{end}}{{end}}
+        <span>工作空间</span><i class="bi bi-chevron-right" aria-hidden="true"></i><strong id="current-page-label">{{.Title}}</strong>
+      </div>
+      {{end}}
+    </div>
+    <div class="topbar-actions">
+      <button class="button button--tertiary button--icon-only theme-toggle" type="button" aria-pressed="false" aria-label="深色模式" title="切换主题"><i class="bi bi-moon" aria-hidden="true"></i></button>
+      {{if .Me}}
+      <div class="dropdown">
+        <button class="account-button" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="账号菜单：{{.Me.Username}}">
+          <span class="user-avatar" aria-hidden="true">{{printf "%.1s" .Me.Username}}</span>
+          <span class="account-name">{{.Me.Username}}</span>
+          <span class="account-role">{{.Me.RoleName}}</span>
+          <i class="bi bi-chevron-down" aria-hidden="true"></i>
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end">
+          <li class="dropdown-header"><strong>{{.Me.Username}}</strong>{{.Me.RoleName}}</li>
+          {{if .Me.CanBackend}}<li><a class="dropdown-item" href="/admin/"><i class="bi bi-grid-1x2 me-2" aria-hidden="true"></i>经营概览</a></li>{{end}}
+          <li><a class="dropdown-item" href="/pos/"><i class="bi bi-lightning-charge me-2" aria-hidden="true"></i>点餐端</a></li>
+          <li><a class="dropdown-item" href="/screen/" target="_blank" rel="noopener"><i class="bi bi-tv me-2" aria-hidden="true"></i>电视酒单</a></li>
+          <li><a class="dropdown-item" href="/account/security"><i class="bi bi-shield-lock me-2" aria-hidden="true"></i>账号安全</a></li>
+          <li><hr class="dropdown-divider"></li>
+          <li><form action="/admin/logout" method="post"><button type="submit" class="dropdown-item"><i class="bi bi-box-arrow-right me-2" aria-hidden="true"></i>退出登录</button></form></li>
+        </ul>
+      </div>
+      {{end}}
+    </div>
+  </header>
+
+  <main class="main-content" id="main-content" tabindex="-1">
+    {{if .Msg}}<div class="app-messages"><div class="alert alert-success alert-dismissible fade show" role="status">{{.Msg}}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭提示"></button></div></div>{{end}}
+    {{if .Err}}<div class="app-messages"><div class="alert alert-danger alert-dismissible fade show" role="alert">{{.Err}}<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="关闭提示"></button></div></div>{{end}}
+    {{template "content" .}}
+  </main>
+</div>
+
+<script src="/static/vendor/bootstrap.bundle.min.js"></script>
+<script src="{{asset "/static/js/admin.js"}}"></script>
+{{block "scripts" .}}{{end}}
+</body>
+</html>
+{{end}}

@@ -1,0 +1,91 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">系统设置</h1>
+    <p>配置门店名称、桶装默认核算比例（50%–100% / 10%–85%）与领域事件 Webhook 出站通知。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/kegs"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>桶装盈亏</a>
+    <a class="button button--secondary" href="/admin/"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回概览</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card mb-3" method="post" action="/admin/settings">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-sliders" aria-hidden="true"></i>门店与桶装默认核算参数</h2>
+        <span>即时作用于推荐售价滑块默认值、桶装盈亏测算、电视酒单品牌抬头</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field editor-wide">
+          <label class="label" for="brand">门店名称</label>
+          <input class="form-control" type="text" id="brand" name="brand" value="{{.Settings.Brand}}" maxlength="48" placeholder="PourOps">
+          <div class="description">留空恢复默认店名；电视大屏、点餐端与导出文件同步更新</div>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="default_sellable_pct">默认可售比例（%）</label>
+          <input class="form-control" type="number" id="default_sellable_pct" name="default_sellable_pct" value="{{.Settings.DefaultSellablePct}}" min="50" max="100" required>
+          <div class="description">行业常见 75%–85%（默认 80%，预留 20% 管路与打酒损耗）</div>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="default_margin_pct">默认目标毛利率（%）</label>
+          <input class="form-control" type="number" id="default_margin_pct" name="default_margin_pct" value="{{.Settings.DefaultMarginPct}}" min="10" max="85" required>
+          <div class="description">默认 50%；用于计算单杯推荐售价、回本线与达标判定</div>
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-broadcast" aria-hidden="true"></i>事件 Webhook 扩展接入</h2>
+        <span>事务提交后异步投递 JSON，支持 HMAC-SHA256 签名校验（X-Bar-Signature），失败不阻塞收银或进货</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field editor-wide">
+          <label class="label" for="webhook_url">Webhook 接收地址（URL）</label>
+          <input class="form-control" type="url" id="webhook_url" name="webhook_url" value="{{.Settings.WebhookURL}}" placeholder="https://example.com/bar-webhook 或 http://100.64.x.x:9000/hook">
+          <div class="description">支持 http:// 或 https://；留空则关闭 Webhook 投递</div>
+        </div>
+        <div class="editor-field editor-wide">
+          <label class="label" for="webhook_secret">签名密钥（Secret）{{if .HasSecret}}<span class="badge bg-success ms-1">已配置</span>{{end}}</label>
+          <input class="form-control" type="password" id="webhook_secret" name="webhook_secret" value="" autocomplete="new-password" placeholder="{{if .HasSecret}}保留现有密钥（留空不改，输入新值即覆盖）{{else}}可选：填写后自动附加 X-Bar-Signature: sha256=...{{end}}">
+          {{if .HasSecret}}
+          <label class="label mt-2"><input class="form-check-input" type="checkbox" name="clear_webhook_secret" value="1"> 清空当前签名密钥</label>
+          {{end}}
+        </div>
+        <div class="editor-field editor-wide">
+          <span class="label">订阅领域事件</span>
+          <div class="editor-grid mt-1">
+            {{range .EventOptions}}
+            <div class="editor-checkbox">
+              <label class="label" for="ev_{{.Value}}">
+                <input class="form-check-input" type="checkbox" id="ev_{{.Value}}" name="webhook_events" value="{{.Value}}" {{if index $.SelectedEvents .Value}}checked{{end}}>
+                {{.Label}}
+              </label>
+            </div>
+            {{end}}
+          </div>
+          <div class="description">只发送已勾选的事件；POS 结账、下架结桶复盘或零售低库存可按需对接微信/飞书机器人</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <a class="button button--secondary" href="/admin/">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存设置</button>
+  </div>
+</form>
+
+<div class="card security-card">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+    <div>
+      <h2 class="mb-1"><i class="bi bi-send-check" aria-hidden="true"></i>连通性测试</h2>
+      <p class="text-muted small mb-0">保存后可点击下方按钮立即向已保存的 Webhook URL 发送一条 <code>webhook.test</code> 事件验证签名与网络连通性。</p>
+    </div>
+    <form method="post" action="/admin/settings/webhook-test" class="m-0">
+      <button class="button button--secondary" type="submit" {{if not .Settings.WebhookURL}}disabled{{end}}><i class="bi bi-lightning" aria-hidden="true"></i>发送测试事件</button>
+    </form>
+  </div>
+</div>
+{{end}}
