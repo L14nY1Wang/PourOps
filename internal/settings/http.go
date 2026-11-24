@@ -1,6 +1,8 @@
 package settings
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -31,6 +33,9 @@ func NewService(store *SettingsStore, webhooks *event.WebhookDispatcher, rendere
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/settings", guards.Boss(s.Page))
 	mux.HandleFunc("POST /admin/settings", guards.Boss(s.Save))
+	mux.HandleFunc("POST /admin/settings/categories/add", guards.Boss(s.AddCategory))
+	mux.HandleFunc("POST /admin/settings/categories/delete", guards.Boss(s.DeleteCategory))
+	mux.HandleFunc("POST /admin/settings/categories/reset", guards.Boss(s.ResetCategories))
 	mux.HandleFunc("POST /admin/settings/webhook-test", guards.Boss(s.TestWebhook))
 }
 
@@ -62,10 +67,11 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 	existing := s.store.Get()
 
 	next := StoreSettings{
-		Brand:         strings.TrimSpace(r.FormValue("brand")),
-		WebhookURL:    strings.TrimSpace(r.FormValue("webhook_url")),
-		WebhookSecret: existing.WebhookSecret,
-		WebhookEvents: r.Form["webhook_events"],
+		Brand:          strings.TrimSpace(r.FormValue("brand")),
+		BeerCategories: existing.BeerCategories,
+		WebhookURL:     strings.TrimSpace(r.FormValue("webhook_url")),
+		WebhookSecret:  existing.WebhookSecret,
+		WebhookEvents:  r.Form["webhook_events"],
 	}
 	if r.FormValue("clear_webhook_secret") != "" {
 		next.WebhookSecret = ""
@@ -121,6 +127,51 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("系统设置已保存并实时生效"), http.StatusSeeOther)
+}
+
+func (s *Service) AddCategory(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "表单格式不正确", http.StatusBadRequest)
+		return
+	}
+	raw := strings.TrimSpace(r.FormValue("name"))
+	if _, err := s.store.AddBeerCategory(r.Context(), raw); err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			return
+		}
+		log.Printf("add beer category (%q): %v", raw, err)
+		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("添加分类失败，请稍后重试"), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg(fmt.Sprintf("已添加分类「%s」", raw)), http.StatusSeeOther)
+}
+
+func (s *Service) DeleteCategory(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "表单格式不正确", http.StatusBadRequest)
+		return
+	}
+	raw := strings.TrimSpace(r.FormValue("name"))
+	if _, err := s.store.DeleteBeerCategory(r.Context(), raw); err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			return
+		}
+		log.Printf("delete beer category (%q): %v", raw, err)
+		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("删除分类失败，请稍后重试"), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg(fmt.Sprintf("已从预设列表移除分类「%s」", raw)), http.StatusSeeOther)
+}
+
+func (s *Service) ResetCategories(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.store.ResetBeerCategories(r.Context()); err != nil {
+		log.Printf("reset beer categories: %v", err)
+		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("恢复默认分类失败，请稍后重试"), http.StatusSeeOther)
+		return
+	}
+	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("已恢复默认酒款分类"), http.StatusSeeOther)
 }
 
 func (s *Service) TestWebhook(w http.ResponseWriter, r *http.Request) {

@@ -128,16 +128,20 @@ func GetCatalogBeer(ctx context.Context, pool *pgxpool.Pool, id int64) (CatalogB
 }
 
 func PrepareCatalogBeer(c CatalogBeer) (CatalogBeer, error) {
+	return PrepareCatalogBeerWithCategories(c, platform.DefaultBeerCategories)
+}
+
+func PrepareCatalogBeerWithCategories(c CatalogBeer, allowed []string, extraAllowed ...string) (CatalogBeer, error) {
 	c.Brewery = strings.TrimSpace(c.Brewery)
 	c.Name = strings.TrimSpace(c.Name)
 	c.Style = strings.TrimSpace(c.Style)
 	c.PosterURL = strings.TrimSpace(c.PosterURL)
-	cat, err := platform.ValidateBeerFields(c.Name, c.Category, c.PosterURL, c.ABV, c.UT, c.IBU, c.UTCount, c.Price150, c.Price330, c.Price500, 0)
+	cat, err := platform.ValidateBeerFieldsWithCategories(c.Name, c.Category, c.PosterURL, c.ABV, c.UT, c.IBU, c.UTCount, c.Price150, c.Price330, c.Price500, 0, allowed, extraAllowed...)
 	if err != nil {
 		return c, err
 	}
 	if cat == "" {
-		cat = platform.ToneOf(c.Style)
+		cat = platform.InferCategory(c.Style, allowed)
 	}
 	c.Category = cat
 	if c.CapacityML <= 0 {
@@ -161,7 +165,11 @@ func mapCatalogSaveErr(err error) error {
 }
 
 func SaveCatalogBeer(ctx context.Context, pool *pgxpool.Pool, c CatalogBeer) (int64, error) {
-	c, err := PrepareCatalogBeer(c)
+	return SaveCatalogBeerWithCategories(ctx, pool, c, platform.DefaultBeerCategories)
+}
+
+func SaveCatalogBeerWithCategories(ctx context.Context, pool *pgxpool.Pool, c CatalogBeer, allowed []string, extraAllowed ...string) (int64, error) {
+	c, err := PrepareCatalogBeerWithCategories(c, allowed, extraAllowed...)
 	if err != nil {
 		return 0, err
 	}
@@ -198,6 +206,11 @@ func DeleteCatalogBeer(ctx context.Context, pool *pgxpool.Pool, id int64) error 
 
 // UpsertCatalogFromBeer 在进货入库或保存酒款时把最新资料沉淀到历史酒单。
 func UpsertCatalogFromBeer(ctx context.Context, q platform.Querier, b Beer, capacityML, costCents int, updateKegSpec bool) error {
+	return UpsertCatalogFromBeerWithCategories(ctx, q, b, capacityML, costCents, updateKegSpec, platform.DefaultBeerCategories)
+}
+
+// UpsertCatalogFromBeerWithCategories 在沉淀历史酒单时使用门店当前分类表推断缺失分类。
+func UpsertCatalogFromBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, capacityML, costCents int, updateKegSpec bool, allowed []string) error {
 	brewery := strings.TrimSpace(b.Brewery)
 	name := strings.TrimSpace(b.Name)
 	if name == "" {
@@ -206,7 +219,7 @@ func UpsertCatalogFromBeer(ctx context.Context, q platform.Querier, b Beer, capa
 	style := strings.TrimSpace(b.Style)
 	cat := strings.TrimSpace(b.Category)
 	if cat == "" {
-		cat = platform.ToneOf(style)
+		cat = platform.InferCategory(style, allowed)
 	}
 	poster := strings.TrimSpace(b.PosterURL)
 	if !platform.ValidPosterURL(poster) {
@@ -281,6 +294,10 @@ type ImportResult struct {
 }
 
 func ApplyCatalogMerge(dst CatalogBeer, src ImportItem) CatalogBeer {
+	return ApplyCatalogMergeWithCategories(dst, src, platform.DefaultBeerCategories)
+}
+
+func ApplyCatalogMergeWithCategories(dst CatalogBeer, src ImportItem, allowed []string) CatalogBeer {
 	if src.Mask.Brewery {
 		dst.Brewery = src.Beer.Brewery
 	}
@@ -292,7 +309,7 @@ func ApplyCatalogMerge(dst CatalogBeer, src ImportItem) CatalogBeer {
 		dst.Category = src.Beer.Category
 	}
 	if dst.Category == "" {
-		dst.Category = platform.ToneOf(dst.Style)
+		dst.Category = platform.InferCategory(dst.Style, allowed)
 	}
 	if src.Mask.ABV {
 		dst.ABV = src.Beer.ABV
@@ -354,6 +371,10 @@ func insertCatalogDoNothingTx(ctx context.Context, tx pgx.Tx, c CatalogBeer) (pg
 }
 
 func ImportCatalogBeers(ctx context.Context, pool *pgxpool.Pool, items []ImportItem, mode string) (ImportResult, error) {
+	return ImportCatalogBeersWithCategories(ctx, pool, items, mode, platform.DefaultBeerCategories)
+}
+
+func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, items []ImportItem, mode string, allowed []string) (ImportResult, error) {
 	if mode == "" {
 		mode = "merge"
 	}
@@ -373,7 +394,7 @@ func ImportCatalogBeers(ctx context.Context, pool *pgxpool.Pool, items []ImportI
 			return ImportResult{}, platform.UserErr("酒款名称不能为空")
 		}
 		if mode == "skip" {
-			c, err := PrepareCatalogBeer(ApplyCatalogMerge(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it))
+			c, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it, allowed), allowed)
 			if err != nil {
 				return ImportResult{}, err
 			}
@@ -391,7 +412,7 @@ func ImportCatalogBeers(ctx context.Context, pool *pgxpool.Pool, items []ImportI
 
 		existing, err := findCatalogForUpdateTx(ctx, tx, it.Beer.Brewery, it.Beer.Name)
 		if errors.Is(err, pgx.ErrNoRows) {
-			c, perr := PrepareCatalogBeer(ApplyCatalogMerge(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it))
+			c, perr := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it, allowed), allowed)
 			if perr != nil {
 				return ImportResult{}, perr
 			}
@@ -408,7 +429,7 @@ func ImportCatalogBeers(ctx context.Context, pool *pgxpool.Pool, items []ImportI
 		if err != nil {
 			return ImportResult{}, err
 		}
-		merged, err := PrepareCatalogBeer(ApplyCatalogMerge(existing, it))
+		merged, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(existing, it, allowed), allowed, existing.Category)
 		if err != nil {
 			return ImportResult{}, err
 		}

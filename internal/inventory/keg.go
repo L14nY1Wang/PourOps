@@ -558,11 +558,16 @@ func UntapBeerResult(ctx context.Context, pool *pgxpool.Pool, beerID int64) (int
 // PurchaseBeerTx 在同一个事务里复用或新建酒款、记库存桶、写入流水并沉淀到历史酒单：
 // 任何一步失败都整体回滚，不会留下没有库存的酒款，重试也不会多建一款。
 func PurchaseBeerTx(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, count, capacityML, costCents int) (int64, error) {
+	return PurchaseBeerTxWithCategories(ctx, pool, b, count, capacityML, costCents, platform.DefaultBeerCategories)
+}
+
+// PurchaseBeerTxWithCategories 使用门店当前动态酒款分类表完成进货入库、建桶与历史酒单沉淀。
+func PurchaseBeerTxWithCategories(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, count, capacityML, costCents int, allowed []string) (int64, error) {
 	b.Brewery = strings.TrimSpace(b.Brewery)
 	b.Name = strings.TrimSpace(b.Name)
 	b.Style = strings.TrimSpace(b.Style)
 	b.PosterURL = strings.TrimSpace(b.PosterURL)
-	if _, err := platform.ValidateBeerFields(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder); err != nil {
+	if _, err := platform.ValidateBeerFieldsWithCategories(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder, allowed); err != nil {
 		return 0, err
 	}
 
@@ -575,8 +580,12 @@ func PurchaseBeerTx(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, cou
 	// 按「酒款行 → 桶行」顺序先锁定同名酒款：补货已有酒款时复用同一行并保留号位/上屏设置。
 	target := b
 	existing, err := catalog.FindBeerForUpdate(ctx, tx, b.Brewery, b.Name)
+	var extraAllowed []string
 	switch {
 	case err == nil:
+		if existing.Category != "" {
+			extraAllowed = append(extraAllowed, existing.Category)
+		}
 		merged := existing
 		if b.Brewery != "" {
 			merged.Brewery = b.Brewery
@@ -617,7 +626,7 @@ func PurchaseBeerTx(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, cou
 		return 0, err
 	}
 
-	id, err := catalog.SaveBeer(ctx, tx, target)
+	id, err := catalog.SaveBeerWithCategories(ctx, tx, target, allowed, extraAllowed...)
 	if err != nil {
 		return 0, err
 	}
@@ -628,7 +637,7 @@ func PurchaseBeerTx(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, cou
 	if err := platform.LogOperation(ctx, tx, platform.OpPurchase, platform.BeerSubject(target.Brewery, target.Name), detail); err != nil {
 		return 0, err
 	}
-	if err := catalog.UpsertCatalogFromBeer(ctx, tx, target, capacityML, costCents, true); err != nil {
+	if err := catalog.UpsertCatalogFromBeerWithCategories(ctx, tx, target, capacityML, costCents, true, allowed); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit(ctx)

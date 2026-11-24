@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ReportZone 固定按北京时间 UTC+8 划分日报与导出时间。
@@ -43,64 +45,234 @@ type Option struct {
 	Label string
 }
 
-var Categories = []Option{
-	{Value: "fresh", Label: "清爽"},
-	{Value: "hop", Label: "酒花"},
-	{Value: "sour", Label: "酸野菌"},
-	{Value: "dark", Label: "深色"},
-	{Value: "strong", Label: "烈性"},
+const (
+	MaxBeerCategories    = 50
+	MaxBeerCategoryRunes = 20
+)
+
+// DefaultBeerCategories 定义酒款默认预设风格分类；可在系统设置中增删维护。
+var DefaultBeerCategories = []string{
+	"IPA", "拉格", "皮尔森", "小麦", "酸小麦", "果泥", "西打", "世涛", "波特", "修道院",
 }
 
-func CategoryLabel(v string) string {
-	for _, c := range Categories {
-		if c.Value == v {
-			return c.Label
+// Categories 保持默认酒款分类选项列表（未传入动态分类配置时兜底使用）。
+var Categories = CategoryOptions(DefaultBeerCategories)
+
+// CategoryOptions 把分类名称列表转成表单与筛选共用的 Option 切片。
+func CategoryOptions(names []string) []Option {
+	if len(names) == 0 {
+		names = DefaultBeerCategories
+	}
+	out := make([]Option, 0, len(names))
+	for _, n := range names {
+		trimmed := strings.TrimSpace(n)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, Option{Value: trimmed, Label: trimmed})
+	}
+	if len(out) == 0 {
+		return CategoryOptions(DefaultBeerCategories)
+	}
+	return out
+}
+
+// ValidateBeerCategoryName 校验单个酒款分类名称并去除首尾空白。
+func ValidateBeerCategoryName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", UserErr("分类名称不能为空")
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", UserErr("分类名称不能包含控制字符")
 		}
 	}
-	return v
+	if utf8.RuneCountInString(name) > MaxBeerCategoryRunes {
+		return "", UserErrf("分类名称最多 %d 个字", MaxBeerCategoryRunes)
+	}
+	return name, nil
 }
 
-func ParseCategory(raw string) (string, error) {
+// NormalizeBeerCategories 对分类列表做严格校验并按大小写不敏感去重。
+func NormalizeBeerCategories(raw []string) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, item := range raw {
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		name, err := ValidateBeerCategoryName(item)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(name)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil, UserErr("至少保留 1 个酒款分类")
+	}
+	if len(out) > MaxBeerCategories {
+		return nil, UserErrf("酒款分类最多 %d 个", MaxBeerCategories)
+	}
+	return out, nil
+}
+
+var legacyCategoryAliases = map[string]string{
+	"hop":    "IPA",
+	"酒花":     "IPA",
+	"fresh":  "拉格",
+	"清爽":     "拉格",
+	"sour":   "酸小麦",
+	"酸野菌":    "酸小麦",
+	"dark":   "世涛",
+	"深色":     "世涛",
+	"strong": "修道院",
+	"烈性":     "修道院",
+}
+
+// CategoryLabel 返回适合展示的酒款分类名称；历史旧编码会自动映射为新版中文分类名。
+func CategoryLabel(v string) string {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return ""
+	}
+	if mapped, ok := legacyCategoryAliases[strings.ToLower(s)]; ok {
+		return mapped
+	}
+	return s
+}
+
+// ParseCategoryWithAllowed 按门店动态分类列表校验分类输入（支持历史旧分类别名自动转换）。
+func ParseCategoryWithAllowed(raw string, allowed []string, extraAllowed ...string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
 		return "", nil
 	}
-	lower := strings.ToLower(v)
-	for _, c := range Categories {
-		if lower == c.Value || v == c.Label {
-			return c.Value, nil
+	if len(allowed) == 0 {
+		allowed = DefaultBeerCategories
+	}
+	candidates := make([]string, 0, len(allowed)+len(extraAllowed))
+	for _, c := range allowed {
+		if c = strings.TrimSpace(c); c != "" {
+			candidates = append(candidates, c)
 		}
 	}
-	return "", UserErrf("不支持的分类色 %q（可选：清爽/fresh、酒花/hop、酸野菌/sour、深色/dark、烈性/strong）", v)
+	for _, c := range extraAllowed {
+		if c = strings.TrimSpace(c); c != "" {
+			candidates = append(candidates, c)
+		}
+	}
+	for _, cand := range candidates {
+		if strings.EqualFold(v, cand) {
+			return cand, nil
+		}
+	}
+	if alias, ok := legacyCategoryAliases[strings.ToLower(v)]; ok {
+		for _, cand := range candidates {
+			if strings.EqualFold(alias, cand) {
+				return cand, nil
+			}
+		}
+	}
+	return "", UserErrf("不支持的酒款分类 %q（可在系统设置中添加分类）", v)
 }
 
-// 风格 -> 分类色，规则与 web/templates/screen/screen.html 里的 tone() 保持一致（支持中英文风格名）。
-var ToneRules = []struct {
-	Tone string
-	Re   *regexp.Regexp
+func ParseCategory(raw string) (string, error) {
+	return ParseCategoryWithAllowed(raw, DefaultBeerCategories)
+}
+
+// styleCategoryRules 将中英文风格描述映射到精酿风格分类，按从具体到通用顺序匹配。
+var styleCategoryRules = []struct {
+	Category string
+	Re       *regexp.Regexp
 }{
-	{"sour", regexp.MustCompile(`lambic|gueuze|geuze|sour|berliner|wild|brett|gose|酸|贵兹|兰比克|野菌|柏林|古斯`)},
-	{"hop", regexp.MustCompile(`ipa|pale ale|pilsner|pale lager|皮尔森|比尔森|淡色拉格|淡色艾尔|淡艾|酒花|印度淡`)},
-	{"dark", regexp.MustCompile(`stout|porter|quadrupel|dubbel|barleywine|brown ale|schwarz|世涛|波特|四料|双料|黑啤|棕艾|大麦酒|烤麦`)},
-	{"strong", regexp.MustCompile(`tripel|strong|barley wine|abbey|trappist|imperial|barrel|三料|烈性|修道院|帝国|过桶|高度`)},
-	{"fresh", regexp.MustCompile(`lager|wheat|weiss|witbier|kölsch|kolsch|blonde|saison|pale|拉格|小麦|白啤|科隆|金色|赛松|清爽`)},
+	{"西打", regexp.MustCompile(`cider|perry|pomme|苹果酒|西打`)},
+	{"果泥", regexp.MustCompile(`smoothie|puree|slush|fruited|pastry sour|果泥|奶昔`)},
+	{"酸小麦", regexp.MustCompile(`berliner|gose|lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸小麦|柏林|古斯|贵兹|兰比克|野菌|酸`)},
+	{"IPA", regexp.MustCompile(`\bipa\b|neipa|dipa|tipa|india pale|pale ale|\bapa\b|hazy|印度淡|浑浊|酒花`)},
+	{"世涛", regexp.MustCompile(`stout|irish dry|imperial black|世涛|黑啤`)},
+	{"波特", regexp.MustCompile(`porter|baltic|波特`)},
+	{"皮尔森", regexp.MustCompile(`pilsner|pilsener|\bpils\b|bohemian|皮尔森|比尔森`)},
+	{"小麦", regexp.MustCompile(`wheat|witbier|hefeweizen|weizen|weisse|weissbier|blanche|white ale|小麦|白啤`)},
+	{"修道院", regexp.MustCompile(`trappist|abbey|tripel|dubbel|quadrupel|belgian strong|\bquad\b|修道院|三料|双料|四料|烈性`)},
+	{"拉格", regexp.MustCompile(`lager|helles|dunkel|marzen|märzen|bock|kolsch|kölsch|vienna|schwarz|拉格|海勒|博克|科隆|清爽`)},
 }
 
-func MatchTone(style string) string {
-	s := strings.ToLower(style)
-	for _, r := range ToneRules {
+// MatchCategory 根据酒款风格与当前可用分类列表尝试匹配分类名；不猜中时返回空串。
+func MatchCategory(style string, available []string) string {
+	s := strings.ToLower(strings.TrimSpace(style))
+	if s == "" {
+		return ""
+	}
+	if len(available) == 0 {
+		available = DefaultBeerCategories
+	}
+	clean := make([]string, 0, len(available))
+	normMap := make(map[string]string, len(available))
+	for _, a := range available {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		key := strings.ToLower(a)
+		if _, ok := normMap[key]; !ok {
+			normMap[key] = a
+			clean = append(clean, a)
+		}
+	}
+	// 先按字符长度降序尝试直接子串匹配（如老板新增的「赛松」「科隆」等分类）
+	byLen := slices.Clone(clean)
+	slices.SortStableFunc(byLen, func(a, b string) int {
+		return utf8.RuneCountInString(b) - utf8.RuneCountInString(a)
+	})
+	for _, name := range byLen {
+		if strings.Contains(s, strings.ToLower(name)) {
+			return name
+		}
+	}
+	for _, r := range styleCategoryRules {
 		if r.Re.MatchString(s) {
-			return r.Tone
+			if canonical, ok := normMap[strings.ToLower(r.Category)]; ok {
+				return canonical
+			}
 		}
 	}
 	return ""
 }
 
-func ToneOf(style string) string {
-	if t := MatchTone(style); t != "" {
-		return t
+// InferCategory 按风格推断酒款分类；未匹配到规则时默认回退到可用列表中的「拉格」或首项。
+func InferCategory(style string, available []string) string {
+	if len(available) == 0 {
+		available = DefaultBeerCategories
 	}
-	return "fresh"
+	if c := MatchCategory(style, available); c != "" {
+		return c
+	}
+	for _, a := range available {
+		if strings.TrimSpace(a) == "拉格" {
+			return "拉格"
+		}
+	}
+	for _, a := range available {
+		if t := strings.TrimSpace(a); t != "" {
+			return t
+		}
+	}
+	return DefaultBeerCategories[0]
+}
+
+// MatchTone 与 ToneOf 保留供默认分类自动推断调用，均使用当前新版精酿风格分类名。
+func MatchTone(style string) string {
+	return MatchCategory(style, DefaultBeerCategories)
+}
+
+func ToneOf(style string) string {
+	return InferCategory(style, DefaultBeerCategories)
 }
 
 // ValidPosterURL 仅允许空串、http(s):// 或站内相对路径 /...，拦截 javascript: 等危险协议。
@@ -329,13 +501,18 @@ func ParseSortOrder(raw string) (int, error) {
 }
 
 func ValidateBeerFields(name, category, posterURL string, abv, ut *float64, ibu, utCount *int, p150, p330, p500, sortOrder int) (string, error) {
+	return ValidateBeerFieldsWithCategories(name, category, posterURL, abv, ut, ibu, utCount, p150, p330, p500, sortOrder, DefaultBeerCategories)
+}
+
+// ValidateBeerFieldsWithCategories 按指定分类白名单校验酒款与历史酒单共有字段。
+func ValidateBeerFieldsWithCategories(name, category, posterURL string, abv, ut *float64, ibu, utCount *int, p150, p330, p500, sortOrder int, allowed []string, extraAllowed ...string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", UserErr("酒款名称不能为空")
 	}
 	if !ValidPosterURL(posterURL) {
 		return "", UserErr("酒标图片地址需为 http://、https:// 或站内路径 / 开头")
 	}
-	cat, err := ParseCategory(category)
+	cat, err := ParseCategoryWithAllowed(category, allowed, extraAllowed...)
 	if err != nil {
 		return "", err
 	}
@@ -381,6 +558,11 @@ type BeerFormInput struct {
 }
 
 func ParseBeerForm(r *http.Request) (BeerFormInput, error) {
+	return ParseBeerFormWithCategories(r, DefaultBeerCategories)
+}
+
+// ParseBeerFormWithCategories 使用当前动态酒款分类白名单解析并校验酒款表单。
+func ParseBeerFormWithCategories(r *http.Request, allowed []string, extraAllowed ...string) (BeerFormInput, error) {
 	in := BeerFormInput{
 		Brewery:   strings.TrimSpace(r.FormValue("brewery")),
 		Name:      strings.TrimSpace(r.FormValue("name")),
@@ -424,7 +606,7 @@ func ParseBeerForm(r *http.Request) (BeerFormInput, error) {
 	if !ValidPosterURL(in.PosterURL) {
 		return in, UserErr("酒标图片地址需为 http://、https:// 或站内路径 / 开头")
 	}
-	cat, catErr := ParseCategory(in.Category)
+	cat, catErr := ParseCategoryWithAllowed(in.Category, allowed, extraAllowed...)
 	if catErr != nil {
 		return in, catErr
 	}

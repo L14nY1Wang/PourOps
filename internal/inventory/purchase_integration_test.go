@@ -41,7 +41,7 @@ func TestPurchaseBeerHandlerCommitsKegs(t *testing.T) {
 	})
 
 	form := url.Values{
-		"brewery": {"测试厂"}, "name": {"进货 IPA"}, "style": {"IPA"}, "category": {"hop"},
+		"brewery": {"测试厂"}, "name": {"进货 IPA"}, "style": {"IPA"}, "category": {"IPA"},
 		"abv": {"5.2"}, "kegs": {"2"}, "capacity_ml": {"30000"},
 		"cost": {"1200"}, "price_330": {"45"},
 	}
@@ -94,7 +94,7 @@ func TestPurchaseBeerRejectsBadInput(t *testing.T) {
 		{"ibu", "2147483648", "IBU"},
 		{"ut_rating", "5.5", "UT"},
 		{"ut_count", "-1", "评分人数"},
-		{"category", "rainbow", "分类色"},
+		{"category", "rainbow", "酒款分类"},
 		{"poster_url", "javascript:alert(1)", "酒标"},
 		{"price_330", "-5", "330ml"},
 		{"price_500", "30000000", "500ml"},
@@ -171,7 +171,7 @@ func TestPurchaseBeerTxReusesExistingBeer(t *testing.T) {
 		Brewery:   "树屋",
 		Name:      "尤利乌斯",
 		Style:     "IPA",
-		Category:  "hop",
+		Category:  "IPA",
 		Price330:  4500,
 		SalesTags: []string{"招牌"},
 		OnScreen:  true,
@@ -247,7 +247,7 @@ func TestSaveBeerStrictValidationAndErrorSanitization(t *testing.T) {
 		{"abv", "105", "ABV"},
 		{"ibu", "2147483648", "IBU"},
 		{"ut_rating", "6", "UT"},
-		{"category", "bad", "分类色"},
+		{"category", "bad", "酒款分类"},
 		{"poster_url", "javascript:alert(1)", "酒标"},
 		{"price_150", "-10", "150ml"},
 		{"sort_order", "2147483648", "排序"},
@@ -288,5 +288,46 @@ func TestSaveBeerStrictValidationAndErrorSanitization(t *testing.T) {
 		if wDel.Code != http.StatusSeeOther || !strings.Contains(locDel, "删除失败，请稍后重试") || strings.Contains(locDel, "closed pool") {
 			t.Fatalf("DeleteBeerHandler DB 错误未脱敏: code=%d loc=%q", wDel.Code, locDel)
 		}
+	}
+}
+
+func TestDynamicCategoriesPurchaseEditAndDeleteFallback(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	svc, cfg, _ := newTestService(t, pool)
+	ctx := context.Background()
+	if err := cfg.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.AddBeerCategory(ctx, "赛松"); err != nil {
+		t.Fatal(err)
+	}
+
+	wPur := purchasePostForm(svc.PurchaseBeer, url.Values{
+		"brewery": {"农舍厂"}, "name": {"农舍赛松"}, "style": {"Saison"}, "category": {"赛松"},
+		"kegs": {"1"}, "capacity_ml": {"20000"}, "cost": {"1000"}, "price_330": {"48"},
+	})
+	if wPur.Code != http.StatusSeeOther {
+		t.Fatalf("自定义分类进货应 303，实际 %d: %s", wPur.Code, wPur.Body.String())
+	}
+	var beerID int64
+	if err := pool.QueryRow(ctx, `select id from beers where name='农舍赛松'`).Scan(&beerID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := cfg.DeleteBeerCategory(ctx, "赛松"); err != nil {
+		t.Fatal(err)
+	}
+	wSaveOld := purchasePostForm(svc.SaveBeer, url.Values{
+		"id": {fmt.Sprintf("%d", beerID)}, "brewery": {"农舍厂"}, "name": {"农舍赛松"}, "style": {"Saison"}, "category": {"赛松"}, "price_330": {"50"},
+	})
+	if wSaveOld.Code != http.StatusSeeOther {
+		t.Fatalf("删除预设分类后编辑既有酒款保留原分类应 303，实际 %d: %s", wSaveOld.Code, wSaveOld.Body.String())
+	}
+
+	wNewRejected := purchasePostForm(svc.PurchaseBeer, url.Values{
+		"name": {"另一款赛松"}, "category": {"赛松"}, "kegs": {"1"}, "capacity_ml": {"20000"}, "cost": {"1000"},
+	})
+	if wNewRejected.Code != http.StatusBadRequest || !strings.Contains(wNewRejected.Body.String(), "酒款分类") {
+		t.Fatalf("删除预设分类后新进货应返回 400 且提示酒款分类，实际 code=%d", wNewRejected.Code)
 	}
 }

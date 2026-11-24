@@ -166,7 +166,7 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 		Brewery:    "树屋",
 		Name:       "尤利乌斯",
 		Style:      "IPA - Hazy",
-		Category:   "hop",
+		Category:   "IPA",
 		PosterURL:  "https://assets.untappd.com/julius.jpg",
 		CapacityML: 20000,
 		CostCents:  130000,
@@ -259,7 +259,7 @@ func TestCatalogSaveStrictValidation(t *testing.T) {
 		{"ibu", "-1", "IBU"},
 		{"ut_rating", "5.5", "UT"},
 		{"ut_count", "2147483648", "评分人数"},
-		{"category", "rainbow", "分类色"},
+		{"category", "rainbow", "酒款分类"},
 		{"poster_url", "javascript:alert(1)", "酒标"},
 		{"price_330", "30000000", "330ml"},
 	} {
@@ -284,7 +284,7 @@ func TestCatalogImportConcurrentWithUpsertNo23505(t *testing.T) {
 				Brewery:    brewery,
 				Name:       name,
 				Style:      "IPA - American",
-				Category:   "hop",
+				Category:   "IPA",
 				CapacityML: 20000,
 				Price330:   4800,
 			},
@@ -307,7 +307,7 @@ func TestCatalogImportConcurrentWithUpsertNo23505(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				<-start
-				b := Beer{Brewery: brewery, Name: name, Style: "IPA - Hazy", Category: "hop", Price330: 5000}
+				b := Beer{Brewery: brewery, Name: name, Style: "IPA - Hazy", Category: "IPA", Price330: 5000}
 				if err := UpsertCatalogFromBeer(ctx, pool, b, 20000, 120000, true); err != nil {
 					errCh <- fmt.Errorf("upsert(%s) #%d: %w", mode, idx, err)
 				}
@@ -357,5 +357,156 @@ func TestCatalogDBErrorSanitization(t *testing.T) {
 	locImp, _ := url.QueryUnescape(wImp.Header().Get("Location"))
 	if wImp.Code != http.StatusSeeOther || !strings.Contains(locImp, "导入失败，请稍后重试") || strings.Contains(locImp, "closed pool") {
 		t.Fatalf("CatalogImport DB 错误未脱敏: code=%d loc=%q", wImp.Code, locImp)
+	}
+}
+
+func TestMigration0012BeerCategoriesAndDynamicSettings(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("TEST_DATABASE_URL 未设置，跳过数据库测试")
+	}
+
+	ctx := context.Background()
+	schema := fmt.Sprintf("test_cat_mig12_%d", os.Getpid())
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("连接 TEST_DATABASE_URL 失败: %v", err)
+	}
+	if _, err := admin.Exec(ctx, `drop schema if exists `+pgx.Identifier{schema}.Sanitize()+` cascade`); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(ctx, `create schema `+pgx.Identifier{schema}.Sanitize()); err != nil {
+		admin.Close()
+		t.Fatal(err)
+	}
+	admin.Close()
+	t.Cleanup(func() {
+		if a, err := pgxpool.New(context.Background(), dsn); err == nil {
+			a.Exec(context.Background(), `drop schema if exists `+pgx.Identifier{schema}.Sanitize()+` cascade`)
+			a.Close()
+		}
+	})
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema
+	migPool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migPool.Close()
+
+	conn, err := migPool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name >= "0012_" {
+			continue
+		}
+		sqlBytes, err := fs.ReadFile(migrations.FS, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := platform.MigrateOneForTest(ctx, conn, name, string(sqlBytes)); err != nil {
+			t.Fatalf("前置迁移 %s 失败: %v", name, err)
+		}
+	}
+
+	seeds := []struct {
+		name, style, oldCat, wantCat string
+	}{
+		{"朋克", "IPA - American", "hop", "IPA"},
+		{"高岩西打", "Dry Cider", "fresh", "西打"},
+		{"老贵兹", "Lambic - Gueuze", "酸野菌", "酸小麦"},
+		{"早餐世涛", "Imperial Stout", "深色", "世涛"},
+		{"三料修道", "Belgian Tripel", "strong", "修道院"},
+		{"农舍赛松", "Farmhouse Saison", "赛松", "赛松"},
+	}
+	for _, s := range seeds {
+		if _, err := conn.Exec(ctx, `insert into beers (name, style, category) values ($1, $2, $3)`, s.name, s.style, s.oldCat); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, `insert into beer_catalog (name, style, category) values ($1, $2, $3)`, s.name, s.style, s.oldCat); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sql0012Bytes, err := fs.ReadFile(migrations.FS, "0012_beer_categories.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.MigrateOneForTest(ctx, conn, "0012_beer_categories.sql", string(sql0012Bytes)); err != nil {
+		t.Fatalf("0012 迁移执行失败: %v", err)
+	}
+	// 再次直接重跑 0012 SQL 确保幂等。
+	if _, err := conn.Exec(ctx, string(sql0012Bytes)); err != nil {
+		t.Fatalf("0012 重复执行应幂等，实际报错: %v", err)
+	}
+
+	for _, s := range seeds {
+		var beerCat, catCat string
+		if err := conn.QueryRow(ctx, `select category from beers where name=$1`, s.name).Scan(&beerCat); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.QueryRow(ctx, `select category from beer_catalog where name=$1`, s.name).Scan(&catCat); err != nil {
+			t.Fatal(err)
+		}
+		if beerCat != s.wantCat || catCat != s.wantCat {
+			t.Fatalf("%s 迁移结果不对: beers=%q beer_catalog=%q, want %q", s.name, beerCat, catCat, s.wantCat)
+		}
+	}
+
+	// 动态自定义分类：新增“赛松”可保存；删除预设后编辑原酒款仍可保留，新建则拒绝。
+	pool := platform.NewTestPool(t, migrations.FS)
+	cfg := settings.NewSettingsStore(pool, "PourOps")
+	if err := cfg.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.AddBeerCategory(ctx, "赛松"); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(pool, testCatalogRenderer(), cfg, nil)
+
+	wAdd := postForm(svc.CatalogSave, url.Values{"name": {"农舍赛松"}, "category": {"赛松"}, "capacity_ml": {"20000"}})
+	if wAdd.Code != http.StatusSeeOther {
+		t.Fatalf("新增自定义分类酒款应成功 303，实际 %d: %s", wAdd.Code, wAdd.Body.String())
+	}
+	list, err := ListCatalogBeers(ctx, pool, "农舍赛松", "赛松")
+	if err != nil || len(list) != 1 || list[0].Category != "赛松" {
+		t.Fatalf("按自定义分类筛选历史酒单失败: len=%d list=%+v err=%v", len(list), list, err)
+	}
+
+	if _, err := cfg.DeleteBeerCategory(ctx, "赛松"); err != nil {
+		t.Fatal(err)
+	}
+	wEditExisting := postForm(svc.CatalogSave, url.Values{
+		"id": {fmt.Sprintf("%d", list[0].ID)}, "name": {"农舍赛松-编辑"}, "category": {"赛松"}, "capacity_ml": {"20000"},
+	})
+	if wEditExisting.Code != http.StatusSeeOther {
+		t.Fatalf("分类被删后编辑既有历史酒款仍应成功 303，实际 %d: %s", wEditExisting.Code, wEditExisting.Body.String())
+	}
+	wNewRejected := postForm(svc.CatalogSave, url.Values{"name": {"新赛松"}, "category": {"赛松"}, "capacity_ml": {"20000"}})
+	if wNewRejected.Code != http.StatusBadRequest {
+		t.Fatalf("分类被删后新建历史酒款应返回 400，实际 %d", wNewRejected.Code)
 	}
 }

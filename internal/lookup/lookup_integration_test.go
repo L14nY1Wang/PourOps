@@ -24,7 +24,7 @@ func TestLookupCatalogRankingAndDetail(t *testing.T) {
 		{Brewery: "Test", Name: "我的100%测试", Style: "Lager", Tags: []string{"麦香"}, CapacityML: 20000},
 		{Brewery: "BrewDog", Name: "Double Punk IPA", Style: "IPA", Tags: []string{"苦爽"}, CapacityML: 20000},
 		{Brewery: "BrewDog", Name: "Punk IPA Post Modern", Style: "IPA", Tags: []string{"西柚"}, CapacityML: 20000},
-		{Brewery: "BrewDog", Name: "Punk", Style: "IPA - American", Category: "hop", ABV: ptrF(5.4), Price330: 4500, CapacityML: 30000, CostCents: 120000, PosterURL: "https://assets.untappd.com/punk.jpg"},
+		{Brewery: "BrewDog", Name: "Punk", Style: "IPA - American", Category: "IPA", ABV: ptrF(5.4), Price330: 4500, CapacityML: 30000, CostCents: 120000, PosterURL: "https://assets.untappd.com/punk.jpg"},
 	}
 	var punkID int64
 	for _, c := range seed {
@@ -83,7 +83,35 @@ func TestLookupCatalogRankingAndDetail(t *testing.T) {
 	}
 	var det Detail
 	_ = json.Unmarshal(recDet.Body.Bytes(), &det)
-	if det.SourceLabel != "本店历史酒单" || det.CapacityML != "30000" || det.Cost != "1200" || det.Price330 != "45" {
+	if det.SourceLabel != "本店历史酒单" || det.Category != "IPA" || det.CapacityML != "30000" || det.Cost != "1200" || det.Price330 != "45" {
 		t.Fatalf("detail 不对: %+v", det)
 	}
+}
+
+func TestLookupLocalCatalogWithCustomCategoriesFn(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := context.Background()
+	id, err := catalog.SaveCatalogBeerWithCategories(ctx, pool, CatalogBeerWithSaison(), []string{"IPA", "赛松"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lp := NewLocalCatalogProvider(pool)
+	lp.SetCategoriesFn(func() []string { return []string{"IPA", "赛松"} })
+	svc := NewService(lp)
+	rec := httptest.NewRecorder()
+	svc.LookupBeerDetail(rec, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/admin/beers/lookup/detail?source=catalog&id=%d", id), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var det Detail
+	if err := json.Unmarshal(rec.Body.Bytes(), &det); err != nil {
+		t.Fatal(err)
+	}
+	if det.Category != "赛松" {
+		t.Fatalf("自定义分类 detail.Category = %q, want 赛松", det.Category)
+	}
+}
+
+func CatalogBeerWithSaison() catalog.CatalogBeer {
+	return catalog.CatalogBeer{Brewery: "农舍厂", Name: "比利时赛松", Style: "比利时赛松 / Saison", CapacityML: 20000}
 }

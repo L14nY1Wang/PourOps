@@ -2,6 +2,8 @@ package settings
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,11 +51,12 @@ func (c PricingConfig) Normalized() PricingConfig {
 	return c
 }
 
-// StoreSettings 保存运营参数与 Webhook 出站通知设置。
+// StoreSettings 保存运营参数、酒款分类与 Webhook 出站通知设置。
 type StoreSettings struct {
 	Brand              string
 	DefaultSellablePct int
 	DefaultMarginPct   int
+	BeerCategories     []string
 	WebhookURL         string
 	WebhookSecret      string
 	WebhookEvents      []string
@@ -84,8 +87,13 @@ type SettingsStore struct {
 	pool         *pgxpool.Pool
 	defaultBrand string
 
-	mu  sync.RWMutex
-	cur StoreSettings
+	writeMu sync.Mutex
+	mu      sync.RWMutex
+	cur     StoreSettings
+}
+
+func defaultCategoriesCopy() []string {
+	return slices.Clone(platform.DefaultBeerCategories)
 }
 
 func NewSettingsStore(pool *pgxpool.Pool, defaultBrand string) *SettingsStore {
@@ -99,6 +107,7 @@ func NewSettingsStore(pool *pgxpool.Pool, defaultBrand string) *SettingsStore {
 			Brand:              defaultBrand,
 			DefaultSellablePct: DefaultSellablePct,
 			DefaultMarginPct:   DefaultMarginPct,
+			BeerCategories:     defaultCategoriesCopy(),
 			WebhookEvents:      []string{},
 		},
 	}
@@ -109,6 +118,7 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 		Brand:              s.defaultBrand,
 		DefaultSellablePct: DefaultSellablePct,
 		DefaultMarginPct:   DefaultMarginPct,
+		BeerCategories:     defaultCategoriesCopy(),
 		WebhookEvents:      []string{},
 	}
 	if s.pool == nil {
@@ -142,6 +152,13 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= MinMarginPct && n <= MaxMarginPct {
 				base.DefaultMarginPct = n
 			}
+		case "beer_categories":
+			var raw []string
+			if err := json.Unmarshal([]byte(v), &raw); err == nil {
+				if clean, normErr := platform.NormalizeBeerCategories(raw); normErr == nil {
+					base.BeerCategories = clean
+				}
+			}
 		case "webhook_url":
 			base.WebhookURL = strings.TrimSpace(v)
 		case "webhook_secret":
@@ -173,7 +190,12 @@ func (s *SettingsStore) Get() StoreSettings {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	cp := s.cur
-	cp.WebhookEvents = append([]string(nil), s.cur.WebhookEvents...)
+	cp.WebhookEvents = slices.Clone(s.cur.WebhookEvents)
+	if len(s.cur.BeerCategories) > 0 {
+		cp.BeerCategories = slices.Clone(s.cur.BeerCategories)
+	} else {
+		cp.BeerCategories = defaultCategoriesCopy()
+	}
 	return cp
 }
 
@@ -183,6 +205,14 @@ func (s *SettingsStore) Pricing() PricingConfig {
 
 func (s *SettingsStore) Brand() string {
 	return s.Get().Brand
+}
+
+func (s *SettingsStore) BeerCategories() []string {
+	return s.Get().BeerCategories
+}
+
+func (s *SettingsStore) BeerCategoryOptions() []platform.Option {
+	return platform.CategoryOptions(s.BeerCategories())
 }
 
 // WebhookConfig 实现 event.WebhookConfigProvider 接口。
@@ -196,7 +226,30 @@ func (s *SettingsStore) WebhookConfig() event.WebhookConfig {
 	}
 }
 
+func (s *SettingsStore) upsertPairs(ctx context.Context, pairs map[string]string) error {
+	if s.pool == nil {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for k, v := range pairs {
+		if _, err := tx.Exec(ctx, `
+			insert into store_settings (key, value, updated_at)
+			values ($1, $2, now())
+			on conflict (key) do update set value = excluded.value, updated_at = now()`, k, v); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettings, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
 	in.Brand = strings.TrimSpace(in.Brand)
 	if in.Brand == "" {
 		in.Brand = s.defaultBrand
@@ -209,6 +262,15 @@ func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettin
 	}
 	if in.DefaultMarginPct < MinMarginPct || in.DefaultMarginPct > MaxMarginPct {
 		return StoreSettings{}, platform.UserErrf("默认目标毛利率需在 %d%% 到 %d%% 之间", MinMarginPct, MaxMarginPct)
+	}
+	if len(in.BeerCategories) == 0 {
+		in.BeerCategories = s.BeerCategories()
+	} else {
+		cleanCats, err := platform.NormalizeBeerCategories(in.BeerCategories)
+		if err != nil {
+			return StoreSettings{}, err
+		}
+		in.BeerCategories = cleanCats
 	}
 	in.WebhookURL = strings.TrimSpace(in.WebhookURL)
 	if err := event.ValidateWebhookURL(in.WebhookURL); err != nil {
@@ -235,32 +297,20 @@ func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettin
 	}
 	in.WebhookEvents = cleanEvents
 
-	if s.pool != nil {
-		tx, err := s.pool.Begin(ctx)
-		if err != nil {
-			return StoreSettings{}, err
-		}
-		defer tx.Rollback(ctx)
-
-		pairs := map[string]string{
-			"brand":                in.Brand,
-			"default_sellable_pct": strconv.Itoa(in.DefaultSellablePct),
-			"default_margin_pct":   strconv.Itoa(in.DefaultMarginPct),
-			"webhook_url":          in.WebhookURL,
-			"webhook_secret":       in.WebhookSecret,
-			"webhook_events":       strings.Join(in.WebhookEvents, ","),
-		}
-		for k, v := range pairs {
-			if _, err := tx.Exec(ctx, `
-				insert into store_settings (key, value, updated_at)
-				values ($1, $2, now())
-				on conflict (key) do update set value = excluded.value, updated_at = now()`, k, v); err != nil {
-				return StoreSettings{}, err
-			}
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return StoreSettings{}, err
-		}
+	catsJSON, err := json.Marshal(in.BeerCategories)
+	if err != nil {
+		return StoreSettings{}, err
+	}
+	if err := s.upsertPairs(ctx, map[string]string{
+		"brand":                in.Brand,
+		"default_sellable_pct": strconv.Itoa(in.DefaultSellablePct),
+		"default_margin_pct":   strconv.Itoa(in.DefaultMarginPct),
+		"beer_categories":      string(catsJSON),
+		"webhook_url":          in.WebhookURL,
+		"webhook_secret":       in.WebhookSecret,
+		"webhook_events":       strings.Join(in.WebhookEvents, ","),
+	}); err != nil {
+		return StoreSettings{}, err
 	}
 
 	s.mu.Lock()
@@ -268,10 +318,87 @@ func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettin
 		Brand:              in.Brand,
 		DefaultSellablePct: in.DefaultSellablePct,
 		DefaultMarginPct:   in.DefaultMarginPct,
+		BeerCategories:     slices.Clone(in.BeerCategories),
 		WebhookURL:         in.WebhookURL,
 		WebhookSecret:      in.WebhookSecret,
-		WebhookEvents:      append([]string(nil), in.WebhookEvents...),
+		WebhookEvents:      slices.Clone(in.WebhookEvents),
 	}
 	s.mu.Unlock()
 	return s.Get(), nil
+}
+
+func (s *SettingsStore) saveCategoriesLocked(ctx context.Context, next []string) ([]string, error) {
+	clean, err := platform.NormalizeBeerCategories(next)
+	if err != nil {
+		return nil, err
+	}
+	catsJSON, err := json.Marshal(clean)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.upsertPairs(ctx, map[string]string{
+		"beer_categories": string(catsJSON),
+	}); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.cur.BeerCategories = slices.Clone(clean)
+	s.mu.Unlock()
+	return slices.Clone(clean), nil
+}
+
+// AddBeerCategory 向当前酒款分类列表追加一个自定义分类（大小写不敏感查重）并持久化。
+func (s *SettingsStore) AddBeerCategory(ctx context.Context, rawName string) ([]string, error) {
+	name, err := platform.ValidateBeerCategoryName(rawName)
+	if err != nil {
+		return nil, err
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := s.BeerCategories()
+	for _, c := range cur {
+		if strings.EqualFold(c, name) {
+			return nil, platform.UserErrf("分类「%s」已存在", c)
+		}
+	}
+	if len(cur) >= platform.MaxBeerCategories {
+		return nil, platform.UserErrf("酒款分类最多 %d 个", platform.MaxBeerCategories)
+	}
+	return s.saveCategoriesLocked(ctx, append(cur, name))
+}
+
+// DeleteBeerCategory 从当前预设列表删除指定酒款分类；至少保留 1 个。
+func (s *SettingsStore) DeleteBeerCategory(ctx context.Context, rawName string) ([]string, error) {
+	target := strings.TrimSpace(rawName)
+	if target == "" {
+		return nil, platform.UserErr("请指定要删除的分类")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	cur := s.BeerCategories()
+	next := make([]string, 0, len(cur))
+	found := false
+	for _, c := range cur {
+		if strings.EqualFold(c, target) {
+			found = true
+			continue
+		}
+		next = append(next, c)
+	}
+	if !found {
+		return nil, platform.UserErrf("找不到分类「%s」", target)
+	}
+	if len(next) == 0 {
+		return nil, platform.UserErr("至少保留 1 个酒款分类")
+	}
+	return s.saveCategoriesLocked(ctx, next)
+}
+
+// ResetBeerCategories 将门店酒款分类恢复为系统默认分类列表。
+func (s *SettingsStore) ResetBeerCategories(ctx context.Context) ([]string, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.saveCategoriesLocked(ctx, platform.DefaultBeerCategories)
 }

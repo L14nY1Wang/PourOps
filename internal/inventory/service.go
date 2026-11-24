@@ -6,6 +6,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/event"
+	"pourops/internal/platform"
 	"pourops/internal/settings"
 	"pourops/internal/ui"
 )
@@ -60,6 +61,13 @@ func (s *Service) currentPricing() settings.PricingConfig {
 		return s.settings.Pricing()
 	}
 	return settings.DefaultPricingConfig()
+}
+
+func (s *Service) currentCategories() []string {
+	if s.settings != nil {
+		return s.settings.BeerCategories()
+	}
+	return platform.DefaultBeerCategories
 }
 
 func (s *Service) publish(r *http.Request, typ event.EventType, subject string, payload any) {

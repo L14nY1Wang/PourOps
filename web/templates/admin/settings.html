@@ -77,6 +77,41 @@
   </div>
 </form>
 
+<div class="card editor-card mb-3">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div>
+          <h2><i class="bi bi-tags" aria-hidden="true"></i>酒款分类管理</h2>
+          <span>作用于进货/编辑下拉、历史酒单筛选及自动检索匹配（至少保留 1 个；删除不影响已有酒款记录）</span>
+        </div>
+        <form method="post" action="/admin/settings/categories/reset" class="m-0" onsubmit="return confirm('将酒款分类恢复为系统默认列表（IPA、拉格、皮尔森、小麦、酸小麦、果泥、西打、世涛、波特、修道院）？')">
+          <button class="button button--secondary button--sm" type="submit"><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>恢复默认分类</button>
+        </form>
+      </div>
+
+      {{$onlyOne := eq (len .Settings.BeerCategories) 1}}
+      <div class="category-manager-list" aria-label="当前预设酒款分类">
+        {{range .Settings.BeerCategories}}
+        <form class="category-chip" method="post" action="/admin/settings/categories/delete">
+          <input type="hidden" name="name" value="{{.}}">
+          <span>{{.}}</span>
+          <button type="submit" class="category-chip-del" aria-label="删除分类 {{.}}" title="{{if $onlyOne}}至少保留 1 个分类{{else}}删除「{{.}}」{{end}}" {{if $onlyOne}}disabled{{end}}>
+            <i class="bi bi-x" aria-hidden="true"></i>
+          </button>
+        </form>
+        {{end}}
+      </div>
+
+      <form class="category-add-form" method="post" action="/admin/settings/categories/add">
+        <label class="visually-hidden" for="new-beer-category">新增酒款分类名称</label>
+        <input class="form-control" type="text" id="new-beer-category" name="name" maxlength="20" placeholder="输入新分类，如：赛松、科隆、果啤" required>
+        <button class="button button--primary" type="submit"><i class="bi bi-plus-lg" aria-hidden="true"></i>添加分类</button>
+      </form>
+    </fieldset>
+  </div>
+</div>
+
 <div class="card security-card">
   <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
     <div>

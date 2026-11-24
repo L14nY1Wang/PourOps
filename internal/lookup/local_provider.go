@@ -15,11 +15,27 @@ import (
 
 // LocalCatalogProvider 从门店自建 beer_catalog 表提供最高优先级的历史酒款检索与回填。
 type LocalCatalogProvider struct {
-	pool *pgxpool.Pool
+	pool         *pgxpool.Pool
+	categoriesFn func() []string
 }
 
 func NewLocalCatalogProvider(pool *pgxpool.Pool) *LocalCatalogProvider {
 	return &LocalCatalogProvider{pool: pool}
+}
+
+func (p *LocalCatalogProvider) SetCategoriesFn(fn func() []string) {
+	if p != nil {
+		p.categoriesFn = fn
+	}
+}
+
+func (p *LocalCatalogProvider) categories() []string {
+	if p != nil && p.categoriesFn != nil {
+		if cats := p.categoriesFn(); len(cats) > 0 {
+			return cats
+		}
+	}
+	return platform.DefaultBeerCategories
 }
 
 func (p *LocalCatalogProvider) Name() string             { return "catalog" }
@@ -114,9 +130,9 @@ func (p *LocalCatalogProvider) Detail(ctx context.Context, rawID string) (Detail
 	if err != nil {
 		return Detail{}, err
 	}
-	cat := c.Category
+	cat := platform.CategoryLabel(c.Category)
 	if cat == "" {
-		cat = platform.ToneOf(c.Style)
+		cat = platform.InferCategory(c.Style, p.categories())
 	}
 	capText := ""
 	if c.CapacityML > 0 {

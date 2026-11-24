@@ -59,9 +59,12 @@
               <input class="form-control" type="text" id="style" name="style" value="{{.CatalogItem.Style}}" placeholder="IPA - American">
             </div>
             <div class="editor-field">
-              <label class="label" for="category">分类色</label>
+              <label class="label" for="category">酒款分类</label>
               <select class="form-select" id="category" name="category">
                 <option value="">按风格自动判断</option>
+                {{if and .CatalogItem.Category (not (.HasCategory .CatalogItem.Category))}}
+                <option value="{{.CatalogItem.Category}}" selected>{{.CatalogItem.Category}}（已不在预设列表）</option>
+                {{end}}
                 {{range .Categories}}
                 <option value="{{.Value}}" {{if eq .Value $.CatalogItem.Category}}selected{{end}}>{{.Label}}</option>
                 {{end}}

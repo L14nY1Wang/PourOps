@@ -15,7 +15,7 @@
         "no": "07",                        // 可选，缺省按顺序 01..N
         "brewery": "酿酒狗", "brewery_en": "BREWDOG",
         "name": "朋克 IPA", "name_en": "PUNK IPA",
-        "style": "IPA - American",         // 决定色条颜色（可被 category 覆盖）
+        "style": "IPA - American",         // 决定默认分类与色条颜色（可被 category 覆盖）
         "tags": ["美式IPA", "热带水果"],    // 风格描述，取前 3 个
         "sales_tags": ["新品"],            // 可选，最多展示 2 个
         "abv": 5.2, "ibu": 35, "size": "330ml",
@@ -277,25 +277,63 @@
   var signature = '';
   var es = null;
 
-  /* 风格 → 顶栏色条。刻意粗分五类，够用；要精确就传 category */
+  /* 风格 → 顶栏色条。内置精酿风格配色 + 兼容旧分类 + 自定义分类稳定取色 */
   var TONES = {
-    fresh:  '#e2c476',  // 清爽 / 拉格 / 小麦
-    hop:    '#57cf9b',  // 酒花 / IPA / Pale Ale
-    sour:   '#a48bf0',  // 酸 / 野菌 / 贵兹
-    dark:   '#d9925c',  // 深色麦芽 / 世涛 / 四料
-    strong: '#e8765f'   // 修道院 / 烈性 / 过桶
+    fresh:  '#e2c476',  // 清爽 / 拉格 / 小麦 / 西打
+    hop:    '#57cf9b',  // 酒花 / IPA / 皮尔森
+    sour:   '#a48bf0',  // 酸小麦 / 果泥
+    dark:   '#d9925c',  // 世涛 / 波特
+    strong: '#e8765f'   // 修道院 / 烈性
   };
-  var LABELS = { fresh: '清爽', hop: '酒花', sour: '酸野菌', dark: '深色', strong: '烈性' };
+  var PALETTE = [TONES.hop, TONES.fresh, TONES.sour, TONES.dark, TONES.strong];
+  var LEGACY_CATS = {
+    fresh: '拉格',
+    hop: 'IPA',
+    sour: '酸小麦',
+    dark: '世涛',
+    strong: '修道院',
+    '清爽': '拉格',
+    '酒花': 'IPA',
+    '酸野菌': '酸小麦',
+    '深色': '世涛',
+    '烈性': '修道院'
+  };
+  var CAT_COLORS = {
+    'IPA': TONES.hop,
+    '皮尔森': TONES.hop,
+    '拉格': TONES.fresh,
+    '小麦': TONES.fresh,
+    '西打': TONES.fresh,
+    '酸小麦': TONES.sour,
+    '果泥': TONES.sour,
+    '世涛': TONES.dark,
+    '波特': TONES.dark,
+    '修道院': TONES.strong
+  };
 
-  function tone(style, category) {
-    if (category && TONES[category]) return category;
+  function categoryName(style, category) {
+    var c = String(category || '').trim();
+    if (c) return LEGACY_CATS[c] || LEGACY_CATS[c.toLowerCase()] || c;
     var s = String(style || '').toLowerCase();
-    if (/lambic|gueuze|geuze|sour|berliner|wild|brett/.test(s)) return 'sour';
-    if (/ipa|pale ale|pilsner|pale lager/.test(s)) return 'hop';
-    if (/stout|porter|quadrupel|dubbel|barleywine|brown ale|schwarz/.test(s)) return 'dark';
-    if (/tripel|strong|barley wine|abbey|trappist|imperial|barrel/.test(s)) return 'strong';
-    if (/lager|wheat|weiss|kölsch|kolsch|blonde|saison|pale/.test(s)) return 'fresh';
-    return 'fresh';
+    if (/cider|perry|pomme|苹果酒|西打/.test(s)) return '西打';
+    if (/smoothie|puree|slush|fruited|果泥|奶昔/.test(s)) return '果泥';
+    if (/berliner|gose|lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸/.test(s)) return '酸小麦';
+    if (/\bipa\b|neipa|dipa|tipa|india pale|pale ale|hazy|酒花|浑浊|印度淡/.test(s)) return 'IPA';
+    if (/stout|世涛/.test(s)) return '世涛';
+    if (/porter|波特/.test(s)) return '波特';
+    if (/pilsner|pilsener|\bpils\b|皮尔森|比尔森/.test(s)) return '皮尔森';
+    if (/wheat|witbier|hefeweizen|weizen|weisse|weissbier|小麦|白啤/.test(s)) return '小麦';
+    if (/trappist|abbey|tripel|dubbel|quadrupel|修道院|三料|双料|四料/.test(s)) return '修道院';
+    return '拉格';
+  }
+
+  function colorForCategory(cat) {
+    if (CAT_COLORS[cat]) return CAT_COLORS[cat];
+    var hash = 0;
+    for (var i = 0; i < cat.length; i++) {
+      hash = (hash * 31 + cat.charCodeAt(i)) >>> 0;
+    }
+    return PALETTE[hash % PALETTE.length];
   }
 
   /* 12 酒头首选 4×3；窄屏按画面比例收列，避免卡片被压成竖条 */
@@ -335,7 +373,7 @@
           brewery_en: s.brewery_en || '',
           name: s.name || s.name_en || '',
           style: s.style || '',
-          tone: tone(s.style, s.category),
+          category: categoryName(s.style, s.category),
           abv: num(s.abv),
           ibu: num(s.ibu),
           size: s.size || '',
@@ -383,7 +421,7 @@
     items.forEach(function (s, i) {
       var card = el('article', s.sold ? 'card' : 'card off');
       card.style.setProperty('--i', i);
-      card.style.setProperty('--tone', TONES[s.tone]);
+      card.style.setProperty('--tone', colorForCategory(s.category));
 
       var top = el('div', 'card-top');
       var no = el('div', 'tap');
@@ -411,7 +449,7 @@
       info.appendChild(el('div', 'brew', [s.brewery, s.brewery_en].filter(Boolean).join(' · ')));
       info.appendChild(el('h2', 'name', s.name));
 
-      var words = [LABELS[s.tone]].concat(s.tags).slice(0, 4);
+      var words = [s.category].concat(s.tags).slice(0, 4);
       var styleLine = el('div', 'style-line');
       words.forEach(function (t, k) {
         if (k) styleLine.appendChild(el('span', null, ' · '));

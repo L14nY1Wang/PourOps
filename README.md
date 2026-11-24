@@ -40,7 +40,7 @@
 │   ├── inventory/                  # 酒桶进销存、开/结桶状态机、可配置盈亏测算与零售 SKU 管理
 │   ├── pos/                        # POS 台位、加减单品、拆单结账与 PaymentGateway / ReceiptPrinter 扩展点
 │   └── report/                     # 经营概览、销售趋势、POS 分时段实收与只读审计流水
-├── migrations/                     # 0001–0011 PostgreSQL 结构迁移（go:embed，启动自动执行）
+├── migrations/                     # 0001–0012 PostgreSQL 结构迁移（go:embed，启动自动执行）
 └── web/
     ├── embed.go                    # 统一导出 TemplatesFS 与 StaticFS
     ├── templates/                  # Go html/template 页面（layouts/、admin/、pos/、screen/）

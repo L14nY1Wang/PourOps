@@ -161,17 +161,22 @@ func FindBeerForUpdate(ctx context.Context, tx pgx.Tx, brewery, name string) (Be
 }
 
 func SaveBeer(ctx context.Context, q platform.Querier, b Beer) (int64, error) {
+	return SaveBeerWithCategories(ctx, q, b, platform.DefaultBeerCategories)
+}
+
+// SaveBeerWithCategories 按指定动态分类白名单校验并保存酒款；空分类自动按风格推断。
+func SaveBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, allowed []string, extraAllowed ...string) (int64, error) {
 	b.Brewery = strings.TrimSpace(b.Brewery)
 	b.Name = strings.TrimSpace(b.Name)
 	b.Style = strings.TrimSpace(b.Style)
 	b.PosterURL = strings.TrimSpace(b.PosterURL)
-	cat, err := platform.ValidateBeerFields(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder)
+	cat, err := platform.ValidateBeerFieldsWithCategories(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder, allowed, extraAllowed...)
 	if err != nil {
 		return 0, err
 	}
 	b.Category = cat
 	if b.Category == "" {
-		b.Category = platform.ToneOf(b.Style)
+		b.Category = platform.InferCategory(b.Style, allowed)
 	}
 	if b.Tags == nil {
 		b.Tags = []string{}

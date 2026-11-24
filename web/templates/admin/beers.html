@@ -43,7 +43,7 @@
                 </div>
                 <div class="beer-info">
                   <div class="beer-title">{{.Brewery}}{{if .Brewery}} · {{end}}{{.Name}}</div>
-                  {{if .Style}}<div class="text-muted small">{{.Style}}{{if .Category}} · {{.CategoryName}}{{end}}</div>{{end}}
+                  {{if or .Style .Category}}<div class="text-muted small">{{if .Style}}{{.Style}}{{else}}未填风格{{end}}{{if .Category}} · {{.CategoryName}}{{end}}</div>{{end}}
                 </div>
               </div>
             </td>

@@ -133,9 +133,10 @@ func pruneOldest[K comparable, V any](m map[K]jiuheCacheEntry[V], now time.Time,
 
 // JiuheProvider 对接酒核 UT 同步库接口，支持生啤优先级合并与 5 分钟缓存。
 type JiuheProvider struct {
-	baseURL string
-	client  *http.Client
-	cache   *JiuheCache
+	baseURL      string
+	client       *http.Client
+	cache        *JiuheCache
+	categoriesFn func() []string
 }
 
 func NewJiuheProvider(baseURL string, client *http.Client) *JiuheProvider {
@@ -147,6 +148,21 @@ func NewJiuheProvider(baseURL string, client *http.Client) *JiuheProvider {
 		client:  client,
 		cache:   NewJiuheCache(),
 	}
+}
+
+func (p *JiuheProvider) SetCategoriesFn(fn func() []string) {
+	if p != nil {
+		p.categoriesFn = fn
+	}
+}
+
+func (p *JiuheProvider) categories() []string {
+	if p != nil && p.categoriesFn != nil {
+		if cats := p.categoriesFn(); len(cats) > 0 {
+			return cats
+		}
+	}
+	return platform.DefaultBeerCategories
 }
 
 func (p *JiuheProvider) Name() string             { return "jiuhe" }
@@ -503,15 +519,16 @@ func (p *JiuheProvider) Detail(ctx context.Context, rawID string) (Detail, error
 	if style == "" {
 		style = zhStyle
 	}
+	cats := p.categories()
 	cat := ""
 	if utStyle != "" {
-		cat = platform.MatchTone(utStyle)
+		cat = platform.MatchCategory(utStyle, cats)
 	}
 	if cat == "" {
-		cat = platform.MatchTone(zhStyle)
+		cat = platform.MatchCategory(zhStyle, cats)
 	}
 	if cat == "" {
-		cat = "fresh"
+		cat = platform.InferCategory("", cats)
 	}
 
 	capML, cost := extractDraftKegSpec(resp)

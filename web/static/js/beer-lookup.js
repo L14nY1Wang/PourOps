@@ -199,6 +199,14 @@
       }
       const val = (detail[key] || '').trim();
       if (val) {
+        if (el.tagName === 'SELECT' && !Array.from(el.options).some(opt => opt.value === val)) {
+          if (el.dataset.autofilled === '1') {
+            el.value = '';
+            delete el.dataset.autofilled;
+            if (key === 'category') el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          return;
+        }
         el.value = val;
         el.dataset.autofilled = '1';
         delete el.dataset.userEdited;

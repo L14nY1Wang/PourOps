@@ -78,10 +78,17 @@ func (s *Service) currentBrand() string {
 	return "PourOps"
 }
 
+func (s *Service) currentCategories() []string {
+	if s.settings != nil {
+		return s.settings.BeerCategories()
+	}
+	return platform.DefaultBeerCategories
+}
+
 func (s *Service) CatalogList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	query := strings.TrimSpace(q.Get("q"))
-	cat, err := platform.ParseCategory(q.Get("cat"))
+	cat, err := platform.ParseCategoryWithAllowed(q.Get("cat"), s.currentCategories())
 	if err != nil {
 		cat = ""
 	}
@@ -142,9 +149,19 @@ func (s *Service) CatalogSave(w http.ResponseWriter, r *http.Request) {
 	}
 	rawCost := strings.TrimSpace(r.FormValue("cost"))
 	rawCap := strings.TrimSpace(r.FormValue("capacity_ml"))
+	id, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("id")), 10, 64)
 
-	parsed, formErr := platform.ParseBeerForm(r)
+	cats := s.currentCategories()
+	var extraAllowed []string
+	if id > 0 && s.pool != nil {
+		if ex, err := GetCatalogBeer(r.Context(), s.pool, id); err == nil && ex.Category != "" {
+			extraAllowed = append(extraAllowed, ex.Category)
+		}
+	}
+
+	parsed, formErr := platform.ParseBeerFormWithCategories(r, cats, extraAllowed...)
 	c := CatalogBeer{
+		ID:        id,
 		Brewery:   parsed.Brewery,
 		Name:      parsed.Name,
 		Style:     parsed.Style,
@@ -158,9 +175,6 @@ func (s *Service) CatalogSave(w http.ResponseWriter, r *http.Request) {
 		Price330:  parsed.Price330,
 		Price500:  parsed.Price500,
 		Tags:      parsed.Tags,
-	}
-	if id := r.FormValue("id"); id != "" {
-		c.ID, _ = strconv.ParseInt(id, 10, 64)
 	}
 
 	var capErr error
@@ -204,7 +218,7 @@ func (s *Service) CatalogSave(w http.ResponseWriter, r *http.Request) {
 	}
 	c.CostCents = costCents
 
-	if _, err := SaveCatalogBeer(r.Context(), s.pool, c); err != nil {
+	if _, err := SaveCatalogBeerWithCategories(r.Context(), s.pool, c, cats, extraAllowed...); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			fail(http.StatusBadRequest, msg)
 			return
@@ -287,7 +301,7 @@ func (s *Service) CatalogImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := strings.TrimSpace(r.FormValue("mode"))
-	res, err := ImportCatalogBeers(r.Context(), s.pool, items, mode)
+	res, err := ImportCatalogBeersWithCategories(r.Context(), s.pool, items, mode, s.currentCategories())
 	if err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			http.Redirect(w, r, "/admin/beers/catalog?err="+platform.URLMsg("导入失败："+msg), http.StatusSeeOther)

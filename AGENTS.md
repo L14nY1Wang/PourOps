@@ -57,7 +57,7 @@ platform (zero internal deps)
 |`internal/inventory/`|酒桶进销存、开/结桶状态机、可配置桶装盈亏测算、零售 SKU 与出入库、业务事件发布|
 |`internal/pos/`|POS 台位/加减单品/拆单结账、`PaymentGateway` 与 `ReceiptPrinter` 扩展点|
 |`internal/report/`|经营概览、销售趋势、POS 分时段实收、销售订单与营运流水只读审计|
-|`migrations/`|`0001`–`0011` 启动时自跑，`schema_migrations` 记账（`embed.go` 导出 `migrations.FS`）|
+|`migrations/`|`0001`–`0012` 启动时自跑，`schema_migrations` 记账（`embed.go` 导出 `migrations.FS`）|
 |`web/`|全站前端唯一归口：`embed.go`（导出 `TemplatesFS`、`StaticFS`）、`templates/{layouts,admin,pos,screen}/`、`static/{brand,css,js,screen,vendor}/`、`tests/`（不进 embed）|
 
 ## Development Commands

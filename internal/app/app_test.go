@@ -34,12 +34,12 @@ func TestAllTemplatesRender(t *testing.T) {
 	pricing := settings.PricingConfig{SellablePct: 85, MarginPct: 55}
 
 	beer := catalog.Beer{
-		ID: 1, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "hop",
+		ID: 1, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "IPA",
 		ABV: &abv, IBU: &ibu, UT: &ut, Price150: 2800, Price330: 5800, Price500: 7800,
 		Tags: []string{"柑橘", "果汁感"}, SalesTags: []string{"本周最佳"}, OnScreen: true,
 	}
 	catItem := catalog.CatalogBeer{
-		ID: 3, Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "hop",
+		ID: 3, Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "IPA",
 		ABV: &abv, IBU: &ibu, UT: &ut, CapacityML: 20000, CostCents: 120000,
 		Price150: 2800, Price330: 5800, Price500: 7800,
 		Tags: []string{"柑橘", "果汁感"}, PosterURL: "https://assets.untappd.com/x.jpeg",
@@ -106,7 +106,11 @@ func TestAllTemplatesRender(t *testing.T) {
 		}, nil, false},
 		{"beer_form", "admin/beer_form.html", "layout", &inventory.BeerFormPage{
 			Layout: ui.Layout{Title: "编辑酒款", Nav: "beers", Me: me, Categories: platform.Categories}, Beer: beer, Keg: keg, CostInput: "1200", Pricing: pricing,
-		}, []string{`data-default-sellable="85"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
+		}, []string{`酒款分类`, `data-default-sellable="85"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
+		{"beer_form-removed-cat", "admin/beer_form.html", "layout", &inventory.BeerFormPage{
+			Layout: ui.Layout{Title: "编辑酒款", Nav: "beers", Me: me, Categories: platform.Categories},
+			Beer:   catalog.Beer{ID: 9, Name: "老酒款", Category: "已删分类"}, Keg: keg, Pricing: pricing,
+		}, []string{`已删分类（已不在预设列表）`}, false},
 		{"purchase", "admin/purchase.html", "layout", &inventory.PurchasePage{
 			Layout: ui.Layout{Title: "新增酒款", Nav: "beers", Me: me, Categories: platform.Categories}, Beer: beer, Keg: keg, KegCount: 2, CostInput: "1200", Pricing: pricing,
 		}, []string{`data-default-margin="55"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
@@ -168,11 +172,11 @@ func TestAllTemplatesRender(t *testing.T) {
 		}, nil, false},
 		{"settings", "admin/settings.html", "layout", &settings.SettingsPage{
 			Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Me: me},
-			Settings:       settings.StoreSettings{Brand: "PourOps", DefaultSellablePct: 80, DefaultMarginPct: 50, WebhookEvents: []string{string(event.EventOrderPaid)}},
+			Settings:       settings.StoreSettings{Brand: "PourOps", DefaultSellablePct: 80, DefaultMarginPct: 50, BeerCategories: []string{"IPA", "赛松"}, WebhookEvents: []string{string(event.EventOrderPaid)}},
 			EventOptions:   event.WebhookEventOptions,
 			HasSecret:      true,
 			SelectedEvents: map[string]bool{string(event.EventOrderPaid): true},
-		}, []string{`name="default_sellable_pct"`, `name="webhook_url"`}, false},
+		}, []string{`name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`}, false},
 		{"pos-spots", "pos/pos.html", "pos", &pos.PosPage{
 			Layout:   ui.Layout{Me: me},
 			Spots:    []pos.Spot{{Key: "bar-1", Kind: "bar", Label: "吧台 1", OrderID: 88, Items: 2, Total: 9600}, {Key: "table-1", Kind: "table", Label: "小桌 1"}},
@@ -327,10 +331,17 @@ func TestNewHandlerSmoke(t *testing.T) {
 	if recLogin.Code != http.StatusOK || !strings.Contains(recLogin.Body.String(), "/static/css/admin.bundle.css?v=") {
 		t.Fatalf("GET /admin/login = %d", recLogin.Code)
 	}
-	recAnalytics := httptest.NewRecorder()
-	h.ServeHTTP(recAnalytics, httptest.NewRequest(http.MethodGet, "/admin/analytics", nil))
-	if recAnalytics.Code != http.StatusSeeOther || recAnalytics.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("GET /admin/analytics 未登录应 303 -> /admin/login，实际 %d loc=%q", recAnalytics.Code, recAnalytics.Header().Get("Location"))
+	for _, path := range []string{"/admin/analytics", "/admin/settings"} {
+		recAnon := httptest.NewRecorder()
+		h.ServeHTTP(recAnon, httptest.NewRequest(http.MethodGet, path, nil))
+		if recAnon.Code != http.StatusSeeOther || recAnon.Header().Get("Location") != "/admin/login" {
+			t.Fatalf("GET %s 未登录应 303 -> /admin/login，实际 %d loc=%q", path, recAnon.Code, recAnon.Header().Get("Location"))
+		}
+	}
+	recCatAnon := httptest.NewRecorder()
+	h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, "/admin/settings/categories/add", strings.NewReader("name=赛松")))
+	if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("POST /admin/settings/categories/add 未登录应 303 -> /admin/login，实际 %d", recCatAnon.Code)
 	}
 
 	// 4. 未知后台路径必须 404（验证 {$} 精确匹配）

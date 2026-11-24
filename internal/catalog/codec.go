@@ -35,7 +35,24 @@ func NewCodecRegistry(codecs ...Codec) *CodecRegistry {
 }
 
 func NewDefaultCodecRegistry() *CodecRegistry {
-	return NewCodecRegistry(CSVCodec{}, JSONCodec{})
+	return NewDefaultCodecRegistryWithCategories(nil)
+}
+
+// NewDefaultCodecRegistryWithCategories 使用动态酒款分类表构建默认 CSV/JSON 编解码注册表。
+func NewDefaultCodecRegistryWithCategories(categoriesFn func() []string) *CodecRegistry {
+	return NewCodecRegistry(
+		CSVCodec{CategoriesFn: categoriesFn},
+		JSONCodec{CategoriesFn: categoriesFn},
+	)
+}
+
+func resolveCodecCategories(fn func() []string) []string {
+	if fn != nil {
+		if cats := fn(); len(cats) > 0 {
+			return cats
+		}
+	}
+	return platform.DefaultBeerCategories
 }
 
 func (r *CodecRegistry) Register(c Codec) {
@@ -79,7 +96,9 @@ func (r *CodecRegistry) Decode(filename string, raw []byte) ([]ImportItem, error
 
 // ---------- CSVCodec ----------
 
-type CSVCodec struct{}
+type CSVCodec struct {
+	CategoriesFn func() []string
+}
 
 func (CSVCodec) Format() string      { return "csv" }
 func (CSVCodec) ContentType() string { return "text/csv; charset=utf-8" }
@@ -87,10 +106,12 @@ func (CSVCodec) FileExt() string     { return ".csv" }
 func (CSVCodec) CanDecode(filename string, trimmed []byte) bool {
 	return strings.HasSuffix(filename, ".csv") || (trimmed[0] != '{' && trimmed[0] != '[')
 }
-func (CSVCodec) Decode(trimmed []byte) ([]ImportItem, error) { return ParseCatalogCSV(trimmed) }
-func (CSVCodec) Encode(items []CatalogBeer, _ string, _ time.Time) ([]byte, error) {
+func (c CSVCodec) Decode(trimmed []byte) ([]ImportItem, error) {
+	return ParseCatalogCSVWithCategories(trimmed, resolveCodecCategories(c.CategoriesFn))
+}
+func (c CSVCodec) Encode(items []CatalogBeer, _ string, _ time.Time) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := EncodeCatalogCSV(&buf, items); err != nil {
+	if err := encodeCatalogCSVWithCategories(&buf, items, resolveCodecCategories(c.CategoriesFn)); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -98,7 +119,9 @@ func (CSVCodec) Encode(items []CatalogBeer, _ string, _ time.Time) ([]byte, erro
 
 // ---------- JSONCodec ----------
 
-type JSONCodec struct{}
+type JSONCodec struct {
+	CategoriesFn func() []string
+}
 
 func (JSONCodec) Format() string      { return "json" }
 func (JSONCodec) ContentType() string { return "application/json; charset=utf-8" }
@@ -106,15 +129,17 @@ func (JSONCodec) FileExt() string     { return ".json" }
 func (JSONCodec) CanDecode(filename string, trimmed []byte) bool {
 	return strings.HasSuffix(filename, ".json") || trimmed[0] == '{' || trimmed[0] == '['
 }
-func (JSONCodec) Decode(trimmed []byte) ([]ImportItem, error) { return ParseCatalogJSON(trimmed) }
-func (JSONCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
-	return EncodeCatalogJSON(items, brand, now)
+func (c JSONCodec) Decode(trimmed []byte) ([]ImportItem, error) {
+	return ParseCatalogJSONWithCategories(trimmed, resolveCodecCategories(c.CategoriesFn))
+}
+func (c JSONCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
+	return encodeCatalogJSONWithCategories(items, brand, now, resolveCodecCategories(c.CategoriesFn))
 }
 
 // ---------- 导出：CSV（UTF-8 BOM）与 JSON ----------
 
 var catalogCSVHeaders = []string{
-	"厂牌", "酒名", "风格", "分类色", "ABV", "IBU", "UT评分", "评分人数",
+	"厂牌", "酒名", "风格", "酒款分类", "ABV", "IBU", "UT评分", "评分人数",
 	"风味词", "默认桶容量ml", "默认每桶进价元", "150ml售价元", "330ml售价元", "500ml售价元", "酒标URL",
 }
 
@@ -142,6 +167,10 @@ func unescapeCSVFormula(s string) string {
 }
 
 func EncodeCatalogCSV(buf *bytes.Buffer, items []CatalogBeer) error {
+	return encodeCatalogCSVWithCategories(buf, items, platform.DefaultBeerCategories)
+}
+
+func encodeCatalogCSVWithCategories(buf *bytes.Buffer, items []CatalogBeer, cats []string) error {
 	if _, err := buf.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
 		return err
 	}
@@ -156,7 +185,7 @@ func EncodeCatalogCSV(buf *bytes.Buffer, items []CatalogBeer) error {
 		}
 		catText := c.CategoryName()
 		if catText == "" && c.Style != "" {
-			catText = platform.CategoryLabel(platform.ToneOf(c.Style))
+			catText = platform.InferCategory(c.Style, cats)
 		}
 		row := []string{
 			escapeCSVFormula(c.Brewery),
@@ -209,15 +238,19 @@ type catalogExportItem struct {
 }
 
 func EncodeCatalogJSON(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
+	return encodeCatalogJSONWithCategories(items, brand, now, platform.DefaultBeerCategories)
+}
+
+func encodeCatalogJSONWithCategories(items []CatalogBeer, brand string, now time.Time, cats []string) ([]byte, error) {
 	out := make([]catalogExportItem, 0, len(items))
 	for _, c := range items {
 		tags := c.Tags
 		if tags == nil {
 			tags = []string{}
 		}
-		cat := c.Category
+		cat := platform.CategoryLabel(c.Category)
 		if cat == "" {
-			cat = platform.ToneOf(c.Style)
+			cat = platform.InferCategory(c.Style, cats)
 		}
 		capML := c.CapacityML
 		if capML <= 0 {
@@ -267,7 +300,7 @@ var csvHeaderAliases = map[string]string{
 	"厂牌": "brewery", "酒厂": "brewery", "酿酒厂": "brewery", "品牌": "brewery", "brewery": "brewery",
 	"酒名": "name", "酒款名称": "name", "酒款": "name", "名称": "name", "name": "name",
 	"风格": "style", "类型": "style", "style": "style",
-	"分类色": "category", "分类": "category", "颜色分类": "category", "category": "category",
+	"酒款分类": "category", "分类色": "category", "分类": "category", "颜色分类": "category", "category": "category",
 	"abv": "abv", "酒精度": "abv", "酒精度(%)": "abv", "酒精度（%）": "abv", "abv(%)": "abv", "abv（%）": "abv",
 	"ibu": "ibu", "苦度": "ibu", "苦度(ibu)": "ibu", "苦度（ibu）": "ibu",
 	"ut评分": "ut_rating", "ut": "ut_rating", "评分": "ut_rating", "ut_rating": "ut_rating", "rating": "ut_rating",
@@ -302,6 +335,10 @@ func parseImportCentsVal(raw, label string) (int, error) {
 }
 
 func ParseCatalogCSV(raw []byte) ([]ImportItem, error) {
+	return ParseCatalogCSVWithCategories(raw, platform.DefaultBeerCategories)
+}
+
+func ParseCatalogCSVWithCategories(raw []byte, allowed []string) ([]ImportItem, error) {
 	cr := csv.NewReader(bytes.NewReader(raw))
 	cr.TrimLeadingSpace = true
 	cr.FieldsPerRecord = -1
@@ -374,7 +411,7 @@ func ParseCatalogCSV(raw []byte) ([]ImportItem, error) {
 			item.Mask.Style = true
 		}
 		if v, ok := cell("category"); ok {
-			cat, err := platform.ParseCategory(v)
+			cat, err := platform.ParseCategoryWithAllowed(v, allowed)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 行：%w", lineNo, err)
 			}
@@ -518,6 +555,10 @@ func jsonScalarString(raw json.RawMessage) (string, bool, error) {
 }
 
 func ParseCatalogJSON(raw []byte) ([]ImportItem, error) {
+	return ParseCatalogJSONWithCategories(raw, platform.DefaultBeerCategories)
+}
+
+func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem, error) {
 	var rawItems []json.RawMessage
 	if raw[0] == '[' {
 		if err := json.Unmarshal(raw, &rawItems); err != nil {
@@ -581,9 +622,9 @@ func ParseCatalogJSON(raw []byte) ([]ImportItem, error) {
 		}
 
 		if s, _, ok, err := getStr("category"); err != nil {
-			return nil, fmt.Errorf("第 %d 条分类色无效", rowNo)
+			return nil, fmt.Errorf("第 %d 条酒款分类无效", rowNo)
 		} else if ok {
-			cat, err := platform.ParseCategory(s)
+			cat, err := platform.ParseCategoryWithAllowed(s, allowed)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条：%w", rowNo, err)
 			}

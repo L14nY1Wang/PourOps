@@ -45,6 +45,16 @@ func TestCatalogCSVRoundTrip(t *testing.T) {
 			CostCents:  165050,
 			Price330:   8800,
 		},
+		{
+			Brewery:    "高岩",
+			Name:       "干型西打",
+			Style:      "Dry Cider",
+			Category:   "西打",
+			ABV:        ptrFloat(5.5),
+			CapacityML: 20000,
+			CostCents:  90000,
+			Price330:   4200,
+		},
 	}
 
 	var buf bytes.Buffer
@@ -55,19 +65,20 @@ func TestCatalogCSVRoundTrip(t *testing.T) {
 	if !bytes.HasPrefix(raw, []byte{0xEF, 0xBB, 0xBF}) {
 		t.Fatal("导出的 CSV 必须带 UTF-8 BOM 以兼容 Excel")
 	}
-	if !strings.Contains(string(raw), ",酒花,") || !strings.Contains(string(raw), ",酸野菌,") {
-		t.Fatalf("CSV 应导出可读中文分类色: %s", string(raw))
+	if !strings.Contains(string(raw), ",酒款分类,") || !strings.Contains(string(raw), ",IPA,") ||
+		!strings.Contains(string(raw), ",酸小麦,") || !strings.Contains(string(raw), ",西打,") {
+		t.Fatalf("CSV 应导出可读中文分类名: %s", string(raw))
 	}
 
 	parsed, err := ParseCatalogImport("catalog.csv", raw)
 	if err != nil {
 		t.Fatalf("ParseCatalogImport(CSV): %v", err)
 	}
-	if len(parsed) != 2 {
-		t.Fatalf("往返数量 = %d，应为 2", len(parsed))
+	if len(parsed) != 3 {
+		t.Fatalf("往返数量 = %d，应为 3", len(parsed))
 	}
 	p0 := parsed[0].Beer
-	if p0.Brewery != "酿酒狗" || p0.Name != "朋克 IPA" || p0.Category != "hop" ||
+	if p0.Brewery != "酿酒狗" || p0.Name != "朋克 IPA" || p0.Category != "IPA" ||
 		p0.ABV == nil || *p0.ABV != 5.2 || p0.IBU == nil || *p0.IBU != 35 ||
 		p0.UT == nil || *p0.UT != 3.70 || p0.UTCount == nil || *p0.UTCount != 579855 ||
 		len(p0.Tags) != 3 || p0.CapacityML != 20000 || p0.CostCents != 120000 ||
@@ -76,8 +87,12 @@ func TestCatalogCSVRoundTrip(t *testing.T) {
 		t.Fatalf("CSV 往返第 1 条不一致: %+v", p0)
 	}
 	p1 := parsed[1].Beer
-	if p1.Category != "sour" || p1.CostCents != 165050 || p1.IBU != nil || p1.Price150 != 0 || p1.Price330 != 8800 {
+	if p1.Category != "酸小麦" || p1.CostCents != 165050 || p1.IBU != nil || p1.Price150 != 0 || p1.Price330 != 8800 {
 		t.Fatalf("CSV 往返第 2 条不一致: %+v", p1)
+	}
+	p2 := parsed[2].Beer
+	if p2.Category != "西打" || p2.Price330 != 4200 {
+		t.Fatalf("CSV 往返第 3 条不一致: %+v", p2)
 	}
 }
 
@@ -117,7 +132,7 @@ func TestCatalogCSVPartialColumnsAndValidation(t *testing.T) {
 		{"第 2 行容量超 int4", "酒名,默认桶容量ml\n尤利乌斯,2147483648\n", "第 2 行"},
 		{"第 3 行负进价", "酒名,每桶进价\nA,1000\nB,-50\n", "第 3 行"},
 		{"第 2 行进价溢出", "酒名,每桶进价\nA,30000000\n", "第 2 行"},
-		{"第 2 行未知分类色", "酒名,分类色\nA,rainbow\n", "第 2 行"},
+		{"第 2 行未知酒款分类", "酒名,酒款分类\nA,rainbow\n", "第 2 行"},
 		{"第 2 行危险酒标协议", "酒名,酒标URL\nA,javascript:alert(1)\n", "第 2 行"},
 	}
 	for _, tc := range badCases {
@@ -171,7 +186,7 @@ func TestCatalogCSVFormulaInjectionAndQuotes(t *testing.T) {
 			Brewery:    "=HYPERLINK(\"http://evil\")",
 			Name:       "+危险酒名",
 			Style:      "-IPA",
-			Category:   "hop",
+			Category:   "IPA",
 			Tags:       []string{"@果香", "+苦韵", "'t IJ"},
 			CapacityML: 20000,
 			CostCents:  120000,
@@ -182,7 +197,7 @@ func TestCatalogCSVFormulaInjectionAndQuotes(t *testing.T) {
 			Brewery:    "'t IJ",
 			Name:       "'t IJ Dubbel",
 			Style:      "Dubbel",
-			Category:   "dark",
+			Category:   "修道院",
 			Tags:       []string{"'t IJ 麦香"},
 			CapacityML: 20000,
 		},
@@ -236,7 +251,7 @@ func TestCatalogJSONRoundTripAndPlaylistCompat(t *testing.T) {
 			Brewery:    "创始者",
 			Name:       "早餐世涛",
 			Style:      "Stout - Imperial Coffee",
-			Category:   "dark",
+			Category:   "世涛",
 			ABV:        ptrFloat(8.3),
 			IBU:        ptrInt(60),
 			UT:         ptrFloat(4.11),
@@ -318,6 +333,19 @@ func TestCodecRegistryLookupAndCustomCodec(t *testing.T) {
 	}
 	if _, ok := reg.Find("xml"); ok {
 		t.Fatal("未知格式应返回 false")
+	}
+
+	customReg := NewDefaultCodecRegistryWithCategories(func() []string { return []string{"IPA", "赛松"} })
+	csvCodec, ok := customReg.Find("csv")
+	if !ok {
+		t.Fatal("missing csv codec")
+	}
+	items, err := csvCodec.Decode([]byte("酒名,酒款分类\n农舍,赛松\n"))
+	if err != nil || len(items) != 1 || items[0].Beer.Category != "赛松" {
+		t.Fatalf("自定义分类 CSV 导入失败: items=%+v err=%v", items, err)
+	}
+	if _, err := csvCodec.Decode([]byte("酒名,酒款分类\n拉格酒,拉格\n")); err == nil {
+		t.Fatal("未出现在自定义分类列表中的分类应导入失败")
 	}
 }
 

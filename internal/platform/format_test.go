@@ -14,20 +14,65 @@ import (
 
 func TestToneOf(t *testing.T) {
 	cases := map[string]string{
-		"IPA - New England": "hop",
-		"Pilsner - German":  "hop",
-		"波西米亚比尔森":           "hop",
-		"淡色拉格":              "hop",
-		"德式拉格":              "fresh",
-		"Imperial Stout":    "dark",
-		"柏林酸小麦":             "sour",
-		"比利时三料":             "strong",
-		"未知风格":              "fresh",
+		"IPA - New England":       "IPA",
+		"Pilsner - German":        "皮尔森",
+		"波西米亚比尔森":                 "皮尔森",
+		"德式拉格":                    "拉格",
+		"Imperial Stout":          "世涛",
+		"Baltic Porter":           "波特",
+		"柏林酸小麦":                   "酸小麦",
+		"Sour - Fruited Smoothie": "果泥",
+		"Cider - Traditional":     "西打",
+		"Witbier / 德式小麦":          "小麦",
+		"比利时三料":                   "修道院",
+		"未知风格":                    "拉格",
 	}
 	for style, want := range cases {
 		if got := ToneOf(style); got != want {
 			t.Errorf("ToneOf(%q) = %q, want %q", style, got, want)
 		}
+	}
+}
+
+func TestBeerCategoryInferenceAndValidation(t *testing.T) {
+	avail := append(append([]string(nil), DefaultBeerCategories...), "赛松")
+	if got := MatchCategory("Saison / 农舍赛松", avail); got != "赛松" {
+		t.Fatalf("自定义分类直匹失败: got %q, want 赛松", got)
+	}
+	if got, err := ParseCategoryWithAllowed("ipa", DefaultBeerCategories); err != nil || got != "IPA" {
+		t.Fatalf("大小写不敏感匹配 IPA 失败: %q err=%v", got, err)
+	}
+	if got, err := ParseCategoryWithAllowed("hop", DefaultBeerCategories); err != nil || got != "IPA" {
+		t.Fatalf("历史分类别名 hop 应映射为 IPA: %q err=%v", got, err)
+	}
+	if got, err := ParseCategoryWithAllowed("酒花", DefaultBeerCategories); err != nil || got != "IPA" {
+		t.Fatalf("历史分类别名 酒花 应映射为 IPA: %q err=%v", got, err)
+	}
+	if got := CategoryLabel("sour"); got != "酸小麦" {
+		t.Fatalf("CategoryLabel(sour) = %q, want 酸小麦", got)
+	}
+
+	// 动态额外白名单允许编辑已不在预设表中的旧酒款分类
+	if got, err := ParseCategoryWithAllowed("赛松", []string{"IPA"}, "赛松"); err != nil || got != "赛松" {
+		t.Fatalf("extraAllowed 未生效: %q err=%v", got, err)
+	}
+
+	norm, err := NormalizeBeerCategories([]string{"  IPA ", "ipa", "西打", " "})
+	if err != nil || len(norm) != 2 || norm[0] != "IPA" || norm[1] != "西打" {
+		t.Fatalf("NormalizeBeerCategories = %#v, err=%v", norm, err)
+	}
+	if _, err := NormalizeBeerCategories([]string{" "}); err == nil {
+		t.Fatal("空分类列表应被拒绝")
+	}
+	tooMany := make([]string, MaxBeerCategories+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("分类%d", i)
+	}
+	if _, err := NormalizeBeerCategories(tooMany); err == nil {
+		t.Fatal("超过 50 个分类应被拒绝")
+	}
+	if _, err := ValidateBeerCategoryName(strings.Repeat("酒", MaxBeerCategoryRunes+1)); err == nil {
+		t.Fatal("超过 20 字的分类名应被拒绝")
 	}
 }
 
@@ -133,7 +178,7 @@ func TestStrictBeerValidationAndUserErrorSanitization(t *testing.T) {
 		{"IBU超int4", "ibu", "2147483648", "IBU"},
 		{"UT超5", "ut_rating", "5.5", "UT"},
 		{"评分人数超int4", "ut_count", "2147483648", "评分人数"},
-		{"未知分类色", "category", "rainbow", "分类色"},
+		{"未知分类", "category", "rainbow", "酒款分类"},
 		{"危险酒标", "poster_url", "javascript:alert(1)", "酒标"},
 		{"杯价为负", "price_330", "-5", "330ml"},
 		{"杯价溢出", "price_500", "30000000", "500ml"},

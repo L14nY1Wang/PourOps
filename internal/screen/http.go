@@ -106,12 +106,20 @@ func (s *Service) Playlist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items := make([]PlaylistItem, 0, len(beers))
+	var cats []string
+	if s.settings != nil {
+		cats = s.settings.BeerCategories()
+	}
 	for _, b := range beers {
 		if b.No == "" {
 			continue
 		}
+		cat := platform.CategoryLabel(b.Category)
+		if cat == "" {
+			cat = platform.InferCategory(b.Style, cats)
+		}
 		items = append(items, PlaylistItem{
-			No: b.No, Brewery: b.Brewery, Name: b.Name, Style: b.Style, Category: b.Category,
+			No: b.No, Brewery: b.Brewery, Name: b.Name, Style: b.Style, Category: cat,
 			Tags: b.Tags, SalesTags: b.SalesTags, ABV: b.ABV, IBU: b.IBU, Size: b.Size,
 			Price: platform.PriceText(b.PriceCents), UT: b.UT, UTCount: b.UTCount, Poster: b.PosterURL,
 			Sold: b.OnScreen,

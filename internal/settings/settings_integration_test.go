@@ -63,4 +63,35 @@ func TestSettingsStorePersistenceAndValidation(t *testing.T) {
 		got.WebhookURL != "https://example.com/hook" || len(got.WebhookEvents) != 2 {
 		t.Fatalf("reloaded = %+v", got)
 	}
+
+	// 验证酒款分类增删持久化与重加载一致
+	if _, err := reloaded.AddBeerCategory(ctx, "赛松"); err != nil {
+		t.Fatalf("AddBeerCategory(赛松): %v", err)
+	}
+	if _, err := reloaded.DeleteBeerCategory(ctx, "波特"); err != nil {
+		t.Fatalf("DeleteBeerCategory(波特): %v", err)
+	}
+	reloaded2 := settings.NewSettingsStore(pool, "PourOps")
+	if err := reloaded2.Refresh(ctx); err != nil {
+		t.Fatalf("reloaded2 Refresh: %v", err)
+	}
+	cats := reloaded2.BeerCategories()
+	var hasSaison, hasPorter bool
+	for _, c := range cats {
+		if c == "赛松" {
+			hasSaison = true
+		}
+		if c == "波特" {
+			hasPorter = true
+		}
+	}
+	if !hasSaison || hasPorter {
+		t.Fatalf("persisted BeerCategories mismatch: %v", cats)
+	}
+	if _, err := reloaded2.ResetBeerCategories(ctx); err != nil {
+		t.Fatalf("ResetBeerCategories: %v", err)
+	}
+	if len(reloaded2.BeerCategories()) != len(platform.DefaultBeerCategories) {
+		t.Fatalf("ResetBeerCategories got %v", reloaded2.BeerCategories())
+	}
 }

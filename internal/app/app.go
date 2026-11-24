@@ -55,16 +55,24 @@ func NewHandler(deps Deps) http.Handler {
 	}
 
 	authSvc := auth.NewService(deps.Pool, deps.Secret, deps.Renderer)
+	var catsFn func() []string
+	if deps.Settings != nil {
+		catsFn = deps.Settings.BeerCategories
+	}
 	if deps.Renderer != nil {
 		deps.Renderer.SetCurrentUserFn(authSvc.CurrentUserView)
+		if deps.Settings != nil {
+			deps.Renderer.SetCategoriesFn(deps.Settings.BeerCategoryOptions)
+		}
 	}
 	guards := authSvc.Guards()
 
-	catalogSvc := catalog.NewService(deps.Pool, deps.Renderer, deps.Settings, catalog.NewDefaultCodecRegistry())
-	lookupSvc := lookup.NewService(
-		lookup.NewLocalCatalogProvider(deps.Pool),
-		lookup.NewJiuheProvider(deps.JiuheBaseURL, nil),
-	)
+	catalogSvc := catalog.NewService(deps.Pool, deps.Renderer, deps.Settings, catalog.NewDefaultCodecRegistryWithCategories(catsFn))
+	localLookup := lookup.NewLocalCatalogProvider(deps.Pool)
+	localLookup.SetCategoriesFn(catsFn)
+	jiuheLookup := lookup.NewJiuheProvider(deps.JiuheBaseURL, nil)
+	jiuheLookup.SetCategoriesFn(catsFn)
+	lookupSvc := lookup.NewService(localLookup, jiuheLookup)
 	// screen.Service.PlaylistJSON 从 static/screen/playlist.json 读取，需传入根 StaticFS。
 	screenSvc := screen.NewService(deps.Pool, deps.ScreenHub, deps.Settings, deps.Renderer, web.StaticFS)
 	invSvc := inventory.NewService(deps.Pool, deps.Renderer, deps.Settings, deps.Bus)

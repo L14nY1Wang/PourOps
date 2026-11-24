@@ -41,11 +41,12 @@ var standaloneShells = map[string]string{
 	"screen/screen.html": "screen",
 }
 
-// Renderer 封装内嵌 HTML 模板、{{asset}} 指纹解析及当前登录用户信息注入。
+// Renderer 封装内嵌 HTML 模板、{{asset}} 指纹解析、动态酒款分类及当前登录用户信息注入。
 type Renderer struct {
-	pages       map[string]*template.Template
-	brandFn     func() string
-	currentUser func(*http.Request) *UserView
+	pages        map[string]*template.Template
+	brandFn      func() string
+	categoriesFn func() []platform.Option
+	currentUser  func(*http.Request) *UserView
 }
 
 func NewRenderer(templateFS fs.FS, assets *AssetManifest, brandFn func() string, pageFiles ...string) (*Renderer, error) {
@@ -93,6 +94,10 @@ func (re *Renderer) SetCurrentUserFn(fn func(*http.Request) *UserView) {
 	re.currentUser = fn
 }
 
+func (re *Renderer) SetCategoriesFn(fn func() []platform.Option) {
+	re.categoriesFn = fn
+}
+
 func (re *Renderer) Render(w http.ResponseWriter, req *http.Request, page string, data Page) {
 	re.exec(w, req, page, "layout", data)
 }
@@ -114,7 +119,12 @@ func (re *Renderer) exec(w http.ResponseWriter, req *http.Request, page, tmplNam
 			l.Brand = re.brandFn()
 		}
 		if len(l.Categories) == 0 {
-			l.Categories = platform.Categories
+			if re.categoriesFn != nil {
+				l.Categories = re.categoriesFn()
+			}
+			if len(l.Categories) == 0 {
+				l.Categories = platform.Categories
+			}
 		}
 		if l.Me == nil && re.currentUser != nil && req != nil {
 			l.Me = re.currentUser(req)

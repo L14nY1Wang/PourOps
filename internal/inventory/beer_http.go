@@ -115,11 +115,10 @@ func (s *Service) BeerList(w http.ResponseWriter, r *http.Request) {
 func (s *Service) PurchasePage(w http.ResponseWriter, r *http.Request) {
 	data := &PurchasePage{
 		Layout: ui.Layout{
-			Title:      "新增酒款",
-			Nav:        "beers",
-			Categories: platform.Categories,
-			Msg:        r.URL.Query().Get("msg"),
-			Err:        r.URL.Query().Get("err"),
+			Title: "新增酒款",
+			Nav:   "beers",
+			Msg:   r.URL.Query().Get("msg"),
+			Err:   r.URL.Query().Get("err"),
 		},
 		Keg:      Keg{CapacityML: catalog.DefaultCapacityML},
 		KegCount: 1,
@@ -163,7 +162,8 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 	rawKegs := strings.TrimSpace(r.FormValue("kegs"))
 	rawCap := strings.TrimSpace(r.FormValue("capacity_ml"))
 
-	parsed, formErr := platform.ParseBeerForm(r)
+	cats := s.currentCategories()
+	parsed, formErr := platform.ParseBeerFormWithCategories(r, cats)
 	b := catalog.Beer{
 		Brewery:   parsed.Brewery,
 		Name:      parsed.Name,
@@ -199,10 +199,9 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		s.renderer.Render(w, r, "admin/purchase.html", &PurchasePage{
 			Layout: ui.Layout{
-				Title:      "新增酒款",
-				Nav:        "beers",
-				Err:        msg,
-				Categories: platform.Categories,
+				Title: "新增酒款",
+				Nav:   "beers",
+				Err:   msg,
 			},
 			Beer:      b,
 			Keg:       Keg{CapacityML: capacity},
@@ -228,7 +227,7 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, costErr.Error())
 		return
 	}
-	beerID, err := PurchaseBeerTx(r.Context(), s.pool, b, count, capacity, costCents)
+	beerID, err := PurchaseBeerTxWithCategories(r.Context(), s.pool, b, count, capacity, costCents, cats)
 	if err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			fail(http.StatusBadRequest, msg)
@@ -324,9 +323,8 @@ func (s *Service) EditBeer(w http.ResponseWriter, r *http.Request) {
 	keg, costInput := LatestBeerKegSpec(r.Context(), s.pool, b)
 	s.renderer.Render(w, r, "admin/beer_form.html", &BeerFormPage{
 		Layout: ui.Layout{
-			Title:      "编辑酒款",
-			Nav:        "beers",
-			Categories: platform.Categories,
+			Title: "编辑酒款",
+			Nav:   "beers",
 		},
 		Beer:      b,
 		Keg:       keg,
@@ -340,9 +338,23 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "表单格式不正确", http.StatusBadRequest)
 		return
 	}
-	parsed, formErr := platform.ParseBeerForm(r)
+	ctx := r.Context()
+	var beerID int64
+	if id := r.FormValue("id"); id != "" {
+		beerID, _ = strconv.ParseInt(id, 10, 64)
+	}
+	cats := s.currentCategories()
+	var extraAllowed []string
+	if beerID > 0 && s.pool != nil {
+		if ex, err := catalog.GetBeer(ctx, s.pool, beerID); err == nil && ex.Category != "" {
+			extraAllowed = append(extraAllowed, ex.Category)
+		}
+	}
+
+	parsed, formErr := platform.ParseBeerFormWithCategories(r, cats, extraAllowed...)
 	sortOrder, sortErr := platform.ParseSortOrder(r.FormValue("sort_order"))
 	b := catalog.Beer{
+		ID:        beerID,
 		No:        strings.TrimSpace(r.FormValue("no")),
 		Brewery:   parsed.Brewery,
 		Name:      parsed.Name,
@@ -361,21 +373,17 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		OnScreen:  r.FormValue("on_screen") != "",
 		SortOrder: sortOrder,
 	}
-	if id := r.FormValue("id"); id != "" {
-		b.ID, _ = strconv.ParseInt(id, 10, 64)
-	}
 
 	pricing := s.currentPricing()
 	renderFail := func(status int, msg string) {
-		keg, costInput := LatestBeerKegSpec(r.Context(), s.pool, b)
+		keg, costInput := LatestBeerKegSpec(ctx, s.pool, b)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(status)
 		s.renderer.Render(w, r, "admin/beer_form.html", &BeerFormPage{
 			Layout: ui.Layout{
-				Title:      "编辑酒款",
-				Nav:        "beers",
-				Categories: platform.Categories,
-				Err:        msg,
+				Title: "编辑酒款",
+				Nav:   "beers",
+				Err:   msg,
 			},
 			Beer:      b,
 			Keg:       keg,
@@ -391,7 +399,6 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusBadRequest, sortErr.Error())
 		return
 	}
-	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		log.Printf("save beer begin (%d): %v", b.ID, err)
@@ -399,7 +406,7 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(ctx)
-	savedID, err := catalog.SaveBeer(ctx, tx, b)
+	savedID, err := catalog.SaveBeerWithCategories(ctx, tx, b, cats, extraAllowed...)
 	if err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			renderFail(http.StatusBadRequest, msg)
@@ -409,7 +416,7 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return
 	}
-	if err := catalog.UpsertCatalogFromBeer(ctx, tx, b, 0, 0, false); err != nil {
+	if err := catalog.UpsertCatalogFromBeerWithCategories(ctx, tx, b, 0, 0, false, cats); err != nil {
 		log.Printf("save beer catalog sync (%d): %v", b.ID, err)
 		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return

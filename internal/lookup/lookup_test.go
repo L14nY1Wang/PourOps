@@ -280,7 +280,7 @@ func TestJiuheLookupHandlersAndCache(t *testing.T) {
 		}
 		if d.Source != "jiuhe" || d.Brewery != "FEVER酿造" || d.Name != "星空领航员:Citra" ||
 			d.ABV != "6.7" || d.IBU != "36" || d.UTRating != "4.08" || d.UTCount != "35" ||
-			d.Style != "IPA - New England / Hazy" || d.Category != "hop" ||
+			d.Style != "IPA - New England / Hazy" || d.Category != "IPA" ||
 			d.CapacityML != "20000" || d.Cost != "1282.5" || d.Tags != "西柚、百香果、柑橘" {
 			t.Fatalf("生啤详情映射不对: %+v", d)
 		}
@@ -296,7 +296,7 @@ func TestJiuheLookupHandlersAndCache(t *testing.T) {
 	}
 	var dCan Detail
 	_ = json.Unmarshal(recCan.Body.Bytes(), &dCan)
-	if dCan.CapacityML != "" || dCan.Cost != "" || dCan.IBU != "" || dCan.UTRating != "4.41" || dCan.Category != "hop" {
+	if dCan.CapacityML != "" || dCan.Cost != "" || dCan.IBU != "" || dCan.UTRating != "4.41" || dCan.Category != "IPA" {
 		t.Fatalf("罐装详情或空 IBU 映射不对: %+v", dCan)
 	}
 
@@ -315,5 +315,24 @@ func TestJiuheLookupHandlersAndCache(t *testing.T) {
 	svc.LookupBeerDetail(recNotFound, httptest.NewRequest(http.MethodGet, "/admin/beers/lookup/detail?source=jiuhe&id=999999", nil))
 	if recNotFound.Code != http.StatusNotFound {
 		t.Fatalf("不存在的商品应返 404，实际 %d", recNotFound.Code)
+	}
+}
+
+func TestJiuheProviderCustomCategoriesFn(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"product":{"product":{"id":9001,"name":"农舍厂 农舍之歌","category":{"id":2,"name":"生啤"}},"price":{"min":1100,"display":1100},"skus":[{"categoryName":"生啤","capacityLabel":"20L","price":1100,"availableQuantity":1}]},"wineDetail":{"id":9001,"nameZh":"农舍厂 农舍之歌","nameEn":"Farmhouse Song","brandNameZh":"农舍厂","abv":6.2,"style":"比利时赛松","untappdStyle":"Farmhouse Ale - Saison"}}`)),
+		}, nil
+	})}
+	p := NewJiuheProvider("https://mock.jiuhe.test/api", client)
+	p.SetCategoriesFn(func() []string { return []string{"IPA", "赛松"} })
+	d, err := p.Detail(t.Context(), "9001")
+	if err != nil {
+		t.Fatalf("Detail err=%v", err)
+	}
+	if d.Category != "赛松" {
+		t.Fatalf("Category = %q, want 赛松", d.Category)
 	}
 }

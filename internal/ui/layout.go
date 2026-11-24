@@ -2,6 +2,7 @@ package ui
 
 import (
 	"net/http"
+	"strings"
 
 	"pourops/internal/platform"
 )
@@ -66,6 +67,20 @@ type Layout struct {
 }
 
 func (l *Layout) LayoutPtr() *Layout { return l }
+
+// HasCategory 判断分类值是否仍存在于当前可选预设列表中，供编辑页保留历史自定义分类。
+func (l *Layout) HasCategory(v string) bool {
+	target := strings.TrimSpace(v)
+	if target == "" {
+		return true
+	}
+	for _, c := range l.Categories {
+		if strings.EqualFold(c.Value, target) {
+			return true
+		}
+	}
+	return false
+}
 
 // Page 让各个强类型页面 ViewModel 统一接入 Renderer。
 type Page interface {
