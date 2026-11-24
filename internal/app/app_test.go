@@ -99,14 +99,14 @@ func TestAllTemplatesRender(t *testing.T) {
 				TotalRevenue: 380000,
 				TotalCost:    150000,
 				Segments: []report.CategorySegment{
-					{Category: "IPA", Color: report.AudienceCategoryColor("IPA"), Cups: 32, PrevCups: 25, VolumeML: 10560, Revenue: 185600, Cost: 64000, AvgABV: 6.8, HasABV: true, CupShare: 51.6, RevShare: 48.8},
-					{Category: "西打", Color: report.AudienceCategoryColor("西打"), Cups: 18, PrevCups: 12, VolumeML: 5940, Revenue: 108000, Cost: 45000, AvgABV: 5.0, HasABV: true, CupShare: 29.0, RevShare: 28.4},
-					{Category: "世涛", Color: report.AudienceCategoryColor("世涛"), Cups: 12, PrevCups: 0, VolumeML: 3960, Revenue: 86400, Cost: 41000, AvgABV: 9.2, HasABV: true, CupShare: 19.4, RevShare: 22.7},
+					{Category: "IPA", Color: report.AudienceCategoryColor("IPA"), Cups: 32, PrevCups: 25, VolumeML: 10560, Revenue: 185600, Cost: 64000, AvgABV: 6.8, HasABV: true, CupShare: 51.6, RevShare: 48.8, ProfitShare: 52.9},
+					{Category: "西打", Color: report.AudienceCategoryColor("西打"), Cups: 18, PrevCups: 12, VolumeML: 5940, Revenue: 108000, Cost: 45000, AvgABV: 5.0, HasABV: true, CupShare: 29.0, RevShare: 28.4, ProfitShare: 27.4},
+					{Category: "世涛", Color: report.AudienceCategoryColor("世涛"), Cups: 12, PrevCups: 0, VolumeML: 3960, Revenue: 86400, Cost: 41000, AvgABV: 9.2, HasABV: true, CupShare: 19.4, RevShare: 22.7, ProfitShare: 19.7},
 				},
 				CupSizes: report.CupSizePreference{SmallCups: 10, MediumCups: 42, LargeCups: 10},
 				Spots:    report.SpotPreference{BarCups: 24, BarTopCat: "IPA", TableCups: 20, TableTopCat: "西打"},
 			},
-		}, []string{"销售走势", "客户群分析", "按日销售明细", `id="salesChart"`, `id="audienceChart"`, `id="audience-data"`, `data-audience-type="radar"`, "IPA", "西打", "2026-11-23"}, false},
+		}, []string{"销售走势", "客户群分析", "按日销售明细", `id="salesChart"`, `id="audienceChart"`, `id="audience-data"`, `data-audience-type="radar"`, `data-audience-metric="profit"`, "按毛利", "IPA", "西打", "2026-11-23"}, false},
 		{"beers", "admin/beers.html", "layout", &inventory.BeerListPage{
 			Layout: ui.Layout{Title: "酒单 · 桶装", Nav: "beers", Me: me}, NextNo: 2, Pricing: pricing,
 			Rows: []inventory.BeerRow{{Beer: beer, Keg: &keg, Stock: 2}, {Beer: beer, LastKeg: &finKeg}},

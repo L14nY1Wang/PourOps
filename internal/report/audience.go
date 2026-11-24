@@ -21,6 +21,7 @@ var defaultAudienceColors = map[string]string{
 	"皮尔森": "#38b2ac",
 	"小麦":  "#d69e2e",
 	"酸小麦": "#8b6fe8",
+	"酸艾尔": "#7c5ce6",
 	"果泥":  "#e06392",
 	"西打":  "#52b788",
 	"世涛":  "#b86b35",
@@ -58,17 +59,18 @@ func AudienceCategoryColor(cat string) string {
 }
 
 type CategorySegment struct {
-	Category string
-	Color    string
-	Cups     int64
-	PrevCups int64
-	VolumeML int64
-	Revenue  int64
-	Cost     int64
-	AvgABV   float64
-	HasABV   bool
-	CupShare float64
-	RevShare float64
+	Category    string
+	Color       string
+	Cups        int64
+	PrevCups    int64
+	VolumeML    int64
+	Revenue     int64
+	Cost        int64
+	AvgABV      float64
+	HasABV      bool
+	CupShare    float64
+	RevShare    float64
+	ProfitShare float64
 }
 
 func (s CategorySegment) Profit() int64       { return s.Revenue - s.Cost }
@@ -80,6 +82,9 @@ func (s CategorySegment) CupShareText() string {
 }
 func (s CategorySegment) RevShareText() string {
 	return fmt.Sprintf("%.1f%%", s.RevShare)
+}
+func (s CategorySegment) ProfitShareText() string {
+	return fmt.Sprintf("%.1f%%", s.ProfitShare)
 }
 
 func (s CategorySegment) AvgCupCents() int64 {
@@ -262,29 +267,37 @@ func (i AudienceInsights) TotalVolumeText() string {
 	return (CategorySegment{VolumeML: i.TotalVolume}).VolumeText()
 }
 
+func (i AudienceInsights) TotalProfit() int64 {
+	return i.TotalRevenue - i.TotalCost
+}
+
 type AudienceChartPoint struct {
-	Category string  `json:"category"`
-	Color    string  `json:"color"`
-	Cups     int64   `json:"cups"`
-	Revenue  float64 `json:"revenue"`
-	Profit   float64 `json:"profit"`
-	AvgCup   float64 `json:"avg_cup"`
-	CupShare float64 `json:"cup_share"`
-	RevShare float64 `json:"rev_share"`
+	Category    string  `json:"category"`
+	Color       string  `json:"color"`
+	Cups        int64   `json:"cups"`
+	Revenue     float64 `json:"revenue"`
+	Profit      float64 `json:"profit"`
+	AvgCup      float64 `json:"avg_cup"`
+	CupShare    float64 `json:"cup_share"`
+	RevShare    float64 `json:"rev_share"`
+	ProfitShare float64 `json:"profit_share"`
+	Margin      string  `json:"margin"`
 }
 
 func (i AudienceInsights) ChartJSON() template.JS {
 	points := make([]AudienceChartPoint, 0, len(i.Segments))
 	for _, s := range i.Segments {
 		points = append(points, AudienceChartPoint{
-			Category: s.Category,
-			Color:    s.Color,
-			Cups:     s.Cups,
-			Revenue:  math.Round(float64(s.Revenue)) / 100,
-			Profit:   math.Round(float64(s.Profit())) / 100,
-			AvgCup:   math.Round(float64(s.AvgCupCents())) / 100,
-			CupShare: math.Round(s.CupShare*10) / 10,
-			RevShare: math.Round(s.RevShare*10) / 10,
+			Category:    s.Category,
+			Color:       s.Color,
+			Cups:        s.Cups,
+			Revenue:     math.Round(float64(s.Revenue)) / 100,
+			Profit:      math.Round(float64(s.Profit())) / 100,
+			AvgCup:      math.Round(float64(s.AvgCupCents())) / 100,
+			CupShare:    math.Round(s.CupShare*10) / 10,
+			RevShare:    math.Round(s.RevShare*10) / 10,
+			ProfitShare: math.Round(s.ProfitShare*10) / 10,
+			Margin:      s.MarginText(),
 		})
 	}
 	b, _ := json.Marshal(points)
@@ -374,6 +387,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 		return out, err
 	}
 
+	var posProfitTotal int64
 	for cat, a := range accByCat {
 		if a.cups <= 0 && a.revenue <= 0 {
 			continue
@@ -388,6 +402,9 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 			Cost:     int64(math.Round(a.costExact)),
 		}
 		out.TotalCost += seg.Cost
+		if p := seg.Profit(); p > 0 {
+			posProfitTotal += p
+		}
 		if a.abvWeight > 0 {
 			seg.HasABV = true
 			seg.AvgABV = math.Round((a.abvWeighted/float64(a.abvWeight))*10) / 10
@@ -399,6 +416,13 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 			seg.RevShare = float64(seg.Revenue) * 100 / float64(out.TotalRevenue)
 		}
 		out.Segments = append(out.Segments, seg)
+	}
+	if posProfitTotal > 0 {
+		for idx := range out.Segments {
+			if p := out.Segments[idx].Profit(); p > 0 {
+				out.Segments[idx].ProfitShare = float64(p) * 100 / float64(posProfitTotal)
+			}
+		}
 	}
 	slices.SortFunc(out.Segments, func(a, b CategorySegment) int {
 		if a.Cups != b.Cups {

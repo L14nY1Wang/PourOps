@@ -68,7 +68,7 @@ func TestCatalogCSVRoundTrip(t *testing.T) {
 		t.Fatal("导出的 CSV 必须带 UTF-8 BOM 以兼容 Excel")
 	}
 	if !strings.Contains(string(raw), ",酒款分类,") || !strings.Contains(string(raw), ",IPA,") ||
-		!strings.Contains(string(raw), ",酸小麦,") || !strings.Contains(string(raw), ",西打,") {
+		!strings.Contains(string(raw), ",酸艾尔,") || !strings.Contains(string(raw), ",西打,") {
 		t.Fatalf("CSV 应导出可读中文分类名: %s", string(raw))
 	}
 
@@ -89,7 +89,7 @@ func TestCatalogCSVRoundTrip(t *testing.T) {
 		t.Fatalf("CSV 往返第 1 条不一致: %+v", p0)
 	}
 	p1 := parsed[1].Beer
-	if p1.Category != "酸小麦" || p1.CostCents != 165050 || p1.IBU != nil || p1.Price150 != 0 || p1.Price330 != 8800 {
+	if p1.Category != "酸艾尔" || p1.CostCents != 165050 || p1.IBU != nil || p1.Price150 != 0 || p1.Price330 != 8800 {
 		t.Fatalf("CSV 往返第 2 条不一致: %+v", p1)
 	}
 	p2 := parsed[2].Beer
@@ -199,7 +199,7 @@ func TestCatalogCSVFormulaInjectionAndQuotes(t *testing.T) {
 			Brewery:    "'t IJ",
 			Name:       "'t IJ Dubbel",
 			Style:      "Dubbel",
-			Category:   "修道院",
+			Category:   "世涛",
 			Tags:       []string{"'t IJ 麦香"},
 			CapacityML: 20000,
 		},

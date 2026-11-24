@@ -52,7 +52,7 @@ const (
 
 // DefaultBeerCategories 定义酒款默认预设风格分类；可在系统设置中增删维护。
 var DefaultBeerCategories = []string{
-	"IPA", "拉格", "皮尔森", "小麦", "酸小麦", "果泥", "西打", "世涛", "波特", "修道院",
+	"IPA", "拉格", "皮尔森", "小麦", "酸小麦", "酸艾尔", "果泥", "西打", "世涛",
 }
 
 // Categories 保持默认酒款分类选项列表（未传入动态分类配置时兜底使用）。
@@ -127,12 +127,12 @@ var legacyCategoryAliases = map[string]string{
 	"酒花":     "IPA",
 	"fresh":  "拉格",
 	"清爽":     "拉格",
-	"sour":   "酸小麦",
-	"酸野菌":    "酸小麦",
+	"sour":   "酸艾尔",
+	"酸野菌":    "酸艾尔",
 	"dark":   "世涛",
 	"深色":     "世涛",
-	"strong": "修道院",
-	"烈性":     "修道院",
+	"strong": "世涛",
+	"烈性":     "世涛",
 }
 
 // CategoryLabel 返回适合展示的酒款分类名称；历史旧编码会自动映射为新版中文分类名。
@@ -193,10 +193,11 @@ var styleCategoryRules = []struct {
 }{
 	{"西打", regexp.MustCompile(`cider|perry|pomme|苹果酒|西打`)},
 	{"果泥", regexp.MustCompile(`smoothie|puree|slush|fruited|pastry sour|果泥|奶昔`)},
-	{"酸小麦", regexp.MustCompile(`berliner|gose|lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸小麦|柏林|古斯|贵兹|兰比克|野菌|酸`)},
+	{"酸小麦", regexp.MustCompile(`berliner|gose|酸小麦|柏林|古斯`)},
+	{"酸艾尔", regexp.MustCompile(`lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤|酸`)},
 	{"IPA", regexp.MustCompile(`\bipa\b|neipa|dipa|tipa|india pale|pale ale|\bapa\b|hazy|印度淡|浑浊|酒花`)},
-	{"世涛", regexp.MustCompile(`stout|irish dry|imperial black|世涛|黑啤`)},
 	{"波特", regexp.MustCompile(`porter|baltic|波特`)},
+	{"世涛", regexp.MustCompile(`stout|porter|baltic|irish dry|imperial black|世涛|黑啤|波特`)},
 	{"皮尔森", regexp.MustCompile(`pilsner|pilsener|\bpils\b|bohemian|皮尔森|比尔森`)},
 	{"小麦", regexp.MustCompile(`wheat|witbier|hefeweizen|weizen|weisse|weissbier|blanche|white ale|小麦|白啤`)},
 	{"修道院", regexp.MustCompile(`trappist|abbey|tripel|dubbel|quadrupel|belgian strong|\bquad\b|修道院|三料|双料|四料|烈性`)},

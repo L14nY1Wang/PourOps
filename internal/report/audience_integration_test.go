@@ -32,8 +32,8 @@ func TestAudienceCategoryColorAndFormatting(t *testing.T) {
 		TotalRevenue: 52000,
 		TotalCost:    18000,
 		Segments: []CategorySegment{
-			{Category: "IPA", Color: AudienceCategoryColor("IPA"), Cups: 6, PrevCups: 4, VolumeML: 1980, Revenue: 30000, Cost: 10000, AvgABV: 6.8, HasABV: true, CupShare: 60, RevShare: 57.7},
-			{Category: "世涛", Color: AudienceCategoryColor("世涛"), Cups: 4, PrevCups: 0, VolumeML: 1270, Revenue: 22000, Cost: 8000, AvgABV: 8.5, HasABV: true, CupShare: 40, RevShare: 42.3},
+			{Category: "IPA", Color: AudienceCategoryColor("IPA"), Cups: 6, PrevCups: 4, VolumeML: 1980, Revenue: 30000, Cost: 10000, AvgABV: 6.8, HasABV: true, CupShare: 60, RevShare: 57.7, ProfitShare: 58.8},
+			{Category: "世涛", Color: AudienceCategoryColor("世涛"), Cups: 4, PrevCups: 0, VolumeML: 1270, Revenue: 22000, Cost: 8000, AvgABV: 8.5, HasABV: true, CupShare: 40, RevShare: 42.3, ProfitShare: 41.2},
 		},
 		CupSizes: CupSizePreference{SmallCups: 2, MediumCups: 6, LargeCups: 2},
 		Spots:    SpotPreference{BarCups: 4, BarTopCat: "IPA", TableCups: 3, TableTopCat: "世涛"},
@@ -54,9 +54,35 @@ func TestAudienceCategoryColorAndFormatting(t *testing.T) {
 		t.Fatalf("Spots.SummaryText = %q", got)
 	}
 
+	if in.TotalProfit() != 34000 || in.Segments[0].ProfitShareText() != "58.8%" {
+		t.Fatalf("TotalProfit=%d ProfitShareText=%q", in.TotalProfit(), in.Segments[0].ProfitShareText())
+	}
+
 	var pts []AudienceChartPoint
-	if err := json.Unmarshal([]byte(in.ChartJSON()), &pts); err != nil || len(pts) != 2 || pts[0].Revenue != 300 || pts[1].AvgCup != 55 {
+	if err := json.Unmarshal([]byte(in.ChartJSON()), &pts); err != nil || len(pts) != 2 ||
+		pts[0].Revenue != 300 || pts[0].Profit != 200 || pts[0].ProfitShare != 58.8 || pts[0].Margin != "66.7%" ||
+		pts[1].AvgCup != 55 || pts[1].ProfitShare != 41.2 {
 		t.Fatalf("ChartJSON = %s (err=%v)", in.ChartJSON(), err)
+	}
+
+	// 含亏损分类时：总毛利与该分类有符号毛利保留负值，但 ProfitShare 保持为 0。
+	withLoss := AudienceInsights{
+		TotalCups:    11,
+		TotalRevenue: 57000,
+		TotalCost:    26000,
+		Segments: []CategorySegment{
+			{Category: "IPA", Cups: 6, Revenue: 30000, Cost: 10000, ProfitShare: 58.8},
+			{Category: "世涛", Cups: 4, Revenue: 22000, Cost: 8000, ProfitShare: 41.2},
+			{Category: "果泥", Cups: 1, Revenue: 5000, Cost: 8000, ProfitShare: 0},
+		},
+	}
+	if withLoss.TotalProfit() != 31000 || withLoss.Segments[2].Profit() != -3000 || withLoss.Segments[2].ProfitShare != 0 {
+		t.Fatalf("亏损分类毛利或占比异常: total=%d seg=%+v", withLoss.TotalProfit(), withLoss.Segments[2])
+	}
+	var lossPts []AudienceChartPoint
+	if err := json.Unmarshal([]byte(withLoss.ChartJSON()), &lossPts); err != nil || len(lossPts) != 3 ||
+		lossPts[2].Profit != -30 || lossPts[2].ProfitShare != 0 || lossPts[2].Margin != "-60.0%" {
+		t.Fatalf("亏损 ChartJSON = %s (err=%v)", withLoss.ChartJSON(), err)
 	}
 }
 
@@ -175,6 +201,13 @@ func TestLoadAudienceInsightsAndAnalyticsHTTP(t *testing.T) {
 	if aud.CupSizes.SmallCups != 1 || aud.CupSizes.MediumCups != 6 || aud.CupSizes.LargeCups != 3 {
 		t.Fatalf("杯型分布不对: %+v", aud.CupSizes)
 	}
+	var profitShareSum float64
+	for _, seg := range aud.Segments {
+		profitShareSum += seg.ProfitShare
+	}
+	if aud.TotalProfit() <= 0 || profitShareSum < 99.9 || profitShareSum > 100.1 {
+		t.Fatalf("盈利分类毛利占比之和应接近 100%%: totalProfit=%d sum=%.2f segs=%+v", aud.TotalProfit(), profitShareSum, aud.Segments)
+	}
 	if aud.Spots.BarCups != 3 || aud.Spots.BarTopCat != "IPA" || aud.Spots.TableCups != 2 || aud.Spots.TableTopCat != "西打" {
 		t.Fatalf("POS 台位偏爱不对: %+v", aud.Spots)
 	}
@@ -189,7 +222,7 @@ func TestLoadAudienceInsightsAndAnalyticsHTTP(t *testing.T) {
 		t.Fatalf("GET /admin/analytics = %d: %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"客户群分析", `id="audienceChart"`, `id="audience-data"`, `data-audience-type="radar"`, "IPA", "西打", "赛松", "世涛", "吧台偏爱 IPA（3 杯）", "桌台偏爱 西打（2 杯）"} {
+	for _, want := range []string{"客户群分析", `id="audienceChart"`, `id="audience-data"`, `data-audience-type="radar"`, `data-audience-metric="profit"`, "按毛利", "IPA", "西打", "赛松", "世涛", "吧台偏爱 IPA（3 杯）", "桌台偏爱 西打（2 杯）"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("数据分析页面缺少 %q", want)
 		}

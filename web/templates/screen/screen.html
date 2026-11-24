@@ -281,22 +281,22 @@
   var TONES = {
     fresh:  '#e2c476',  // 清爽 / 拉格 / 小麦 / 西打
     hop:    '#57cf9b',  // 酒花 / IPA / 皮尔森
-    sour:   '#a48bf0',  // 酸小麦 / 果泥
-    dark:   '#d9925c',  // 世涛 / 波特
-    strong: '#e8765f'   // 修道院 / 烈性
+    sour:   '#a48bf0',  // 酸小麦 / 酸艾尔 / 果泥
+    dark:   '#d9925c',  // 世涛
+    strong: '#e8765f'   // 烈性 / 扩展强调色
   };
   var PALETTE = [TONES.hop, TONES.fresh, TONES.sour, TONES.dark, TONES.strong];
   var LEGACY_CATS = {
     fresh: '拉格',
     hop: 'IPA',
-    sour: '酸小麦',
+    sour: '酸艾尔',
     dark: '世涛',
-    strong: '修道院',
+    strong: '世涛',
     '清爽': '拉格',
     '酒花': 'IPA',
-    '酸野菌': '酸小麦',
+    '酸野菌': '酸艾尔',
     '深色': '世涛',
-    '烈性': '修道院'
+    '烈性': '世涛'
   };
   var CAT_COLORS = {
     'IPA': TONES.hop,
@@ -305,6 +305,7 @@
     '小麦': TONES.fresh,
     '西打': TONES.fresh,
     '酸小麦': TONES.sour,
+    '酸艾尔': TONES.sour,
     '果泥': TONES.sour,
     '世涛': TONES.dark,
     '波特': TONES.dark,
@@ -316,14 +317,13 @@
     if (c) return LEGACY_CATS[c] || LEGACY_CATS[c.toLowerCase()] || c;
     var s = String(style || '').toLowerCase();
     if (/cider|perry|pomme|苹果酒|西打/.test(s)) return '西打';
-    if (/smoothie|puree|slush|fruited|果泥|奶昔/.test(s)) return '果泥';
-    if (/berliner|gose|lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸/.test(s)) return '酸小麦';
+    if (/smoothie|puree|slush|fruited|pastry sour|果泥|奶昔/.test(s)) return '果泥';
+    if (/berliner|gose|酸小麦|柏林|古斯/.test(s)) return '酸小麦';
+    if (/lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤|酸/.test(s)) return '酸艾尔';
     if (/\bipa\b|neipa|dipa|tipa|india pale|pale ale|hazy|酒花|浑浊|印度淡/.test(s)) return 'IPA';
-    if (/stout|世涛/.test(s)) return '世涛';
-    if (/porter|波特/.test(s)) return '波特';
+    if (/stout|porter|baltic|世涛|黑啤|波特/.test(s)) return '世涛';
     if (/pilsner|pilsener|\bpils\b|皮尔森|比尔森/.test(s)) return '皮尔森';
     if (/wheat|witbier|hefeweizen|weizen|weisse|weissbier|小麦|白啤/.test(s)) return '小麦';
-    if (/trappist|abbey|tripel|dubbel|quadrupel|修道院|三料|双料|四料/.test(s)) return '修道院';
     return '拉格';
   }
 

@@ -11,6 +11,7 @@ import (
 	"testing/fstest"
 
 	"pourops/internal/event"
+	"pourops/internal/platform"
 	"pourops/internal/ui"
 )
 
@@ -167,7 +168,7 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 	// 4. 恢复默认分类
 	recReset := httptest.NewRecorder()
 	svc.ResetCategories(recReset, httptest.NewRequest(http.MethodPost, "/admin/settings/categories/reset", nil))
-	if len(store.BeerCategories()) != 10 {
-		t.Fatalf("ResetCategories len = %d, want 10", len(store.BeerCategories()))
+	if len(store.BeerCategories()) != len(platform.DefaultBeerCategories) {
+		t.Fatalf("ResetCategories len = %d, want %d", len(store.BeerCategories()), len(platform.DefaultBeerCategories))
 	}
 }

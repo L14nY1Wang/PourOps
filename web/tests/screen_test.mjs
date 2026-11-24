@@ -275,18 +275,21 @@ const menu = (n, extra = () => ({})) => ({
           { no: '01', name: '苹果西打', category: '西打', style: 'Dry Cider' },
           { no: '02', name: '农舍赛松', category: '赛松', style: 'Farmhouse Saison' },
           { no: '03', name: '旧酒花款', category: 'hop', style: 'American IPA' },
+          { no: '04', name: '贵兹酸啤', style: 'Lambic - Gueuze' },
         ],
       },
     },
   });
   await r.flush();
-  const [c1, c2, c3] = r.board.children;
+  const [c1, c2, c3, c4] = r.board.children;
   assert.equal(c1.querySelector('.cat').textContent, '西打');
   assert.match(c1.style['--tone'], /^#[0-9a-f]{6}$/i);
   assert.equal(c2.querySelector('.cat').textContent, '赛松');
   assert.match(c2.style['--tone'], /^#[0-9a-f]{6}$/i);
   assert.equal(c3.querySelector('.cat').textContent, 'IPA');
   assert.equal(c3.style['--tone'], '#57cf9b');
+  assert.equal(c4.querySelector('.cat').textContent, '酸艾尔');
+  assert.equal(c4.style['--tone'], '#a48bf0');
 }
 
 console.log('web/templates/screen/screen.html: 9 组回归通过');

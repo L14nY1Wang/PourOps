@@ -19,12 +19,14 @@ func TestToneOf(t *testing.T) {
 		"波西米亚比尔森":                 "皮尔森",
 		"德式拉格":                    "拉格",
 		"Imperial Stout":          "世涛",
-		"Baltic Porter":           "波特",
+		"Baltic Porter":           "世涛",
 		"柏林酸小麦":                   "酸小麦",
+		"Lambic - Gueuze":         "酸艾尔",
+		"Sour Ale / 酸艾尔":          "酸艾尔",
 		"Sour - Fruited Smoothie": "果泥",
 		"Cider - Traditional":     "西打",
 		"Witbier / 德式小麦":          "小麦",
-		"比利时三料":                   "修道院",
+		"比利时三料":                   "拉格",
 		"未知风格":                    "拉格",
 	}
 	for style, want := range cases {
@@ -35,6 +37,21 @@ func TestToneOf(t *testing.T) {
 }
 
 func TestBeerCategoryInferenceAndValidation(t *testing.T) {
+	var hasSourAle, hasPorter, hasAbbey bool
+	for _, c := range DefaultBeerCategories {
+		switch c {
+		case "酸艾尔":
+			hasSourAle = true
+		case "波特":
+			hasPorter = true
+		case "修道院":
+			hasAbbey = true
+		}
+	}
+	if !hasSourAle || hasPorter || hasAbbey {
+		t.Fatalf("默认分类配置不对: %#v", DefaultBeerCategories)
+	}
+
 	avail := append(append([]string(nil), DefaultBeerCategories...), "赛松")
 	if got := MatchCategory("Saison / 农舍赛松", avail); got != "赛松" {
 		t.Fatalf("自定义分类直匹失败: got %q, want 赛松", got)
@@ -48,8 +65,8 @@ func TestBeerCategoryInferenceAndValidation(t *testing.T) {
 	if got, err := ParseCategoryWithAllowed("酒花", DefaultBeerCategories); err != nil || got != "IPA" {
 		t.Fatalf("历史分类别名 酒花 应映射为 IPA: %q err=%v", got, err)
 	}
-	if got := CategoryLabel("sour"); got != "酸小麦" {
-		t.Fatalf("CategoryLabel(sour) = %q, want 酸小麦", got)
+	if got := CategoryLabel("sour"); got != "酸艾尔" {
+		t.Fatalf("CategoryLabel(sour) = %q, want 酸艾尔", got)
 	}
 
 	// 动态额外白名单允许编辑已不在预设表中的旧酒款分类

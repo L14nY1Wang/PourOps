@@ -68,24 +68,24 @@ func TestSettingsStorePersistenceAndValidation(t *testing.T) {
 	if _, err := reloaded.AddBeerCategory(ctx, "赛松"); err != nil {
 		t.Fatalf("AddBeerCategory(赛松): %v", err)
 	}
-	if _, err := reloaded.DeleteBeerCategory(ctx, "波特"); err != nil {
-		t.Fatalf("DeleteBeerCategory(波特): %v", err)
+	if _, err := reloaded.DeleteBeerCategory(ctx, "皮尔森"); err != nil {
+		t.Fatalf("DeleteBeerCategory(皮尔森): %v", err)
 	}
 	reloaded2 := settings.NewSettingsStore(pool, "PourOps")
 	if err := reloaded2.Refresh(ctx); err != nil {
 		t.Fatalf("reloaded2 Refresh: %v", err)
 	}
 	cats := reloaded2.BeerCategories()
-	var hasSaison, hasPorter bool
+	var hasSaison, hasPilsner bool
 	for _, c := range cats {
 		if c == "赛松" {
 			hasSaison = true
 		}
-		if c == "波特" {
-			hasPorter = true
+		if c == "皮尔森" {
+			hasPilsner = true
 		}
 	}
-	if !hasSaison || hasPorter {
+	if !hasSaison || hasPilsner {
 		t.Fatalf("persisted BeerCategories mismatch: %v", cats)
 	}
 	if _, err := reloaded2.ResetBeerCategories(ctx); err != nil {

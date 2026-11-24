@@ -78,6 +78,7 @@
       <div class="audience-toggle" role="group" aria-label="客户群统计指标">
         <button type="button" class="audience-toggle-btn active" data-audience-metric="cups" aria-pressed="true">按杯数</button>
         <button type="button" class="audience-toggle-btn" data-audience-metric="revenue" aria-pressed="false">按营收</button>
+        <button type="button" class="audience-toggle-btn" data-audience-metric="profit" aria-pressed="false">按毛利</button>
       </div>
       {{if .Audience.CanRadar}}
       <div class="audience-toggle" role="group" aria-label="图表视图切换">
@@ -129,7 +130,8 @@
         <div class="audience-row-meta">
           <span>出酒 {{.VolumeText}}</span>
           <span>营收 {{.RevenueText}}（{{.RevShareText}}）</span>
-          <span>均价 {{.AvgCupText}} · 毛利率 {{.MarginText}}</span>
+          <span>毛利 {{.ProfitText}}（{{.MarginText}}）</span>
+          <span>均价 {{.AvgCupText}}</span>
         </div>
       </div>
       {{end}}
@@ -218,6 +220,7 @@
     return g;
   };
   const money = v => '¥' + Number(v || 0).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const signedMoney = v => (Number(v || 0) < 0 ? '-' : '') + money(Math.abs(Number(v || 0)));
   const p0 = palette();
   Chart.defaults.color = p0.muted;
   Chart.defaults.borderColor = p0.separator;
@@ -283,17 +286,27 @@
     } catch (e) {}
   }
 
+  const metricLabel = radar => {
+    if (audienceMetric === 'profit') return radar ? '毛利贡献 (元)' : '毛利贡献';
+    if (audienceMetric === 'revenue') return radar ? '营收贡献 (元)' : '营收贡献';
+    return radar ? '消费杯数 (杯)' : '消费杯数';
+  };
+  const metricValues = () => segments.map(s => {
+    if (audienceMetric === 'profit') return Math.max(0, Number(s.profit || 0));
+    if (audienceMetric === 'revenue') return Number(s.revenue || 0);
+    return Number(s.cups || 0);
+  });
+
   const buildAudienceChart = p => {
     if (!segments || !audCanvas) return;
     if (audienceChart) {
       audienceChart.destroy();
       audienceChart = null;
     }
-    const isRev = audienceMetric === 'revenue';
-    const values = segments.map(s => isRev ? s.revenue : s.cups);
+    const values = metricValues();
     const dataset = audienceType === 'radar'
       ? {
-          label: isRev ? '营收贡献 (元)' : '消费杯数 (杯)',
+          label: metricLabel(true),
           data: values,
           borderColor: p.accent,
           backgroundColor: p.accent + '28',
@@ -305,7 +318,7 @@
           borderWidth: 2,
         }
       : {
-          label: isRev ? '营收贡献' : '消费杯数',
+          label: metricLabel(false),
           data: values,
           backgroundColor: segments.map(s => s.color),
           borderColor: p.surface,
@@ -338,8 +351,12 @@
             label: ctx => {
               const seg = segments[ctx.dataIndex];
               if (!seg) return '';
+              if (audienceMetric === 'profit') {
+                const sharePart = seg.profit < 0 ? '亏损' : `占比 ${seg.profit_share}%`;
+                return ` ${seg.category}：${signedMoney(seg.profit)}（${sharePart} · 毛利率 ${seg.margin}）`;
+              }
               if (audienceMetric === 'revenue') {
-                return ` ${seg.category}：${money(seg.revenue)}（占比 ${seg.rev_share}% · 毛利 ${money(seg.profit)}）`;
+                return ` ${seg.category}：${money(seg.revenue)}（占比 ${seg.rev_share}% · 毛利 ${signedMoney(seg.profit)}）`;
               }
               return ` ${seg.category}：${seg.cups} 杯（占比 ${seg.cup_share}% · 均价 ${money(seg.avg_cup)}）`;
             },
@@ -380,9 +397,8 @@
           b.setAttribute('aria-pressed', active ? 'true' : 'false');
         });
         if (audienceChart) {
-          const isRev = audienceMetric === 'revenue';
-          audienceChart.data.datasets[0].label = isRev ? '营收贡献' : '消费杯数';
-          audienceChart.data.datasets[0].data = segments.map(s => isRev ? s.revenue : s.cups);
+          audienceChart.data.datasets[0].label = metricLabel(audienceType === 'radar');
+          audienceChart.data.datasets[0].data = metricValues();
           audienceChart.update();
         }
       });
