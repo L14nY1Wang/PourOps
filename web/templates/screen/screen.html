@@ -277,15 +277,8 @@
   var signature = '';
   var es = null;
 
-  /* 风格 → 顶栏色条。内置精酿风格配色 + 兼容旧分类 + 自定义分类稳定取色 */
-  var TONES = {
-    fresh:  '#e2c476',  // 清爽 / 拉格 / 小麦 / 西打
-    hop:    '#57cf9b',  // 酒花 / IPA / 皮尔森
-    sour:   '#a48bf0',  // 酸小麦 / 酸艾尔 / 果泥
-    dark:   '#d9925c',  // 世涛
-    strong: '#e8765f'   // 烈性 / 扩展强调色
-  };
-  var PALETTE = [TONES.hop, TONES.fresh, TONES.sour, TONES.dark, TONES.strong];
+  /* 风格 → 顶栏色条。9 种精酿默认分类独立高区分度配色 + 兼容旧分类 + 自定义分类稳定取色 */
+  var PALETTE = ['#a3e635', '#2dd4bf', '#818cf8', '#e879f9', '#38bdf8', '#fbbf24', '#fb7185', '#34d399', '#c084fc', '#f97316'];
   var LEGACY_CATS = {
     fresh: '拉格',
     hop: 'IPA',
@@ -299,17 +292,17 @@
     '烈性': '世涛'
   };
   var CAT_COLORS = {
-    'IPA': TONES.hop,
-    '皮尔森': TONES.hop,
-    '拉格': TONES.fresh,
-    '小麦': TONES.fresh,
-    '西打': TONES.fresh,
-    '酸小麦': TONES.sour,
-    '酸艾尔': TONES.sour,
-    '果泥': TONES.sour,
-    '世涛': TONES.dark,
-    '波特': TONES.dark,
-    '修道院': TONES.strong
+    'IPA': '#57cf9b',    // 翠绿
+    '西打': '#f87171',   // 苹果红
+    '拉格': '#facc15',   // 明金黄
+    '皮尔森': '#60a5fa', // 清冽蓝
+    '小麦': '#fb923c',   // 柑橘橙
+    '酸小麦': '#22d3ee', // 湖水青
+    '酸艾尔': '#a48bf0', // 紫罗兰
+    '果泥': '#f472b6',   // 浆果粉
+    '世涛': '#a87148',   // 烘焙棕
+    '波特': '#94a3b8',   // 历史兼容：冷石板灰
+    '修道院': '#fb7185'  // 历史兼容：玫瑰红
   };
 
   function categoryName(style, category) {

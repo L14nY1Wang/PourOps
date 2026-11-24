@@ -16,46 +16,255 @@ import (
 )
 
 var defaultAudienceColors = map[string]string{
-	"IPA": "#20b27c",
-	"拉格":  "#e0a938",
-	"皮尔森": "#38b2ac",
-	"小麦":  "#d69e2e",
-	"酸小麦": "#8b6fe8",
-	"酸艾尔": "#7c5ce6",
-	"果泥":  "#e06392",
-	"西打":  "#52b788",
-	"世涛":  "#b86b35",
-	"波特":  "#8c564b",
-	"修道院": "#d95d4a",
+	"IPA": "#16a34a", // 酒花翠绿
+	"西打":  "#dc2626", // 苹果正红
+	"拉格":  "#eab308", // 明金黄
+	"皮尔森": "#2563eb", // 清冽宝蓝
+	"小麦":  "#f97316", // 柑橘鲜橙
+	"酸小麦": "#06b6d4", // 湖水青蓝
+	"酸艾尔": "#9333ea", // 野菌紫罗兰
+	"果泥":  "#ec4899", // 浆果玫红
+	"世涛":  "#7c4a21", // 烘焙咖啡棕
+	"波特":  "#475569", // 历史兼容：冷石板灰
+	"修道院": "#881337", // 历史兼容：深酒红
 }
 
 var audienceFallbackPalette = []string{
-	"#3b82f6",
-	"#ec4899",
-	"#14b8a6",
-	"#f59e0b",
-	"#8b5cf6",
-	"#10b981",
-	"#f97316",
-	"#6366f1",
+	"#84cc16", // 青柠绿
+	"#0f766e", // 深松青
+	"#4f46e5", // 靛蓝
+	"#be185d", // 深梅红
+	"#64748b", // 冷岩灰
+	"#0284c7", // 天海蓝
+	"#a16207", // 焦糖古铜
+	"#c026d3", // 电光紫红
+	"#059669", // 翡翠深绿
+	"#e11d48", // 绯红
+	"#b45309", // 深琥珀
+	"#4338ca", // 深靛青
+}
+
+func lookupDefaultAudienceColor(cat string) (string, bool) {
+	key := strings.TrimSpace(cat)
+	if hex, ok := defaultAudienceColors[key]; ok {
+		return hex, true
+	}
+	for k, hex := range defaultAudienceColors {
+		if strings.EqualFold(k, key) {
+			return hex, true
+		}
+	}
+	return "", false
 }
 
 // AudienceCategoryColor 为预设与后台自定义酒款分类分配稳定的十六进制图表色。
 func AudienceCategoryColor(cat string) string {
-	key := strings.TrimSpace(cat)
-	if hex, ok := defaultAudienceColors[key]; ok {
+	if hex, ok := lookupDefaultAudienceColor(cat); ok {
 		return hex
 	}
-	for k, hex := range defaultAudienceColors {
-		if strings.EqualFold(k, key) {
-			return hex
-		}
-	}
 	var h uint32
-	for _, r := range strings.ToLower(key) {
+	for _, r := range strings.ToLower(strings.TrimSpace(cat)) {
 		h = h*31 + uint32(r)
 	}
 	return audienceFallbackPalette[int(h)%len(audienceFallbackPalette)]
+}
+
+func parseHexByte(s string) (uint8, bool) {
+	if len(s) != 2 {
+		return 0, false
+	}
+	nibble := func(ch byte) (uint8, bool) {
+		switch {
+		case ch >= '0' && ch <= '9':
+			return ch - '0', true
+		case ch >= 'a' && ch <= 'f':
+			return ch - 'a' + 10, true
+		case ch >= 'A' && ch <= 'F':
+			return ch - 'A' + 10, true
+		default:
+			return 0, false
+		}
+	}
+	hi, ok1 := nibble(s[0])
+	lo, ok2 := nibble(s[1])
+	if !ok1 || !ok2 {
+		return 0, false
+	}
+	return hi<<4 | lo, true
+}
+
+func hexColorLab(hex string) (l, a, b float64, ok bool) {
+	raw := strings.TrimPrefix(strings.TrimSpace(hex), "#")
+	if len(raw) != 6 {
+		return 0, 0, 0, false
+	}
+	r8, ok1 := parseHexByte(raw[0:2])
+	g8, ok2 := parseHexByte(raw[2:4])
+	b8, ok3 := parseHexByte(raw[4:6])
+	if !ok1 || !ok2 || !ok3 {
+		return 0, 0, 0, false
+	}
+	lin := func(u uint8) float64 {
+		c := float64(u) / 255.0
+		if c <= 0.04045 {
+			return c / 12.92
+		}
+		return math.Pow((c+0.055)/1.055, 2.4)
+	}
+	lr, lg, lb := lin(r8), lin(g8), lin(b8)
+	x := (lr*0.4124564 + lg*0.3575761 + lb*0.1804375) / 0.95047
+	y := (lr*0.2126729 + lg*0.7151522 + lb*0.0721750) / 1.00000
+	z := (lr*0.0193339 + lg*0.1191920 + lb*0.9503041) / 1.08883
+	f := func(t float64) float64 {
+		if t > 0.008856 {
+			return math.Cbrt(t)
+		}
+		return 7.787*t + 16.0/116.0
+	}
+	fx, fy, fz := f(x), f(y), f(z)
+	return 116*fy - 16, 500 * (fx - fy), 200 * (fy - fz), true
+}
+
+func colorLabDistance(hex1, hex2 string) float64 {
+	l1, a1, b1, ok1 := hexColorLab(hex1)
+	l2, a2, b2, ok2 := hexColorLab(hex2)
+	if !ok1 || !ok2 {
+		return 0
+	}
+	dl, da, db := l1-l2, a1-a2, b1-b2
+	return math.Sqrt(dl*dl + da*da + db*db)
+}
+
+func hslToHex(h, s, l float64) string {
+	h = math.Mod(h, 360)
+	if h < 0 {
+		h += 360
+	}
+	c := (1 - math.Abs(2*l-1)) * s
+	x := c * (1 - math.Abs(math.Mod(h/60.0, 2)-1))
+	m := l - c/2
+	var r1, g1, b1 float64
+	switch {
+	case h < 60:
+		r1, g1, b1 = c, x, 0
+	case h < 120:
+		r1, g1, b1 = x, c, 0
+	case h < 180:
+		r1, g1, b1 = 0, c, x
+	case h < 240:
+		r1, g1, b1 = 0, x, c
+	case h < 300:
+		r1, g1, b1 = x, 0, c
+	default:
+		r1, g1, b1 = c, 0, x
+	}
+	clampByte := func(v float64) uint8 {
+		n := math.Round((v + m) * 255)
+		if n < 0 {
+			return 0
+		}
+		if n > 255 {
+			return 255
+		}
+		return uint8(n)
+	}
+	return fmt.Sprintf("#%02x%02x%02x", clampByte(r1), clampByte(g1), clampByte(b1))
+}
+
+func minLabDistance(hex string, existing []string) float64 {
+	if len(existing) == 0 {
+		return math.Inf(1)
+	}
+	best := math.Inf(1)
+	for _, other := range existing {
+		if d := colorLabDistance(hex, other); d < best {
+			best = d
+		}
+	}
+	return best
+}
+
+// assignDistinctSegmentColors 先固定内置风格主色，再按确定性顺序为自定义分类分配感知差异最大的可用颜色。
+func assignDistinctSegmentColors(segments []CategorySegment) {
+	if len(segments) == 0 {
+		return
+	}
+	usedColors := make([]string, 0, len(segments))
+	usedSet := make(map[string]bool, len(segments))
+	customIdx := make([]int, 0, len(segments))
+
+	for i := range segments {
+		if hex, ok := lookupDefaultAudienceColor(segments[i].Category); ok {
+			segments[i].Color = hex
+			low := strings.ToLower(hex)
+			if !usedSet[low] {
+				usedSet[low] = true
+				usedColors = append(usedColors, hex)
+			}
+			continue
+		}
+		customIdx = append(customIdx, i)
+	}
+	if len(customIdx) == 0 {
+		return
+	}
+
+	slices.SortFunc(customIdx, func(i, j int) int {
+		ci, cj := strings.TrimSpace(segments[i].Category), strings.TrimSpace(segments[j].Category)
+		li, lj := strings.ToLower(ci), strings.ToLower(cj)
+		if li != lj {
+			return strings.Compare(li, lj)
+		}
+		if ci != cj {
+			return strings.Compare(ci, cj)
+		}
+		return i - j
+	})
+
+	candidates := make([]string, 0, len(audienceFallbackPalette)+16)
+	candidates = append(candidates, audienceFallbackPalette...)
+	for k := 0; k < 16; k++ {
+		h := math.Mod(float64(k)*137.508+22.0, 360.0)
+		s := 0.72
+		if k%2 == 1 {
+			s = 0.60
+		}
+		l := 0.44
+		switch k % 3 {
+		case 1:
+			l = 0.36
+		case 2:
+			l = 0.52
+		}
+		candidates = append(candidates, hslToHex(h, s, l))
+	}
+
+	const minPerceptualGap = 26.0
+	for _, idx := range customIdx {
+		pref := AudienceCategoryColor(segments[idx].Category)
+		chosen := ""
+		if !usedSet[strings.ToLower(pref)] && minLabDistance(pref, usedColors) >= minPerceptualGap {
+			chosen = pref
+		} else {
+			bestDist := -1.0
+			for _, cand := range candidates {
+				if usedSet[strings.ToLower(cand)] {
+					continue
+				}
+				d := minLabDistance(cand, usedColors)
+				if chosen == "" || d > bestDist {
+					chosen = cand
+					bestDist = d
+				}
+			}
+			if chosen == "" {
+				chosen = pref
+			}
+		}
+		segments[idx].Color = chosen
+		usedSet[strings.ToLower(chosen)] = true
+		usedColors = append(usedColors, chosen)
+	}
 }
 
 type CategorySegment struct {
@@ -433,6 +642,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 		}
 		return strings.Compare(a.Category, b.Category)
 	})
+	assignDistinctSegmentColors(out.Segments)
 
 	if err := tx.QueryRow(ctx, `
 		select coalesce(sum(case when p.ml::numeric / p.cups <= 200 then p.cups else 0 end), 0)::bigint,

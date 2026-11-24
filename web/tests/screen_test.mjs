@@ -290,6 +290,18 @@ const menu = (n, extra = () => ({})) => ({
   assert.equal(c3.style['--tone'], '#57cf9b');
   assert.equal(c4.querySelector('.cat').textContent, '酸艾尔');
   assert.equal(c4.style['--tone'], '#a48bf0');
+
+  const allDefaults = ['IPA', '拉格', '皮尔森', '小麦', '酸小麦', '酸艾尔', '果泥', '西打', '世涛'];
+  const allScreen = boot({
+    routes: {
+      '/api/screen/playlist': {
+        items: allDefaults.map((cat, idx) => ({ no: String(idx + 1), name: `酒款 ${cat}`, category: cat })),
+      },
+    },
+  });
+  await allScreen.flush();
+  const tones = allScreen.board.children.map(card => card.style['--tone'].toLowerCase());
+  assert.equal(new Set(tones).size, allDefaults.length, '9 个默认分类在电视屏上应有 9 种互不重复的色调');
 }
 
 console.log('web/templates/screen/screen.html: 9 组回归通过');

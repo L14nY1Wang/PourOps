@@ -26,6 +26,28 @@ func TestAudienceCategoryColorAndFormatting(t *testing.T) {
 		t.Fatal("分类色映射应忽略大小写")
 	}
 
+	seenColors := make(map[string]string, len(platform.DefaultBeerCategories))
+	for _, cat := range platform.DefaultBeerCategories {
+		c := AudienceCategoryColor(cat)
+		if len(c) != 7 || !strings.HasPrefix(c, "#") {
+			t.Fatalf("默认分类 %s 颜色格式无效: %q", cat, c)
+		}
+		if prev, dup := seenColors[strings.ToLower(c)]; dup {
+			t.Fatalf("默认分类 %s 与 %s 颜色重复: %s", prev, cat, c)
+		}
+		seenColors[strings.ToLower(c)] = cat
+	}
+	for i := 0; i < len(platform.DefaultBeerCategories); i++ {
+		for j := i + 1; j < len(platform.DefaultBeerCategories); j++ {
+			c1, c2 := platform.DefaultBeerCategories[i], platform.DefaultBeerCategories[j]
+			d := colorLabDistance(AudienceCategoryColor(c1), AudienceCategoryColor(c2))
+			if d < 30.0 {
+				t.Fatalf("默认分类 %s(%s) 与 %s(%s) 色彩区分度不足: Lab ΔE=%.1f < 30",
+					c1, AudienceCategoryColor(c1), c2, AudienceCategoryColor(c2), d)
+			}
+		}
+	}
+
 	in := AudienceInsights{
 		TotalCups:    10,
 		TotalVolume:  3250,
@@ -83,6 +105,55 @@ func TestAudienceCategoryColorAndFormatting(t *testing.T) {
 	if err := json.Unmarshal([]byte(withLoss.ChartJSON()), &lossPts); err != nil || len(lossPts) != 3 ||
 		lossPts[2].Profit != -30 || lossPts[2].ProfitShare != 0 || lossPts[2].Margin != "-60.0%" {
 		t.Fatalf("亏损 ChartJSON = %s (err=%v)", withLoss.ChartJSON(), err)
+	}
+}
+
+func TestAssignDistinctSegmentColorsAvoidsCollisions(t *testing.T) {
+	cats := []string{"IPA", "西打", "世涛", "赛松", "博克", "社交艾尔", "蜂蜜麦酒", "冷萃精酿", "烟熏风味"}
+	segsA := make([]CategorySegment, len(cats))
+	for i, c := range cats {
+		segsA[i] = CategorySegment{Category: c, Cups: int64(20 - i)}
+	}
+	assignDistinctSegmentColors(segsA)
+
+	colorByCat := make(map[string]string, len(segsA))
+	used := make(map[string]string, len(segsA))
+	for _, s := range segsA {
+		if len(s.Color) != 7 || !strings.HasPrefix(s.Color, "#") {
+			t.Fatalf("%s 颜色无效: %q", s.Category, s.Color)
+		}
+		low := strings.ToLower(s.Color)
+		if prev, dup := used[low]; dup {
+			t.Fatalf("%s 与 %s 分到了相同颜色 %s", prev, s.Category, s.Color)
+		}
+		used[low] = s.Category
+		colorByCat[s.Category] = s.Color
+	}
+	for _, def := range []string{"IPA", "西打", "世涛"} {
+		if colorByCat[def] != AudienceCategoryColor(def) {
+			t.Fatalf("预设分类 %s 颜色应保持主色 %s，实际 %s", def, AudienceCategoryColor(def), colorByCat[def])
+		}
+	}
+	for i := 0; i < len(segsA); i++ {
+		for j := i + 1; j < len(segsA); j++ {
+			d := colorLabDistance(segsA[i].Color, segsA[j].Color)
+			if d < 18.0 {
+				t.Fatalf("分类 %s(%s) 与 %s(%s) 颜色太接近: Lab ΔE=%.1f < 18",
+					segsA[i].Category, segsA[i].Color, segsA[j].Category, segsA[j].Color, d)
+			}
+		}
+	}
+
+	// 换序后同一批分类应拿到完全一致的稳定颜色。
+	segsB := make([]CategorySegment, len(cats))
+	for i := range cats {
+		segsB[i] = CategorySegment{Category: cats[len(cats)-1-i], Cups: int64(i + 1)}
+	}
+	assignDistinctSegmentColors(segsB)
+	for _, s := range segsB {
+		if s.Color != colorByCat[s.Category] {
+			t.Fatalf("分类 %s 排序变化后颜色不稳定: 原 %s, 现 %s", s.Category, colorByCat[s.Category], s.Color)
+		}
 	}
 }
 
