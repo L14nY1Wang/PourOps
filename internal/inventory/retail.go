@@ -374,15 +374,19 @@ func DeleteSale(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	return tx.Commit(ctx)
 }
 
-// RetailStatsSummary 今日与本月零售营收/成本。
+// RetailStatsSummary 今日与本月零售营收/成本（按营业日 07:00–次日 07:00 划分，与经营概览同源）。
 func RetailStatsSummary(ctx context.Context, pool *pgxpool.Pool) (RetailStats, error) {
+	todayStart := platform.BusinessDayStart(time.Now())
+	tomorrowStart := todayStart.AddDate(0, 0, 1)
+	monthStart := time.Date(todayStart.Year(), todayStart.Month(), 1, platform.BusinessDayStartHour, 0, 0, 0, platform.ReportZone)
+
 	var st RetailStats
 	err := pool.QueryRow(ctx, `
-		select coalesce(sum(total_cents) filter (where created_at::date = current_date), 0)::int,
-		       coalesce(sum(cost_cents)  filter (where created_at::date = current_date), 0)::int,
-		       coalesce(sum(total_cents) filter (where created_at >= date_trunc('month', now())), 0)::int,
-		       coalesce(sum(cost_cents)  filter (where created_at >= date_trunc('month', now())), 0)::int
-		from retail_sales`).Scan(&st.TodayRev, &st.TodayCost, &st.MonthRev, &st.MonthCost)
+		select coalesce(sum(total_cents) filter (where created_at >= $1 and created_at < $2), 0)::int,
+		       coalesce(sum(cost_cents)  filter (where created_at >= $1 and created_at < $2), 0)::int,
+		       coalesce(sum(total_cents) filter (where created_at >= $3 and created_at < $2), 0)::int,
+		       coalesce(sum(cost_cents)  filter (where created_at >= $3 and created_at < $2), 0)::int
+		from retail_sales`, todayStart, tomorrowStart, monthStart).Scan(&st.TodayRev, &st.TodayCost, &st.MonthRev, &st.MonthCost)
 	return st, err
 }
 

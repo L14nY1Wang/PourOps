@@ -14,8 +14,8 @@ import (
 )
 
 // 营业额的唯一口径：桶装 keg_pours.amount_cents + 零售 retail_sales.total_cents，
-// payments 只是收款方式，不能重复计。start/end 是北京时间自然日的 [start, end)
-// 边界；成本按桶成本 × 售出毫升摊销，零售取已售成本，按日分品类先舍入到分，
+// payments 只是收款方式，不能重复计。start/end 是北京时间营业日（07:00 至次日 07:00）的
+// [start, end) 边界；成本按桶成本 × 售出毫升摊销，零售取已售成本，按营业日分品类先舍入到分，
 // 保证趋势逐日相加与 KPI 完全对账。
 
 type SalesTotals struct {
@@ -29,11 +29,15 @@ func (t SalesTotals) RevenueText() string { return platform.PriceText(int(t.Reve
 func (t SalesTotals) CostText() string    { return platform.PriceText(int(t.Cost)) }
 func (t SalesTotals) ProfitText() string  { return platform.MoneyText(int(t.Profit())) }
 
-func (t SalesTotals) MarginText() string {
-	if t.Revenue <= 0 {
+func ratioPercentText(part, total int64) string {
+	if total <= 0 {
 		return "—"
 	}
-	return fmt.Sprintf("%.1f%%", float64(t.Profit())*100/float64(t.Revenue))
+	return fmt.Sprintf("%.1f%%", float64(part)*100/float64(total))
+}
+
+func (t SalesTotals) MarginText() string {
+	return ratioPercentText(t.Profit(), t.Revenue)
 }
 
 func ChangeText(now, prev int64) string {
@@ -62,7 +66,9 @@ type SalesTrendDay struct {
 }
 
 func (d SalesTrendDay) RevenueText() string { return platform.PriceText(int(d.Revenue)) }
+func (d SalesTrendDay) CostText() string    { return platform.PriceText(int(d.Cost)) }
 func (d SalesTrendDay) ProfitText() string  { return platform.MoneyText(int(d.Revenue - d.Cost)) }
+func (d SalesTrendDay) MarginText() string  { return ratioPercentText(d.Revenue-d.Cost, d.Revenue) }
 
 type SalesTopItem struct {
 	Name    string
@@ -90,6 +96,34 @@ func (i SalesInsights) RevenueChangeText() string {
 
 func (i SalesInsights) ProfitChangeText() string {
 	return ChangeText(i.Current.Profit(), i.Previous.Profit())
+}
+
+func (i SalesInsights) HasData() bool {
+	return len(i.Top) > 0 || i.Current.Revenue > 0 || i.Current.Cost > 0
+}
+
+func (i SalesInsights) DaysCount() int { return len(i.Trend) }
+
+func (i SalesInsights) AvgDailyRevenueText() string {
+	if len(i.Trend) == 0 {
+		return "—"
+	}
+	return platform.PriceText(int(math.Round(float64(i.Current.Revenue) / float64(len(i.Trend)))))
+}
+
+func (i SalesInsights) AvgDailyProfitText() string {
+	if len(i.Trend) == 0 {
+		return "—"
+	}
+	return platform.MoneyText(int(math.Round(float64(i.Current.Profit()) / float64(len(i.Trend)))))
+}
+
+func (i SalesInsights) DraftShareText() string {
+	return ratioPercentText(i.Draft.Revenue, i.Current.Revenue)
+}
+
+func (i SalesInsights) RetailShareText() string {
+	return ratioPercentText(i.Retail.Revenue, i.Current.Revenue)
 }
 
 type SalesTrendPoint struct {
@@ -121,7 +155,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 	rows, err := tx.Query(ctx, `
 		select to_char(t.day, 'YYYY-MM-DD'), t.kind, t.revenue, t.cost, t.qty
 		from (
-			select (p.poured_at at time zone 'Asia/Shanghai')::date as day,
+			select ((p.poured_at at time zone 'Asia/Shanghai') - interval '7 hours')::date as day,
 			       'draft'::text as kind,
 			       sum(p.amount_cents)::bigint as revenue,
 			       coalesce(round(sum(k.cost_cents::numeric * p.ml / nullif(k.capacity_ml, 0))), 0)::bigint as cost,
@@ -137,7 +171,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 			       sum(d.cost_cents)::bigint,
 			       sum(d.qty)::bigint
 			from (
-				select (s.created_at at time zone 'Asia/Shanghai')::date as day,
+				select ((s.created_at at time zone 'Asia/Shanghai') - interval '7 hours')::date as day,
 				       s.total_cents, s.cost_cents,
 				       (select coalesce(sum(i.qty), 0) from retail_sale_items i where i.sale_id = s.id) as qty
 				from retail_sales s
@@ -169,7 +203,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 
 	startDay, endDay := start.In(platform.ReportZone), end.In(platform.ReportZone)
 	for d := startDay; d.Before(endDay); d = d.AddDate(0, 0, 1) {
-		key := d.Format("2006-01-02")
+		key := platform.BusinessDayKey(d)
 		draft, retail := draftByDay[key], retailByDay[key]
 		day := SalesTotals{
 			Revenue: draft.Revenue + retail.Revenue,
@@ -188,7 +222,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 		out.Retail.Qty += retail.Qty
 	}
 	for d := prevStart.In(platform.ReportZone); d.Before(startDay); d = d.AddDate(0, 0, 1) {
-		key := d.Format("2006-01-02")
+		key := platform.BusinessDayKey(d)
 		draft, retail := draftByDay[key], retailByDay[key]
 		out.Previous.Revenue += draft.Revenue + retail.Revenue
 		out.Previous.Cost += draft.Cost + retail.Cost

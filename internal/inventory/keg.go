@@ -306,6 +306,9 @@ func DeletePour(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	return tx.Commit(ctx)
 }
 
+// KegWarnSoldPct 表示在售酒桶走量告警阈值（超过该百分比触发告警，与 SoldPct 整数口径对齐）。
+const KegWarnSoldPct = 50
+
 // 派生值只在这里算一次，模板和接口读同一份。
 
 func (k Keg) Revenue() string     { return platform.PriceText(k.RevenueCents) }
@@ -315,6 +318,7 @@ func (k Keg) Profit() string      { return platform.MoneyText(k.ProfitCents()) }
 func (k Keg) Profitable() bool    { return k.ProfitCents() >= 0 }
 func (k Keg) RemainingML() int    { return max(k.CapacityML-k.SoldML, 0) }
 func (k Keg) SoldPct() int        { return platform.ClampPct(k.SoldML * 100 / max(k.CapacityML, 1)) }
+func (k Keg) IsSoldWarning() bool { return k.CanPour() && k.SoldPct() > KegWarnSoldPct }
 func (k Keg) AvgMLPerCup() int    { return k.SoldML / max(k.SoldCups, 1) }
 func (k Keg) PlacedInput() string { return platform.TimeInput(k.PlacedAt) }
 func (k Keg) TappedInput() string { return platform.TimeInput(k.TappedAt) }

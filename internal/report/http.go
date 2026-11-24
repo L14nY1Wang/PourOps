@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"pourops/internal/inventory"
 	"pourops/internal/settings"
 	"pourops/internal/ui"
 )
@@ -19,17 +18,19 @@ import (
 type DashboardPage struct {
 	ui.Layout
 	Overview     Overview
-	Kegs         []inventory.Keg
 	Sales        SalesInsights
 	POS          POSInsights
 	ReportPeriod string
 	ReportStart  string
 	ReportEnd    string
-	Pricing      settings.PricingConfig
 }
 
-func (p DashboardPage) PricingCfg() settings.PricingConfig {
-	return p.Pricing.Normalized()
+type AnalyticsPage struct {
+	ui.Layout
+	Sales        SalesInsights
+	ReportPeriod string
+	ReportStart  string
+	ReportEnd    string
 }
 
 type RecordsViewPage struct {
@@ -37,7 +38,7 @@ type RecordsViewPage struct {
 	Records *RecordsPage
 }
 
-// Service 提供经营概览（销售、POS 实收、库存快照）以及销售订单、营运流水只读审计页面。
+// Service 提供经营概览、数据分析（销售走势与营业日统计）以及销售订单、营运流水只读审计页面。
 type Service struct {
 	pool     *pgxpool.Pool
 	renderer *ui.Renderer
@@ -54,16 +55,37 @@ func NewService(pool *pgxpool.Pool, renderer *ui.Renderer, cfg *settings.Setting
 
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/{$}", guards.Auth(s.Dashboard))
+	mux.HandleFunc("GET /admin/analytics", guards.Auth(s.Analytics))
 	mux.HandleFunc("GET /admin/records", guards.Auth(s.RecordsOrders))
 	mux.HandleFunc("GET /admin/records/orders/{id}", guards.Auth(s.RecordsOrderDetail))
 	mux.HandleFunc("GET /admin/records/operations", guards.Auth(s.RecordsOperations))
 }
 
-func (s *Service) currentPricing() settings.PricingConfig {
-	if s.settings != nil {
-		return s.settings.Pricing()
+type reportWindow struct {
+	period    string
+	start     time.Time
+	end       time.Time
+	startText string
+	endText   string
+	problem   string
+}
+
+func parseReportWindow(r *http.Request) reportWindow {
+	q := r.URL.Query()
+	period, start, end, problem := ReportDates(time.Now(), q.Get("period"), q.Get("start"), q.Get("end"))
+	w := reportWindow{
+		period:  period,
+		start:   start,
+		end:     end,
+		problem: problem,
 	}
-	return settings.DefaultPricingConfig()
+	if problem != "" {
+		w.startText, w.endText = q.Get("start"), q.Get("end")
+		return w
+	}
+	w.startText = start.Format(time.DateOnly)
+	w.endText = end.AddDate(0, 0, -1).Format(time.DateOnly)
+	return w
 }
 
 func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
@@ -78,44 +100,36 @@ func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
 		down(err)
 		return
 	}
-	kegs, err := inventory.ListKegs(ctx, s.pool, true)
-	if err != nil {
-		down(err)
-		return
-	}
-	period, start, end, problem := ReportDates(time.Now(), q.Get("period"), q.Get("start"), q.Get("end"))
+	win := parseReportWindow(r)
 	data := &DashboardPage{
 		Layout: ui.Layout{
 			Title: "概览",
 			Nav:   "dashboard",
 			Msg:   q.Get("msg"),
-			Err:   problem,
+			Err:   win.problem,
 		},
 		Overview:     o,
-		Kegs:         kegs,
-		ReportPeriod: period,
-		Pricing:      s.currentPricing(),
+		ReportPeriod: win.period,
+		ReportStart:  win.startText,
+		ReportEnd:    win.endText,
 	}
-	if problem != "" {
-		data.ReportStart, data.ReportEnd = q.Get("start"), q.Get("end")
+	if win.problem != "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
 		s.renderer.Render(w, r, "admin/dashboard.html", data)
 		return
 	}
-	data.ReportStart = start.Format(time.DateOnly)
-	data.ReportEnd = end.AddDate(0, 0, -1).Format(time.DateOnly)
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		down(err)
 		return
 	}
 	defer tx.Rollback(ctx)
-	if data.Sales, err = LoadSalesInsights(ctx, tx, start, end); err != nil {
+	if data.Sales, err = LoadSalesInsights(ctx, tx, win.start, win.end); err != nil {
 		down(err)
 		return
 	}
-	if data.POS, err = LoadPOSInsights(ctx, tx, start, end); err != nil {
+	if data.POS, err = LoadPOSInsights(ctx, tx, win.start, win.end); err != nil {
 		down(err)
 		return
 	}
@@ -124,6 +138,48 @@ func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderer.Render(w, r, "admin/dashboard.html", data)
+}
+
+func (s *Service) Analytics(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := r.URL.Query()
+	down := func(err error) {
+		log.Printf("analytics: %v", err)
+		http.Error(w, "暂时无法读取数据分析", http.StatusInternalServerError)
+	}
+	win := parseReportWindow(r)
+	data := &AnalyticsPage{
+		Layout: ui.Layout{
+			Title: "数据分析",
+			Nav:   "analytics",
+			Msg:   q.Get("msg"),
+			Err:   win.problem,
+		},
+		ReportPeriod: win.period,
+		ReportStart:  win.startText,
+		ReportEnd:    win.endText,
+	}
+	if win.problem != "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		s.renderer.Render(w, r, "admin/analytics.html", data)
+		return
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		down(err)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if data.Sales, err = LoadSalesInsights(ctx, tx, win.start, win.end); err != nil {
+		down(err)
+		return
+	}
+	if err = tx.Commit(ctx); err != nil {
+		down(err)
+		return
+	}
+	s.renderer.Render(w, r, "admin/analytics.html", data)
 }
 
 func (s *Service) RecordsOrders(w http.ResponseWriter, r *http.Request) {

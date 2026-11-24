@@ -19,7 +19,7 @@ import (
 	"pourops/internal/ui"
 )
 
-// TestAllTemplatesRender 验证全部 20 个内嵌模板均可在真实静态资源清单下零报错渲染并输出资源哈希。
+// TestAllTemplatesRender 验证全部 21 个内嵌模板均可在真实静态资源清单下零报错渲染并输出资源哈希。
 func TestAllTemplatesRender(t *testing.T) {
 	assets, err := NewAssets()
 	if err != nil {
@@ -50,6 +50,10 @@ func TestAllTemplatesRender(t *testing.T) {
 		CapacityML: 20000, CostCents: 120000, PlacedAt: &now, TappedAt: &now,
 		SoldCups: 22, SoldML: 7260, RevenueCents: 127600, PourCount: 14,
 	}
+	warnKeg := keg
+	warnKeg.SoldML = 13000
+	warnKeg.SoldCups = 40
+	warnKeg.RevenueCents = 232000
 	finKeg := keg
 	finKeg.FinishedAt = &now
 	finKeg.SoldML = 16000
@@ -70,7 +74,7 @@ func TestAllTemplatesRender(t *testing.T) {
 		{"login-2fa", "admin/login.html", "layout", &auth.LoginPage{Layout: ui.Layout{Title: "登录", Auth: true}, TwoFactor: true, Username: "boss"}, nil, false},
 		{"dashboard", "admin/dashboard.html", "layout", &report.DashboardPage{
 			Layout:       ui.Layout{Title: "概览", Nav: "dashboard", Me: me},
-			ReportPeriod: "7d", ReportStart: "2026-11-17", ReportEnd: "2026-11-23", Pricing: pricing,
+			ReportPeriod: "7d", ReportStart: "2026-11-17", ReportEnd: "2026-11-23",
 			Sales: report.SalesInsights{
 				Current: report.SalesTotals{Revenue: 520000, Cost: 210000, Qty: 86},
 				Draft:   report.SalesTotals{Revenue: 380000, Cost: 150000, Qty: 62},
@@ -78,10 +82,24 @@ func TestAllTemplatesRender(t *testing.T) {
 				Trend:   []report.SalesTrendDay{{Date: "2026-11-22", Revenue: 240000, Cost: 95000}, {Date: "2026-11-23", Revenue: 280000, Cost: 115000}},
 				Top:     []report.SalesTopItem{{Name: "树屋 · 尤利乌斯", Unit: "杯", Qty: 32, Revenue: 185600, Cost: 64000}},
 			},
-			POS:      report.POSInsights{Received: 480000, Orders: 24, Payments: 29, Hours: []report.POSHour{{Hour: 20, Received: 180000, Payments: 10}, {Hour: 21, Received: 300000, Payments: 19}}},
-			Overview: report.Overview{LowCount: 1, OutCount: 0, Untapped: 2, ActiveKegs: 4, RetailCount: 12, StockValue: 340000, LowStock: []inventory.RetailItem{item}},
-			Kegs:     []inventory.Keg{keg},
-		}, []string{"含 85% 出酒回本进度", `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, false},
+			POS: report.POSInsights{Received: 480000, Orders: 24, Payments: 29, Hours: []report.POSHour{{Hour: 20, Received: 180000, Payments: 10}, {Hour: 21, Received: 300000, Payments: 19}}},
+			Overview: report.Overview{
+				LowCount: 1, OutCount: 0, Untapped: 2, WarnKegCount: 1, ActiveKegs: 4, RetailCount: 12, StockValue: 340000,
+				LowStock: []inventory.RetailItem{item},
+				WarnKegs: []inventory.Keg{warnKeg},
+			},
+		}, []string{"库存状态与告警", "已售 &gt; 50%", "已售 65%", `/admin/analytics`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, false},
+		{"analytics", "admin/analytics.html", "layout", &report.AnalyticsPage{
+			Layout:       ui.Layout{Title: "数据分析", Nav: "analytics", Me: me},
+			ReportPeriod: "7d", ReportStart: "2026-11-17", ReportEnd: "2026-11-23",
+			Sales: report.SalesInsights{
+				Current: report.SalesTotals{Revenue: 520000, Cost: 210000, Qty: 86},
+				Draft:   report.SalesTotals{Revenue: 380000, Cost: 150000, Qty: 62},
+				Retail:  report.SalesTotals{Revenue: 140000, Cost: 60000, Qty: 24},
+				Trend:   []report.SalesTrendDay{{Date: "2026-11-22", Revenue: 240000, Cost: 95000}, {Date: "2026-11-23", Revenue: 280000, Cost: 115000}},
+				Top:     []report.SalesTopItem{{Name: "树屋 · 尤利乌斯", Unit: "杯", Qty: 32, Revenue: 185600, Cost: 64000}},
+			},
+		}, []string{"销售走势", "按日销售明细", `id="salesChart"`, "2026-11-23"}, false},
 		{"beers", "admin/beers.html", "layout", &inventory.BeerListPage{
 			Layout: ui.Layout{Title: "酒单 · 桶装", Nav: "beers", Me: me}, NextNo: 2, Pricing: pricing,
 			Rows: []inventory.BeerRow{{Beer: beer, Keg: &keg, Stock: 2}, {Beer: beer, LastKeg: &finKeg}},
@@ -216,6 +234,13 @@ func TestAllTemplatesRender(t *testing.T) {
 					t.Fatalf("%s 缺少预期片段 %q", tc.file, sub)
 				}
 			}
+			if tc.name == "dashboard" {
+				for _, removed := range []string{"在售的酒桶", `id="salesChart"`} {
+					if strings.Contains(body, removed) {
+						t.Fatalf("dashboard 不应包含已移除板块 %q", removed)
+					}
+				}
+			}
 		})
 	}
 
@@ -296,11 +321,16 @@ func TestNewHandlerSmoke(t *testing.T) {
 		t.Fatalf("GET /screen = %d loc=%q", recScreenRedir.Code, recScreenRedir.Header().Get("Location"))
 	}
 
-	// 3. GET /admin/login -> 200
+	// 3. GET /admin/login -> 200; 受保护路由 /admin/analytics 未登录应重定向到 /admin/login
 	recLogin := httptest.NewRecorder()
 	h.ServeHTTP(recLogin, httptest.NewRequest(http.MethodGet, "/admin/login", nil))
 	if recLogin.Code != http.StatusOK || !strings.Contains(recLogin.Body.String(), "/static/css/admin.bundle.css?v=") {
 		t.Fatalf("GET /admin/login = %d", recLogin.Code)
+	}
+	recAnalytics := httptest.NewRecorder()
+	h.ServeHTTP(recAnalytics, httptest.NewRequest(http.MethodGet, "/admin/analytics", nil))
+	if recAnalytics.Code != http.StatusSeeOther || recAnalytics.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("GET /admin/analytics 未登录应 303 -> /admin/login，实际 %d loc=%q", recAnalytics.Code, recAnalytics.Header().Get("Location"))
 	}
 
 	// 4. 未知后台路径必须 404（验证 {$} 精确匹配）

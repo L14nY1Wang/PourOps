@@ -15,6 +15,28 @@ import (
 // ReportZone 固定按北京时间 UTC+8 划分日报与导出时间。
 var ReportZone = time.FixedZone("UTC+8", 8*60*60)
 
+// 酒吧营业日从北京时间 07:00 开始，至次日 07:00 结束（如 01-11 实际统计 01-11 07:00 至 01-12 07:00）。
+const (
+	BusinessDayStartHour = 7
+	BusinessDayCutoff    = BusinessDayStartHour * time.Hour
+)
+
+// BusinessDayStart 返回 t 所在营业日的开始时刻（北京时间 07:00）。
+func BusinessDayStart(now time.Time) time.Time {
+	biz := now.In(ReportZone).Add(-BusinessDayCutoff)
+	return time.Date(biz.Year(), biz.Month(), biz.Day(), BusinessDayStartHour, 0, 0, 0, ReportZone)
+}
+
+// BusinessDayStartOfDate 返回指定日历日对应的营业日开始时刻（北京时间当日 07:00）。
+func BusinessDayStartOfDate(day time.Time) time.Time {
+	return time.Date(day.Year(), day.Month(), day.Day(), BusinessDayStartHour, 0, 0, 0, ReportZone)
+}
+
+// BusinessDayKey 返回 t 所属营业日日期（YYYY-MM-DD，北京时间减 7 小时后取日期）。
+func BusinessDayKey(t time.Time) string {
+	return t.In(ReportZone).Add(-BusinessDayCutoff).Format(time.DateOnly)
+}
+
 // Option 是后台下拉/筛选控件共用的键值选项。
 type Option struct {
 	Value string

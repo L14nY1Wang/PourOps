@@ -1,0 +1,219 @@
+{{define "periodLabel"}}{{if eq .ReportPeriod "today"}}今日{{else if eq .ReportPeriod "7d"}}近 7 天{{else if eq .ReportPeriod "30d"}}近 30 天{{else if eq .ReportPeriod "month"}}本月{{else if eq .ReportPeriod "custom"}}自定义{{else}}所选范围{{end}}{{end}}
+
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">数据分析</h1>
+    <p class="overview-sub">销售走势与营收结构 · {{template "periodLabel" .}} · 营业日 07:00–次日 07:00</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-calendar3" aria-hidden="true"></i>{{.ReportStart}} 至 {{.ReportEnd}}</span>
+    <a class="button button--secondary" href="/admin/"><i class="bi bi-grid-1x2" aria-hidden="true"></i>经营概览</a>
+    <a class="button button--secondary" href="/admin/records"><i class="bi bi-receipt" aria-hidden="true"></i>销售订单</a>
+  </div>
+</div>
+
+<form class="card overview-filter" method="get" action="/admin/analytics" role="search" aria-label="选择分析时间范围">
+  <nav class="period-tabs" aria-label="快捷时间范围">
+    <a class="period-tab{{if eq .ReportPeriod "today"}} active" aria-current="true{{end}}" href="/admin/analytics?period=today">今日</a>
+    <a class="period-tab{{if eq .ReportPeriod "7d"}} active" aria-current="true{{end}}" href="/admin/analytics?period=7d">近 7 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "30d"}} active" aria-current="true{{end}}" href="/admin/analytics?period=30d">近 30 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "month"}} active" aria-current="true{{end}}" href="/admin/analytics?period=month">本月</a>
+  </nav>
+  <div class="period-form">
+    <label class="period-field"><span>开始日期</span><input type="date" name="start" value="{{.ReportStart}}" aria-describedby="analytics-period-hint"></label>
+    <label class="period-field"><span>结束日期</span><input type="date" name="end" value="{{.ReportEnd}}" aria-describedby="analytics-period-hint"></label>
+    <button class="button button--primary" type="submit">应用日期</button>
+    <span class="visually-hidden" id="analytics-period-hint">最多 366 天，按营业日 07:00 至次日 07:00 统计，含结束日</span>
+  </div>
+</form>
+
+{{if not .Err}}
+<div class="stats-grid overview-stats">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>区间营业额</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Current.RevenueText}}</strong>
+    <div class="stat-meta">销量 {{.Sales.Current.Qty}} 杯/件 · 上期 {{.Sales.Previous.RevenueText}} · 环比 <strong>{{.Sales.RevenueChangeText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>区间毛利</span><i class="bi bi-graph-up-arrow stat-icon--success" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.Current.ProfitText}}</strong>
+    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>日均营业额</span><i class="bi bi-calendar2-week stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.AvgDailyRevenueText}}</strong>
+    <div class="stat-meta">统计 {{.Sales.DaysCount}} 个营业日 · 日均毛利 <strong>{{.Sales.AvgDailyProfitText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>营收结构</span><i class="bi bi-pie-chart stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Sales.DraftShareText}} <small class="analytics-share-sub">桶装</small></strong>
+    <div class="stat-meta">桶装 {{.Sales.Draft.RevenueText}} · 零售 {{.Sales.Retail.RevenueText}}（{{.Sales.RetailShareText}}）</div>
+  </div>
+</div>
+
+<section class="card chart-panel analytics-trend-panel" aria-labelledby="trend-title">
+  <div class="panel-heading">
+    <div>
+      <h2 id="trend-title">销售走势</h2>
+      <p>营业额与毛利 · 按营业日（北京时间 07:00–次日 07:00）· 毛利非净利</p>
+    </div>
+    <span class="panel-period">{{template "periodLabel" .}}</span>
+  </div>
+  {{if .Sales.HasData}}
+  <div class="chart-container chart-container--lg"><canvas id="salesChart" role="img" aria-label="销售走势图，营业额与毛利，明细见下方">销售走势数据见下方明细表。</canvas></div>
+  {{else}}
+  <div class="empty-state"><i class="bi bi-graph-up" aria-hidden="true"></i><p>所选时间内还没有销售记录</p></div>
+  {{end}}
+</section>
+
+<section class="card keg-panel analytics-daily-card" aria-labelledby="daily-title">
+  <div class="panel-heading">
+    <div>
+      <h2 id="daily-title">按日销售明细</h2>
+      <p>每个营业日（07:00–次日 07:00）逐日合计与走势图严格对账</p>
+    </div>
+    <span class="panel-period">共 {{.Sales.DaysCount}} 天</span>
+  </div>
+  {{if .Sales.Trend}}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead class="table-light">
+        <tr>
+          <th scope="col">营业日</th>
+          <th class="num" scope="col">营业额</th>
+          <th class="num" scope="col">成本</th>
+          <th class="num" scope="col">毛利</th>
+          <th class="num" scope="col">毛利率</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Sales.Trend}}
+        <tr>
+          <td>{{.Date}}</td>
+          <td class="num">{{.RevenueText}}</td>
+          <td class="num text-muted">{{.CostText}}</td>
+          <td class="num"><strong>{{.ProfitText}}</strong></td>
+          <td class="num">{{.MarginText}}</td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state"><i class="bi bi-calendar-x" aria-hidden="true"></i><p>所选时间内暂无营业日明细</p></div>
+  {{end}}
+</section>
+{{end}}
+
+<section class="card overview-notes" aria-labelledby="analytics-notes-title">
+  <h2 id="analytics-notes-title"><i class="bi bi-info-circle" aria-hidden="true"></i>数据分析口径说明</h2>
+  <ul>
+    <li>营业日统一按北京时间当日 07:00 至次日 07:00 划分，凌晨跨零点销售归入前一个营业日。</li>
+    <li>营业额统计含 POS 已结账销售与手工补录（桶装精酿 + 零售商品），按日分品类舍入至分并与顶部 KPI 完全对账。</li>
+    <li>桶装成本按实际售出毫升占整桶 100% 容量摊销；毛利＝营业额 − 商品成本，不是净利润。</li>
+    <li>如需查看实时库存状态与分时段 POS 实收，请前往<a href="/admin/">经营概览</a>。</li>
+  </ul>
+</section>
+
+{{if not .Err}}
+{{if .Sales.HasData}}<script type="application/json" id="sales-trend-data">{{.Sales.TrendJSON}}</script>{{end}}
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script src="/static/vendor/chart.umd.js"></script>
+<script>
+(() => {
+  if (!window.Chart) return;
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const CSSVAR = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const palette = () => ({
+    muted: CSSVAR('--muted'),
+    separator: CSSVAR('--separator'),
+    accent: CSSVAR('--accent'),
+    success: CSSVAR('--success-color') || '#0f9d76',
+    surface: CSSVAR('--overlay') || '#ffffff',
+    fg: CSSVAR('--foreground') || '#101c2e',
+  });
+  const areaGrad = (ctx, hex, alphaTop) => {
+    const g = ctx.createLinearGradient(0, 0, 0, ctx.canvas.clientHeight || 280);
+    g.addColorStop(0, hex + alphaTop);
+    g.addColorStop(1, hex + '00');
+    return g;
+  };
+  const el = document.getElementById('sales-trend-data');
+  const canvas = document.getElementById('salesChart');
+  if (!el || !canvas) return;
+  let trend = null;
+  try { trend = JSON.parse(el.textContent); } catch (e) { return; }
+  if (!trend || !trend.length) return;
+
+  const money = v => '¥' + Number(v || 0).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  const p0 = palette();
+  Chart.defaults.color = p0.muted;
+  Chart.defaults.borderColor = p0.separator;
+  const ctx = canvas.getContext('2d');
+
+  const chart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: trend.map(r => r.date),
+      datasets: [
+        {label: '营业额', data: trend.map(r => r.revenue), borderColor: p0.accent, backgroundColor: areaGrad(ctx, p0.accent, '24'), fill: true, pointBackgroundColor: p0.accent, borderWidth: 2.2, tension: .34, pointRadius: 2.5, pointHoverRadius: 5},
+        {label: '毛利', data: trend.map(r => r.profit), borderColor: p0.success, backgroundColor: areaGrad(ctx, p0.success, '16'), fill: true, pointBackgroundColor: p0.success, borderWidth: 2, borderDash: [5, 3], tension: .34, pointRadius: 2, pointHoverRadius: 4},
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: reduced ? false : {duration: 420},
+      color: p0.muted,
+      interaction: {mode: 'index', intersect: false},
+      plugins: {
+        legend: {position: 'bottom', labels: {boxWidth: 8, boxHeight: 8, usePointStyle: true, padding: 14, color: p0.muted, font: {size: 11}}},
+        tooltip: {
+          backgroundColor: p0.surface,
+          titleColor: p0.fg,
+          bodyColor: p0.muted,
+          borderColor: p0.separator,
+          borderWidth: 1,
+          displayColors: true,
+          boxPadding: 4,
+          padding: 10,
+          cornerRadius: 10,
+          callbacks: {label: c => ` ${c.dataset.label}：${money(c.parsed.y)}`},
+        },
+      },
+      scales: {
+        x: {grid: {display: false}, border: {display: false}, ticks: {color: p0.muted, font: {size: 10}, maxRotation: 0, autoSkipPadding: 12}},
+        y: {beginAtZero: true, border: {display: false}, grid: {color: p0.separator}, ticks: {color: p0.muted, font: {size: 10}, maxTicksLimit: 5, callback: v => '¥' + v}},
+      },
+    },
+  });
+
+  document.addEventListener('pourops:theme-change', () => {
+    const p = palette();
+    Chart.defaults.color = p.muted;
+    Chart.defaults.borderColor = p.separator;
+    chart.options.color = p.muted;
+    chart.options.plugins.legend.labels.color = p.muted;
+    chart.options.plugins.tooltip.backgroundColor = p.surface;
+    chart.options.plugins.tooltip.titleColor = p.fg;
+    chart.options.plugins.tooltip.bodyColor = p.muted;
+    chart.options.plugins.tooltip.borderColor = p.separator;
+    for (const scale of Object.values(chart.options.scales)) {
+      if (scale.ticks) scale.ticks.color = p.muted;
+      if (scale.grid) scale.grid.color = p.separator;
+    }
+    chart.data.datasets[0].borderColor = p.accent;
+    chart.data.datasets[0].pointBackgroundColor = p.accent;
+    chart.data.datasets[0].backgroundColor = areaGrad(chart.ctx, p.accent, '24');
+    chart.data.datasets[1].borderColor = p.success;
+    chart.data.datasets[1].pointBackgroundColor = p.success;
+    chart.data.datasets[1].backgroundColor = areaGrad(chart.ctx, p.success, '16');
+    chart.update('none');
+  });
+})();
+</script>
+{{end}}

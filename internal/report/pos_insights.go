@@ -37,7 +37,7 @@ func (i POSInsights) AverageText() string {
 func (h POSHour) ReceivedText() string { return platform.PriceText(int(h.Received)) }
 func (h POSHour) Label() string        { return fmt.Sprintf("%02d:00", h.Hour) }
 
-// LoadPOSInsights 在只读快照里读汇总和 24 小时分布。
+// LoadPOSInsights 在只读快照里读汇总和 24 小时分布（按营业日 07:00 至次日 06:00 顺序排列）。
 func LoadPOSInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (POSInsights, error) {
 	var out POSInsights
 	err := tx.QueryRow(ctx, `
@@ -65,15 +65,16 @@ func LoadPOSInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (POSI
 
 	out.Hours = make([]POSHour, 24)
 	for i := range out.Hours {
-		out.Hours[i].Hour = i
+		out.Hours[i].Hour = (platform.BusinessDayStartHour + i) % 24
 	}
 	for rows.Next() {
 		var h POSHour
 		if err := rows.Scan(&h.Hour, &h.Received, &h.Payments); err != nil {
 			return out, err
 		}
-		out.Hours[h.Hour].Received = h.Received
-		out.Hours[h.Hour].Payments = h.Payments
+		idx := (h.Hour - platform.BusinessDayStartHour + 24) % 24
+		out.Hours[idx].Received = h.Received
+		out.Hours[idx].Payments = h.Payments
 	}
 	return out, rows.Err()
 }

@@ -53,16 +53,16 @@ func newPOSPayment(t *testing.T, pool *pgxpool.Pool, order int64, cents int, at 
 
 func TestPOSInsightsPaymentsOnly(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
-	cst := time.FixedZone("CST", 8*3600)
-	day := time.Date(2026, 3, 10, 0, 0, 0, 0, cst)
-	start, end := day, day.AddDate(0, 0, 1)
+	cst := platform.ReportZone
+	start := time.Date(2026, 3, 10, 7, 0, 0, 0, cst)
+	end := start.AddDate(0, 0, 1) // 次日 07:00
 
 	split := newPOSOrder(t, pool, "bar-1")
 	newPOSPayment(t, pool, split, 3000, time.Date(2026, 3, 10, 10, 15, 0, 0, cst))
 	newPOSPayment(t, pool, split, 2000, time.Date(2026, 3, 10, 10, 45, 0, 0, cst))
 
 	late := newPOSOrder(t, pool, "bar-2")
-	newPOSPayment(t, pool, late, 2500, time.Date(2026, 3, 10, 23, 59, 0, 0, cst))
+	newPOSPayment(t, pool, late, 2500, time.Date(2026, 3, 11, 2, 30, 0, 0, cst)) // 次日凌晨 02:30 归 03-10 营业日
 
 	edge := newPOSOrder(t, pool, "table-1")
 	newPOSPayment(t, pool, edge, 1000, start)
@@ -91,32 +91,37 @@ func TestPOSInsightsPaymentsOnly(t *testing.T) {
 	}
 	var hourSum int64
 	for i, h := range in.Hours {
-		if h.Hour != i {
-			t.Fatalf("第 %d 行的小时是 %d，应按北京时间顺序", i, h.Hour)
+		wantHour := (platform.BusinessDayStartHour + i) % 24
+		if h.Hour != wantHour {
+			t.Fatalf("第 %d 行的小时是 %d，应为 %d（07:00 起顺序）", i, h.Hour, wantHour)
 		}
 		hourSum += h.Received
 	}
 	if hourSum != in.Received {
 		t.Fatalf("小时金额之和 %d 与实收 %d 不一致", hourSum, in.Received)
 	}
+	// index 0 -> 07:00, index 3 -> 10:00, index 19 -> 次日 02:00, index 23 -> 次日 06:00
 	if in.Hours[0].Received != 1000 || in.Hours[0].Payments != 1 {
-		t.Fatalf("0 点行不对: %+v", in.Hours[0])
+		t.Fatalf("07 点行不对: %+v", in.Hours[0])
 	}
-	if in.Hours[10].Received != 5000 || in.Hours[10].Payments != 2 {
-		t.Fatalf("10 点行不对: %+v", in.Hours[10])
+	if in.Hours[3].Received != 5000 || in.Hours[3].Payments != 2 {
+		t.Fatalf("10 点行不对: %+v", in.Hours[3])
 	}
-	if in.Hours[23].Received != 2500 || in.Hours[23].Payments != 1 {
-		t.Fatalf("23 点行不对: %+v", in.Hours[23])
+	if in.Hours[19].Received != 2500 || in.Hours[19].Payments != 1 {
+		t.Fatalf("02 点行不对: %+v", in.Hours[19])
 	}
-	for _, i := range []int{1, 9, 11, 22} {
+	for _, i := range []int{1, 2, 16, 17, 23} {
 		if in.Hours[i].Received != 0 || in.Hours[i].Payments != 0 {
-			t.Fatalf("空小时 %d 应为 0: %+v", i, in.Hours[i])
+			t.Fatalf("空小时 index=%d 应为 0: %+v", i, in.Hours[i])
 		}
 	}
-	if got := in.Hours[0].Label(); got != "00:00" {
-		t.Fatalf("0 点标签 = %q", got)
+	if got := in.Hours[0].Label(); got != "07:00" {
+		t.Fatalf("首行标签 = %q", got)
 	}
-	if got := in.Hours[10].ReceivedText(); got != "¥ 50" {
+	if got := in.Hours[23].Label(); got != "06:00" {
+		t.Fatalf("末行标签 = %q", got)
+	}
+	if got := in.Hours[3].ReceivedText(); got != "¥ 50" {
 		t.Fatalf("10 点实收展示 = %q", got)
 	}
 
@@ -131,15 +136,15 @@ func TestPOSInsightsPaymentsOnly(t *testing.T) {
 	if len(points) != 24 {
 		t.Fatalf("小时 JSON 应 24 项，实际 %d", len(points))
 	}
-	if points[10].Hour != "10:00" || points[10].Received != 50 || points[10].Payments != 2 {
-		t.Fatalf("10 点 JSON 不对: %+v", points[10])
+	if points[0].Hour != "07:00" || points[3].Hour != "10:00" || points[3].Received != 50 || points[3].Payments != 2 || points[19].Hour != "02:00" {
+		t.Fatalf("小时 JSON 不对: [0]=%+v [3]=%+v [19]=%+v", points[0], points[3], points[19])
 	}
 }
 
 func TestPOSInsightsEmptyDay(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
-	cst := time.FixedZone("CST", 8*3600)
-	day := time.Date(2026, 3, 10, 0, 0, 0, 0, cst)
+	cst := platform.ReportZone
+	day := time.Date(2026, 3, 10, 7, 0, 0, 0, cst)
 
 	unpaid := newPOSOrder(t, pool, "bar-1")
 	execSQL(t, pool, `insert into order_items (order_id, kind, ref_id, name, unit_cents)
@@ -156,8 +161,8 @@ func TestPOSInsightsEmptyDay(t *testing.T) {
 		t.Fatalf("小时分布应固定 24 行，实际 %d", len(in.Hours))
 	}
 	for i, h := range in.Hours {
-		if h.Hour != i || h.Received != 0 || h.Payments != 0 {
-			t.Fatalf("第 %d 小时应为空: %+v", i, h)
+		if want := (platform.BusinessDayStartHour + i) % 24; h.Hour != want || h.Received != 0 || h.Payments != 0 {
+			t.Fatalf("第 %d 小时应为空且 hour=%d: %+v", i, want, h)
 		}
 	}
 }

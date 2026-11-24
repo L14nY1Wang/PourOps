@@ -2,15 +2,16 @@
 .overview-filter {
   display: flex;
   flex-flow: row wrap;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 14px 24px;
+  gap: 12px 20px;
   margin-bottom: 20px;
-  padding: 14px 16px;
+  padding: 12px 16px;
 }
 
 .period-tabs {
-  display: flex;
+  display: inline-flex;
+  align-items: center;
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--separator);
@@ -19,11 +20,15 @@
 }
 
 .period-tab {
-  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 12px;
   border-radius: 8px;
   color: var(--muted);
   font-size: 13px;
-  line-height: 18px;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -39,45 +44,70 @@
 }
 
 .period-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 145px)) auto;
-  align-items: end;
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
   min-width: 0;
 }
 
 .period-field {
-  display: grid;
-  gap: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
+  margin: 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.period-field > span {
+  flex-shrink: 0;
 }
 
 .period-form input {
-  display: block;
+  display: inline-flex;
+  align-items: center;
   box-sizing: border-box;
-  width: 100%;
+  width: 146px;
   min-width: 0;
-  height: 42px;
+  height: 40px;
   margin: 0;
-  padding: 0 9px;
+  padding: 0 10px;
   border: 1px solid var(--separator);
   border-radius: 9px;
   background: var(--surface);
   color: var(--field-foreground);
   font: inherit;
-  font-size: 14px;
-  line-height: normal;
+  font-size: 13.5px;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
 
 .period-form input::-webkit-date-and-time-value {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
   text-align: left;
 }
 
-.period-form input::-webkit-datetime-edit {
+.period-form input::-webkit-datetime-edit,
+.period-form input::-webkit-datetime-edit-fields-wrapper {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
   padding: 0;
+  line-height: 1;
+}
+
+.period-form input::-webkit-calendar-picker-indicator {
+  margin: 0 0 0 4px;
+  padding: 0;
+  cursor: pointer;
 }
 
 .period-form input:focus {
@@ -87,7 +117,9 @@
 }
 
 .period-form .button {
-  min-height: 42px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0 16px;
   white-space: nowrap;
 }
 
@@ -111,10 +143,8 @@
   font-size: 11px;
 }
 
-.dashboard-main {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 14px;
+.pos-panel,
+.analytics-trend-panel {
   margin-bottom: 14px;
 }
 
@@ -134,10 +164,20 @@
   height: 232px;
 }
 
+.chart-container--lg {
+  height: 300px;
+}
+
+.analytics-share-sub {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
 .pos-figures {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 9px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
   margin-bottom: 14px;
 }
 
@@ -164,7 +204,7 @@
 
 .pos-chart {
   position: relative;
-  height: 176px;
+  height: 210px;
 }
 
 .overview-data {
@@ -209,7 +249,7 @@
 
 .dashboard-bottom {
   display: grid;
-  grid-template-columns: 1.1fr 1fr 1.1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
   align-items: start;
   gap: 14px;
   margin-bottom: 14px;
@@ -314,7 +354,7 @@
 
 .inventory-counts {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 9px;
   padding: 0 0 12px;
   border-bottom: 1px solid var(--separator);
@@ -339,9 +379,53 @@
   font-variant-numeric: tabular-nums;
 }
 
+.inventory-counts .inventory-count--warn strong {
+  color: var(--warning-color);
+}
+
+.inventory-counts .inventory-count--danger strong {
+  color: var(--danger-color);
+}
+
 .dashboard-bottom .alert {
   margin-bottom: 10px;
   padding: 10px 12px;
+}
+
+.inventory-alert-group {
+  margin-top: 12px;
+}
+
+.inventory-alert-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.inventory-alert-group .table {
+  margin-bottom: 0;
+}
+
+.inventory-alert-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 14px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--separator);
+}
+
+.inventory-alert-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
 }
 
 .keg-panel {
@@ -419,16 +503,8 @@
     left: -12px;
   }
 
-  .dashboard-main {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .dashboard-bottom {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .dashboard-bottom > :last-child {
-    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
   }
 
   .stats-grid {
@@ -506,13 +582,12 @@
     display: block;
   }
 
-  .dashboard-main,
   .dashboard-bottom {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .dashboard-bottom > :last-child {
-    grid-column: auto;
+  .pos-figures {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -599,6 +674,10 @@
     height: 208px;
   }
 
+  .chart-container--lg {
+    height: 220px;
+  }
+
   .overview-filter {
     align-items: stretch;
     flex-direction: column;
@@ -606,22 +685,35 @@
   }
 
   .period-tabs {
+    display: flex;
+    width: 100%;
     overflow-x: auto;
     scrollbar-width: none;
   }
 
   .period-tab {
     flex: 1;
-    text-align: center;
   }
 
   .period-form {
     width: 100%;
+    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .period-field {
+    display: grid;
+    gap: 5px;
+  }
+
+  .period-form input {
+    width: 100%;
   }
 
   .period-form .button {
     grid-column: 1 / -1;
+    width: 100%;
   }
 
   .account-name,
@@ -695,14 +787,16 @@
   }
 }
 
+@media (max-width: 640px) {
+  .inventory-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 520px) {
   .stats-grid,
   .overview-stats {
     grid-template-columns: minmax(0, 1fr);
-  }
-
-  .inventory-counts {
-    grid-template-columns: 1fr 1fr;
   }
 
   .pos-figures {

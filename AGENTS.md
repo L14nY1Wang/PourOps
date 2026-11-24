@@ -35,7 +35,7 @@ platform (zero internal deps)
 - **会话失效靠 `auth_version`**：cookie 票据 `uid.ver.exp.mac` 绑版本号，改密码/启停 2FA/停用都 `auth_version+1` 一次性踢掉所有旧会话与登录挑战。
 - **`ConsumeSecondFactor` 锁约定**（`internal/auth/security.go`）：调用方必须先 `for update` 锁 `users` 行；它不开事务不提交；缺 `TWO_FACTOR_KEY` 或解密失败返回 error **绝不降级成单密码放行**。
 - **SSE 广播**：`screen.NewHub(bus)` 订阅 `event.EventScreenChanged` → `/api/screen/events` 推 `changed` → 电视页重拉 `/api/screen/playlist`；慢消费者丢信号，靠 60s 轮询兜底。
-- **成本核算口径与系统参数**：经营概览（`internal/report/sales.go`）按实际售出毫升占整桶 **100% 容量**摊销单杯成本（`cost_cents * ml / capacity_ml`）；桶装盈亏与定价测算（`internal/inventory/economics.go`）按 `store_settings` 可配置的 **默认可售比例**（默认 80%，预留损耗）与 **目标毛利率**（默认 50%）计算单杯有效成本、回本线与推荐价（`/admin/settings` BOSS 可调，`web/static/js/keg-pricing.js` 通过 `data-default-sellable` / `data-default-margin` 联动）。
+- **成本核算口径与系统参数**：经营概览与数据分析（`internal/report/{overview,sales,pos_insights}.go`）统一按酒吧**营业日**（北京时间当日 `07:00` 至次日 `07:00`，`platform.BusinessDayCutoff`）统计，桶装按实际售出毫升占整桶 **100% 容量**摊销单杯成本（`cost_cents * ml / capacity_ml`）；桶装盈亏与定价测算（`internal/inventory/economics.go`）按 `store_settings` 可配置的 **默认可售比例**（默认 80%，预留损耗）与 **目标毛利率**（默认 50%）计算单杯有效成本、回本线与推荐价（`/admin/settings` BOSS 可调，`web/static/js/keg-pricing.js` 通过 `data-default-sellable` / `data-default-margin` 联动）。
 - 记录页（`internal/report/records.go`）用 `RepeatableRead + ReadOnly` 单快照读同一批表做审计聚合。
 
 数据链：`beers 1—n kegs 1—n keg_pours`；`beer_catalog` 独立沉淀历史酒款资料（按 `lower(btrim(brewery)), lower(btrim(name))` 唯一去重）；`orders 1—n order_items / payments`；`order_items.kind` 多态指向 beer/retail（无外键）；`retail_sale_items` 故意不设 FK 存名称价格快照；`operation_events` 无外键纯台账；`store_settings` 保存品牌名/默认出酒率与毛利率/Webhook 配置；台位唯一性靠 partial index `orders_open_spot where closed_at is null`。
@@ -45,7 +45,7 @@ platform (zero internal deps)
 |目录|用途|
 |---|---|
 |`cmd/pourops/`|可执行程序入口（`main.go`），在仓库根目录运行 `go` 命令|
-|`internal/app/`|应用组合根（`Deps`、`NewAssets`、`NewRenderer`、`NewHandler`）及全 20 套模板/全路由冒烟测试|
+|`internal/app/`|应用组合根（`Deps`、`NewAssets`、`NewRenderer`、`NewHandler`）及全 21 套模板/全路由冒烟测试|
 |`internal/platform/`|最底层无内部依赖基建：迁移/隔离测试库、严格表单与格式化、错误处理、操作台账、CSRF 中间件|
 |`internal/event/`|进程内轻量事件总线 `EventBus`、领域事件常量与异步 HMAC-SHA256 `WebhookDispatcher`|
 |`internal/ui/`|布局 ViewModel（`Layout`、`Page`、`UserView`、`Guards`）、`AssetManifest`（将 `css/*.css` 拼为 `/static/css/admin.bundle.css`，保留 `/static/css/admin.css` 别名）与 `Renderer`|
@@ -130,7 +130,7 @@ node web/tests/keg_pricing_test.mjs
 - **单元与 DB 集成不靠 build tag**：`platform.NewTestPool(t, migrations.FS)`（`internal/platform/db.go`）读 `TEST_DATABASE_URL`，空则 `t.Skip`；每个测试建独立 schema `test_<pid>_<seq>` 并自动跑全部迁移，`t.Cleanup` drop。同一 DSN 并行跑多个 `go test` 进程安全。
 - 断言纯标准库 `testing`（无 testify）：`t.Fatalf` 中文消息带实际值；表驱动为主；`t.Setenv` 注入环境，不共享全局状态。
 - **`t.Fatal` 禁止在子 goroutine 里调**（会 panic）：并发用例先在主 goroutine 算好参数，错误走 `chan error` 汇总——`internal/pos/checkout_integration_test.go` 是模板。
-- 各领域测试位于对应 `internal/<domain>/` 包内，`internal/app/app_test.go` 负责全 20 个模板（`ui.DefaultPageFiles`）的真实渲染（含 `{{asset}}` 指纹）与全路由冒烟测试。
+- 各领域测试位于对应 `internal/<domain>/` 包内，`internal/app/app_test.go` 负责全 21 个模板（`ui.DefaultPageFiles`）的真实渲染（含 `{{asset}}` 指纹）与全路由冒烟测试。
 - 覆盖重点：结账原子性/幂等/并发/网关失败回滚、库存不足整单回滚、外单行 id 混入被忽略、开桶幂等、流水快照、2FA 重放/恢复码/封锁、迁移回滚幂等、`EventBus` + Webhook 签名与 SSRF 防护、可配置核算参数联动。
 - JS 与电视页回归：`node web/tests/keg_pricing_test.mjs`（6 组滑块与自定义默认值回归）与 `node web/tests/screen_test.mjs`（8 组电视酒单回归）。
 - 验收新 UI/流程：本机起服务 + 浏览器真实操作（登录→操作→看结果），不造页面状态。

@@ -42,6 +42,20 @@ func TestKegMoney(t *testing.T) {
 	if over.RemainingML() != 0 || over.SoldPct() != 100 {
 		t.Errorf("超卖时应收敛到 0ml / 100%% 走量: %d %d", over.RemainingML(), over.SoldPct())
 	}
+
+	tapped := time.Date(2026, 11, 24, 18, 0, 0, 0, time.Local)
+	if (Keg{CapacityML: 20000, SoldML: 10000, TappedAt: &tapped}).IsSoldWarning() {
+		t.Error("在售酒桶精确售出 50% 不应触发超 50% 告警")
+	}
+	if !(Keg{CapacityML: 20000, SoldML: 10200, TappedAt: &tapped}).IsSoldWarning() {
+		t.Error("在售酒桶售出 51% 应触发超 50% 告警")
+	}
+	if (Keg{CapacityML: 20000, SoldML: 16000}).IsSoldWarning() {
+		t.Error("未开桶即使有历史 SoldML 也不应触发在售酒桶告警")
+	}
+	if (Keg{CapacityML: 20000, SoldML: 16000, TappedAt: &tapped, FinishedAt: &finished}).IsSoldWarning() {
+		t.Error("已结桶停售酒桶不应触发在售酒桶告警")
+	}
 }
 
 func TestMoneyText(t *testing.T) {

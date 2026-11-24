@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestToneOf(t *testing.T) {
@@ -162,5 +163,37 @@ func TestStrictBeerValidationAndUserErrorSanitization(t *testing.T) {
 		if _, err := ParseSortOrder(badSort); err == nil {
 			t.Errorf("ParseSortOrder(%q) 应报错", badSort)
 		}
+	}
+}
+
+func TestBusinessDayBoundaries(t *testing.T) {
+	ts := func(year, month, day, hour, min, sec int) time.Time {
+		return time.Date(year, time.Month(month), day, hour, min, sec, 0, ReportZone)
+	}
+	cases := []struct {
+		name    string
+		in      time.Time
+		wantKey string
+		wantAt  time.Time
+	}{
+		{"次日凌晨2点半属前一天", ts(2026, 1, 12, 2, 30, 0), "2026-01-11", ts(2026, 1, 11, 7, 0, 0)},
+		{"早06:59:59仍属前一天", ts(2026, 1, 12, 6, 59, 59), "2026-01-11", ts(2026, 1, 11, 7, 0, 0)},
+		{"早07:00:00切换当天", ts(2026, 1, 12, 7, 0, 0), "2026-01-12", ts(2026, 1, 12, 7, 0, 0)},
+		{"跨月1号凌晨属上月末", ts(2024, 3, 1, 5, 0, 0), "2024-02-29", ts(2024, 2, 29, 7, 0, 0)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotStart := BusinessDayStart(tc.in)
+			if !gotStart.Equal(tc.wantAt) {
+				t.Fatalf("BusinessDayStart(%v) = %v, want %v", tc.in, gotStart, tc.wantAt)
+			}
+			if gotKey := BusinessDayKey(tc.in); gotKey != tc.wantKey {
+				t.Fatalf("BusinessDayKey(%v) = %q, want %q", tc.in, gotKey, tc.wantKey)
+			}
+		})
+	}
+	dateStart := BusinessDayStartOfDate(time.Date(2026, 1, 11, 0, 0, 0, 0, ReportZone))
+	if !dateStart.Equal(ts(2026, 1, 11, 7, 0, 0)) {
+		t.Fatalf("BusinessDayStartOfDate = %v, want 2026-01-11 07:00", dateStart)
 	}
 }

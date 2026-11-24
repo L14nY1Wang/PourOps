@@ -2,6 +2,7 @@ package report
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,9 +13,10 @@ import (
 
 // Overview 是经营概览的当前库存快照，不受销售日期筛选影响。
 type Overview struct {
-	ActiveKegs, RetailCount, LowCount, OutCount, Untapped int
-	StockValue                                            int
-	LowStock                                              []inventory.RetailItem
+	ActiveKegs, RetailCount, LowCount, OutCount, Untapped, WarnKegCount int
+	StockValue                                                          int
+	LowStock                                                            []inventory.RetailItem
+	WarnKegs                                                            []inventory.Keg
 }
 
 func (o Overview) StockText() string { return platform.PriceText(o.StockValue) }
@@ -47,19 +49,51 @@ func LoadOverview(ctx context.Context, pool *pgxpool.Pool) (Overview, error) {
 		}
 		o.LowStock = append(o.LowStock, it)
 	}
-	return o, rows.Err()
+	if err := rows.Err(); err != nil {
+		return o, err
+	}
+
+	activeKegs, err := inventory.ListKegs(ctx, pool, true)
+	if err != nil {
+		return o, err
+	}
+	for _, k := range activeKegs {
+		if k.IsSoldWarning() {
+			o.WarnKegs = append(o.WarnKegs, k)
+		}
+	}
+	slices.SortFunc(o.WarnKegs, func(a, b inventory.Keg) int {
+		if d := b.SoldPct() - a.SoldPct(); d != 0 {
+			return d
+		}
+		if d := a.RemainingML() - b.RemainingML(); d != 0 {
+			return d
+		}
+		switch {
+		case a.ID < b.ID:
+			return -1
+		case a.ID > b.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
+	o.WarnKegCount = len(o.WarnKegs)
+	return o, nil
 }
 
+// ReportDates 按酒吧营业日（北京时间 07:00 至次日 07:00）计算统计起止边界 [start, end)。
 func ReportDates(now time.Time, period, from, to string) (string, time.Time, time.Time, string) {
-	local := now.In(platform.ReportZone)
-	today := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, platform.ReportZone)
+	today := platform.BusinessDayStart(now)
 	end := today.AddDate(0, 0, 1)
 	if from != "" || to != "" || period == "custom" {
-		start, startErr := time.ParseInLocation(time.DateOnly, from, platform.ReportZone)
-		last, endErr := time.ParseInLocation(time.DateOnly, to, platform.ReportZone)
-		if startErr != nil || endErr != nil || start.Year() < 1 || last.Year() < 1 || last.Before(start) || !last.Before(start.AddDate(0, 0, 366)) {
+		startDay, startErr := time.ParseInLocation(time.DateOnly, from, platform.ReportZone)
+		lastDay, endErr := time.ParseInLocation(time.DateOnly, to, platform.ReportZone)
+		if startErr != nil || endErr != nil || startDay.Year() < 1 || lastDay.Year() < 1 || lastDay.Before(startDay) || !lastDay.Before(startDay.AddDate(0, 0, 366)) {
 			return "custom", time.Time{}, time.Time{}, "请选择有效的起止日期，区间最多 366 天。"
 		}
+		start := platform.BusinessDayStartOfDate(startDay)
+		last := platform.BusinessDayStartOfDate(lastDay)
 		return "custom", start, last.AddDate(0, 0, 1), ""
 	}
 	switch period {
@@ -68,7 +102,8 @@ func ReportDates(now time.Time, period, from, to string) (string, time.Time, tim
 	case "30d":
 		return period, today.AddDate(0, 0, -29), end, ""
 	case "month":
-		return period, today.AddDate(0, 0, 1-today.Day()), end, ""
+		monthStart := time.Date(today.Year(), today.Month(), 1, platform.BusinessDayStartHour, 0, 0, 0, platform.ReportZone)
+		return period, monthStart, end, ""
 	case "", "7d":
 		return "7d", today.AddDate(0, 0, -6), end, ""
 	default:

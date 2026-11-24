@@ -14,6 +14,7 @@ const AdminLayoutFile = "templates/layouts/admin.html"
 var DefaultPageFiles = []string{
 	"admin/login.html",
 	"admin/dashboard.html",
+	"admin/analytics.html",
 	"admin/beers.html",
 	"admin/beer_form.html",
 	"admin/purchase.html",
