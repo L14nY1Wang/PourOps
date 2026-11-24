@@ -3,6 +3,7 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ import (
 	"pourops/internal/ui"
 )
 
-// TestAllTemplatesRender 验证全部 21 个内嵌模板均可在真实静态资源清单下零报错渲染并输出资源哈希。
+// TestAllTemplatesRender 验证全部 19 个内嵌模板均可在真实静态资源清单下零报错渲染并输出资源哈希。
 func TestAllTemplatesRender(t *testing.T) {
 	assets, err := NewAssets()
 	if err != nil {
@@ -37,13 +38,6 @@ func TestAllTemplatesRender(t *testing.T) {
 		ID: 1, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "IPA",
 		ABV: &abv, IBU: &ibu, UT: &ut, Price150: 2800, Price330: 5800, Price500: 7800,
 		Tags: []string{"柑橘", "果汁感"}, SalesTags: []string{"本周最佳"}, OnScreen: true,
-	}
-	catItem := catalog.CatalogBeer{
-		ID: 3, Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "IPA",
-		ABV: &abv, IBU: &ibu, UT: &ut, CapacityML: 20000, CostCents: 120000,
-		Price150: 2800, Price330: 5800, Price500: 7800,
-		Tags: []string{"柑橘", "果汁感"}, PosterURL: "https://assets.untappd.com/x.jpeg",
-		UpdatedAt: now,
 	}
 	keg := inventory.Keg{
 		ID: 10, BeerID: 1, BeerNo: "01", Brewery: "树屋", BeerName: "尤利乌斯", KegNo: "K-01",
@@ -99,27 +93,34 @@ func TestAllTemplatesRender(t *testing.T) {
 				Trend:   []report.SalesTrendDay{{Date: "2026-11-22", Revenue: 240000, Cost: 95000}, {Date: "2026-11-23", Revenue: 280000, Cost: 115000}},
 				Top:     []report.SalesTopItem{{Name: "树屋 · 尤利乌斯", Unit: "杯", Qty: 32, Revenue: 185600, Cost: 64000}},
 			},
-		}, []string{"销售走势", "按日销售明细", `id="salesChart"`, "2026-11-23"}, false},
+			Audience: report.AudienceInsights{
+				TotalCups:    62,
+				TotalVolume:  20460,
+				TotalRevenue: 380000,
+				TotalCost:    150000,
+				Segments: []report.CategorySegment{
+					{Category: "IPA", Color: report.AudienceCategoryColor("IPA"), Cups: 32, PrevCups: 25, VolumeML: 10560, Revenue: 185600, Cost: 64000, AvgABV: 6.8, HasABV: true, CupShare: 51.6, RevShare: 48.8},
+					{Category: "西打", Color: report.AudienceCategoryColor("西打"), Cups: 18, PrevCups: 12, VolumeML: 5940, Revenue: 108000, Cost: 45000, AvgABV: 5.0, HasABV: true, CupShare: 29.0, RevShare: 28.4},
+					{Category: "世涛", Color: report.AudienceCategoryColor("世涛"), Cups: 12, PrevCups: 0, VolumeML: 3960, Revenue: 86400, Cost: 41000, AvgABV: 9.2, HasABV: true, CupShare: 19.4, RevShare: 22.7},
+				},
+				CupSizes: report.CupSizePreference{SmallCups: 10, MediumCups: 42, LargeCups: 10},
+				Spots:    report.SpotPreference{BarCups: 24, BarTopCat: "IPA", TableCups: 20, TableTopCat: "西打"},
+			},
+		}, []string{"销售走势", "客户群分析", "按日销售明细", `id="salesChart"`, `id="audienceChart"`, `id="audience-data"`, `data-audience-type="radar"`, "IPA", "西打", "2026-11-23"}, false},
 		{"beers", "admin/beers.html", "layout", &inventory.BeerListPage{
 			Layout: ui.Layout{Title: "酒单 · 桶装", Nav: "beers", Me: me}, NextNo: 2, Pricing: pricing,
 			Rows: []inventory.BeerRow{{Beer: beer, Keg: &keg, Stock: 2}, {Beer: beer, LastKeg: &finKeg}},
 		}, nil, false},
 		{"beer_form", "admin/beer_form.html", "layout", &inventory.BeerFormPage{
 			Layout: ui.Layout{Title: "编辑酒款", Nav: "beers", Me: me, Categories: platform.Categories}, Beer: beer, Keg: keg, CostInput: "1200", Pricing: pricing,
-		}, []string{`酒款分类`, `data-default-sellable="85"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
+		}, []string{`酒款分类`, `enctype="multipart/form-data"`, `name="poster_file"`, `data-default-sellable="85"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
 		{"beer_form-removed-cat", "admin/beer_form.html", "layout", &inventory.BeerFormPage{
 			Layout: ui.Layout{Title: "编辑酒款", Nav: "beers", Me: me, Categories: platform.Categories},
 			Beer:   catalog.Beer{ID: 9, Name: "老酒款", Category: "已删分类"}, Keg: keg, Pricing: pricing,
 		}, []string{`已删分类（已不在预设列表）`}, false},
 		{"purchase", "admin/purchase.html", "layout", &inventory.PurchasePage{
 			Layout: ui.Layout{Title: "新增酒款", Nav: "beers", Me: me, Categories: platform.Categories}, Beer: beer, Keg: keg, KegCount: 2, CostInput: "1200", Pricing: pricing,
-		}, []string{`data-default-margin="55"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
-		{"catalog", "admin/catalog.html", "layout", &catalog.CatalogListPage{
-			Layout: ui.Layout{Title: "历史酒单", Nav: "catalog", Me: me, Categories: platform.Categories}, Catalog: []catalog.CatalogBeer{catItem}, CatalogTotal: 1,
-		}, nil, false},
-		{"catalog_form", "admin/catalog_form.html", "layout", &catalog.CatalogFormPage{
-			Layout: ui.Layout{Title: "编辑历史酒款", Nav: "catalog", Me: me, Categories: platform.Categories}, CatalogItem: catItem, CostInput: "1200", Pricing: pricing,
-		}, []string{`/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
+		}, []string{`enctype="multipart/form-data"`, `name="poster_file"`, `data-default-margin="55"`, `/static/js/beer-lookup.js?v=`, `/static/js/keg-pricing.js?v=`}, false},
 		{"kegs", "admin/kegs.html", "layout", &inventory.KegListPage{
 			Layout: ui.Layout{Title: "桶装盈亏", Nav: "kegs", Me: me}, Kegs: []inventory.Keg{keg, finKeg}, KegSummary: inventory.SummarizeKegsWithConfig([]inventory.Keg{keg, finKeg}, pricing), Status: "all", Verdict: "all", Pricing: pricing,
 		}, []string{"核算标准：85% 可售（预留 15% 损耗）", "55% 目标营收"}, false},
@@ -176,7 +177,8 @@ func TestAllTemplatesRender(t *testing.T) {
 			EventOptions:   event.WebhookEventOptions,
 			HasSecret:      true,
 			SelectedEvents: map[string]bool{string(event.EventOrderPaid): true},
-		}, []string{`name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`}, false},
+			CatalogTotal:   12,
+		}, []string{`name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`, `历史酒单导入与导出`, `12`, `/admin/settings/catalog/export`, `/admin/settings/catalog/import`, `accept=".zip,application/zip"`}, false},
 		{"pos-spots", "pos/pos.html", "pos", &pos.PosPage{
 			Layout:   ui.Layout{Me: me},
 			Spots:    []pos.Spot{{Key: "bar-1", Kind: "bar", Label: "吧台 1", OrderID: 88, Items: 2, Total: 9600}, {Key: "table-1", Kind: "table", Label: "小桌 1"}},
@@ -227,6 +229,9 @@ func TestAllTemplatesRender(t *testing.T) {
 			if strings.Contains(body, `<svg class="brand-mark"`) {
 				t.Fatalf("%s 不应再包含内联 brand-mark SVG", tc.file)
 			}
+			if strings.Contains(body, "ZgotmplZ") {
+				t.Fatalf("%s 出现被 html/template 过滤的 ZgotmplZ", tc.file)
+			}
 			lower := strings.ToLower(body)
 			for _, legacy := range []string{"ioe", "heroui", "jquery", "sweetalert"} {
 				if strings.Contains(lower, legacy) {
@@ -244,6 +249,9 @@ func TestAllTemplatesRender(t *testing.T) {
 						t.Fatalf("dashboard 不应包含已移除板块 %q", removed)
 					}
 				}
+			}
+			if !tc.notLayout && strings.Contains(body, `/admin/beers/catalog`) {
+				t.Fatalf("%s 不应再包含已取消的历史酒单页面链接", tc.file)
 			}
 		})
 	}
@@ -266,12 +274,28 @@ func TestNewHandlerSmoke(t *testing.T) {
 	screenHub := screen.NewHub(bus)
 	renderer := NewRenderer(assets, settingsStore.Brand)
 
+	posters, err := catalog.NewPosterStore(filepath.Join(t.TempDir(), "posters"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	samplePNG := []byte{
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n',
+		0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R',
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+	}
+	posterURL, err := posters.SaveBytes(samplePNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	h := NewHandler(Deps{
 		Settings:     settingsStore,
 		Bus:          bus,
 		ScreenHub:    screenHub,
 		Assets:       assets,
 		Renderer:     renderer,
+		Posters:      posters,
 		Secret:       []byte("0123456789abcdef0123456789abcdef"),
 		JiuheBaseURL: "https://mall.jiuhehe.com/api",
 	})
@@ -331,24 +355,40 @@ func TestNewHandlerSmoke(t *testing.T) {
 	if recLogin.Code != http.StatusOK || !strings.Contains(recLogin.Body.String(), "/static/css/admin.bundle.css?v=") {
 		t.Fatalf("GET /admin/login = %d", recLogin.Code)
 	}
-	for _, path := range []string{"/admin/analytics", "/admin/settings"} {
+	for _, path := range []string{"/admin/analytics", "/admin/settings", "/admin/settings/catalog/export"} {
 		recAnon := httptest.NewRecorder()
 		h.ServeHTTP(recAnon, httptest.NewRequest(http.MethodGet, path, nil))
 		if recAnon.Code != http.StatusSeeOther || recAnon.Header().Get("Location") != "/admin/login" {
 			t.Fatalf("GET %s 未登录应 303 -> /admin/login，实际 %d loc=%q", path, recAnon.Code, recAnon.Header().Get("Location"))
 		}
 	}
-	recCatAnon := httptest.NewRecorder()
-	h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, "/admin/settings/categories/add", strings.NewReader("name=赛松")))
-	if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {
-		t.Fatalf("POST /admin/settings/categories/add 未登录应 303 -> /admin/login，实际 %d", recCatAnon.Code)
+	for _, postPath := range []string{"/admin/settings/categories/add", "/admin/settings/catalog/import"} {
+		recCatAnon := httptest.NewRecorder()
+		h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, postPath, nil))
+		if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {
+			t.Fatalf("POST %s 未登录应 303 -> /admin/login，实际 %d", postPath, recCatAnon.Code)
+		}
 	}
 
-	// 4. 未知后台路径必须 404（验证 {$} 精确匹配）
-	rec404 := httptest.NewRecorder()
-	h.ServeHTTP(rec404, httptest.NewRequest(http.MethodGet, "/admin/does-not-exist", nil))
-	if rec404.Code != http.StatusNotFound {
-		t.Fatalf("GET /admin/does-not-exist = %d, want 404", rec404.Code)
+	// 本地酒标服务 & 路径穿越 404 & 已取消的历史酒单页面 404。
+	recPoster := httptest.NewRecorder()
+	h.ServeHTTP(recPoster, httptest.NewRequest(http.MethodGet, posterURL, nil))
+	if recPoster.Code != http.StatusOK || recPoster.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("GET %s = %d nosniff=%q", posterURL, recPoster.Code, recPoster.Header().Get("X-Content-Type-Options"))
+	}
+	recTraversal := httptest.NewRecorder()
+	h.ServeHTTP(recTraversal, httptest.NewRequest(http.MethodGet, "/posters/..%2Fetc%2Fpasswd", nil))
+	if recTraversal.Code != http.StatusNotFound {
+		t.Fatalf("路径穿越应 404，实际 %d", recTraversal.Code)
+	}
+
+	// 4. 未知或已取消的后台路径必须 404
+	for _, gonePath := range []string{"/admin/does-not-exist", "/admin/beers/catalog"} {
+		rec404 := httptest.NewRecorder()
+		h.ServeHTTP(rec404, httptest.NewRequest(http.MethodGet, gonePath, nil))
+		if rec404.Code != http.StatusNotFound {
+			t.Fatalf("GET %s = %d, want 404", gonePath, rec404.Code)
+		}
 	}
 
 	// 5. 跨站 POST 被 CrossOriginProtect 拦截 -> 403

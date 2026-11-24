@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -14,9 +15,10 @@ import (
 )
 
 const (
-	DefaultCapacityML = 20000
-	ImportMaxBytes    = 5 << 20 // 5 MiB 导入文件上限
-	ImportMaxRows     = 2000    // 单次导入最多 2000 款
+	DefaultCapacityML     = 20000
+	ImportMaxBytes        = 5 << 20  // 5 MiB CSV / catalog.json 单文件上限
+	ImportArchiveMaxBytes = 50 << 20 // 50 MiB 压缩包上传上限
+	ImportMaxRows         = 2000     // 单次导入最多 2000 款
 )
 
 // CatalogBeer 是门店自己的历史酒单主档，与在售/库存的 beers 表解耦。
@@ -211,6 +213,11 @@ func UpsertCatalogFromBeer(ctx context.Context, q platform.Querier, b Beer, capa
 
 // UpsertCatalogFromBeerWithCategories 在沉淀历史酒单时使用门店当前分类表推断缺失分类。
 func UpsertCatalogFromBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, capacityML, costCents int, updateKegSpec bool, allowed []string) error {
+	return UpsertCatalogFromBeerFull(ctx, q, b, capacityML, costCents, updateKegSpec, false, allowed)
+}
+
+// UpsertCatalogFromBeerFull 支持选择是否在编辑清空白酒标时同步清空 beer_catalog.poster_url。
+func UpsertCatalogFromBeerFull(ctx context.Context, q platform.Querier, b Beer, capacityML, costCents int, updateKegSpec, syncEmptyPoster bool, allowed []string) error {
 	brewery := strings.TrimSpace(b.Brewery)
 	name := strings.TrimSpace(b.Name)
 	if name == "" {
@@ -249,7 +256,7 @@ func UpsertCatalogFromBeerWithCategories(ctx context.Context, q platform.Querier
 			ut_rating   = coalesce(excluded.ut_rating, beer_catalog.ut_rating),
 			ut_count    = coalesce(excluded.ut_count, beer_catalog.ut_count),
 			tags        = case when cardinality(excluded.tags) > 0 then excluded.tags else beer_catalog.tags end,
-			poster_url  = case when excluded.poster_url <> '' then excluded.poster_url else beer_catalog.poster_url end,
+			poster_url  = case when $17 or excluded.poster_url <> '' then excluded.poster_url else beer_catalog.poster_url end,
 			capacity_ml = case when $16 and excluded.capacity_ml > 0 then excluded.capacity_ml else beer_catalog.capacity_ml end,
 			cost_cents  = case when $16 then excluded.cost_cents else beer_catalog.cost_cents end,
 			price_150   = case when excluded.price_150 > 0 or excluded.price_330 > 0 or excluded.price_500 > 0 then excluded.price_150 else beer_catalog.price_150 end,
@@ -258,12 +265,17 @@ func UpsertCatalogFromBeerWithCategories(ctx context.Context, q platform.Querier
 			updated_at  = now()`,
 		brewery, name, style, cat, b.ABV, b.IBU, b.UT, b.UTCount,
 		tags, poster, capVal, costVal, max(b.Price150, 0), max(b.Price330, 0), max(b.Price500, 0),
-		updateKegSpec,
+		updateKegSpec, syncEmptyPoster,
 	)
 	return err
 }
 
 // ---------- 导入落库（防 23505 竞态） ----------
+
+type PosterPayload struct {
+	Filename string
+	Data     []byte
+}
 
 type ImportFieldMask struct {
 	Brewery    bool
@@ -283,8 +295,9 @@ type ImportFieldMask struct {
 }
 
 type ImportItem struct {
-	Beer CatalogBeer
-	Mask ImportFieldMask
+	Beer   CatalogBeer
+	Mask   ImportFieldMask
+	Poster *PosterPayload
 }
 
 type ImportResult struct {
@@ -375,11 +388,60 @@ func ImportCatalogBeers(ctx context.Context, pool *pgxpool.Pool, items []ImportI
 }
 
 func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, items []ImportItem, mode string, allowed []string) (ImportResult, error) {
+	return ImportCatalogBeersWithPosters(ctx, pool, nil, items, mode, allowed)
+}
+
+// ImportCatalogBeersWithPosters 在单事务导入历史酒单的同时落盘压缩包内酒标并在失败/跳过/替换时自动回收孤儿图片。
+func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, store *PosterStore, items []ImportItem, mode string, allowed []string) (ImportResult, error) {
 	if mode == "" {
 		mode = "merge"
 	}
 	if mode != "merge" && mode != "skip" {
 		return ImportResult{}, platform.UserErr("不支持的导入模式")
+	}
+
+	work := slices.Clone(items)
+	for _, it := range work {
+		if strings.TrimSpace(it.Beer.Name) == "" {
+			return ImportResult{}, platform.UserErr("酒款名称不能为空")
+		}
+	}
+
+	var createdFiles []string
+	createdSet := make(map[string]bool)
+	committed := false
+	defer func() {
+		if !committed && store != nil {
+			for _, u := range createdFiles {
+				_ = store.Delete(u)
+			}
+		}
+	}()
+
+	if store != nil {
+		for i := range work {
+			it := &work[i]
+			switch {
+			case it.Poster != nil && len(it.Poster.Data) > 0:
+				savedURL, err := store.SaveBytes(it.Poster.Data)
+				if err != nil {
+					return ImportResult{}, err
+				}
+				createdFiles = append(createdFiles, savedURL)
+				createdSet[savedURL] = true
+				it.Beer.PosterURL = savedURL
+				it.Mask.PosterURL = true
+			case strings.HasPrefix(strings.ToLower(strings.TrimSpace(it.Beer.PosterURL)), "http"):
+				if savedURL, err := store.SaveFromURL(ctx, it.Beer.PosterURL); err == nil && savedURL != "" {
+					createdFiles = append(createdFiles, savedURL)
+					createdSet[savedURL] = true
+					it.Beer.PosterURL = savedURL
+					it.Mask.PosterURL = true
+				}
+			case IsLocalPosterURL(it.Beer.PosterURL) && !store.Exists(it.Beer.PosterURL):
+				it.Beer.PosterURL = ""
+			}
+		}
 	}
 
 	tx, err := pool.Begin(ctx)
@@ -389,7 +451,8 @@ func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, i
 	defer tx.Rollback(ctx)
 
 	var res ImportResult
-	for _, it := range items {
+	var cleanupCandidates []string
+	for _, it := range work {
 		if strings.TrimSpace(it.Beer.Name) == "" {
 			return ImportResult{}, platform.UserErr("酒款名称不能为空")
 		}
@@ -403,6 +466,9 @@ func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, i
 				return ImportResult{}, err
 			}
 			if tag.RowsAffected() == 0 {
+				if createdSet[c.PosterURL] {
+					cleanupCandidates = append(cleanupCandidates, c.PosterURL)
+				}
 				res.Skipped++
 			} else {
 				res.Inserted++
@@ -444,11 +510,16 @@ func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, i
 		); err != nil {
 			return ImportResult{}, err
 		}
+		if existing.PosterURL != merged.PosterURL && IsLocalPosterURL(existing.PosterURL) {
+			cleanupCandidates = append(cleanupCandidates, existing.PosterURL)
+		}
 		res.Updated++
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return ImportResult{}, err
 	}
+	committed = true
+	CleanupUnusedPosters(ctx, pool, store, cleanupCandidates...)
 	return res, nil
 }

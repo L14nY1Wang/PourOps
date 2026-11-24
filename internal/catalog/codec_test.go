@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -370,6 +372,110 @@ func TestValidPosterURL(t *testing.T) {
 	} {
 		if platform.ValidPosterURL(badURL) {
 			t.Errorf("危险或非法 URL %q 应被拦截", badURL)
+		}
+	}
+}
+
+func TestCatalogZIPArchiveRoundTripAndSecurity(t *testing.T) {
+	store, err := NewPosterStore(filepath.Join(t.TempDir(), "posters"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	u1, err := store.SaveBytes(samplePNGBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	u2, err := store.SaveBytes(sampleJPEGBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	items := []CatalogBeer{
+		{Brewery: "酿酒狗", Name: "朋克 IPA", Style: "IPA - American", Category: "IPA", PosterURL: u1, CapacityML: 20000, CostCents: 120000, Price330: 4500},
+		{Brewery: "创始者", Name: "早餐世涛", Style: "Stout", Category: "世涛", PosterURL: u1, CapacityML: 20000, CostCents: 140000, Price330: 7800},
+		{Brewery: "高岩", Name: "干型西打", Style: "Dry Cider", Category: "西打", PosterURL: u2, CapacityML: 20000, CostCents: 90000, Price330: 4200},
+	}
+
+	reg := NewDefaultCodecRegistryWithOptions(nil, store)
+	zipCodec, ok := reg.Find("zip")
+	if !ok {
+		t.Fatal("missing zip codec")
+	}
+	rawZip, err := zipCodec.Encode(items, "PourOps", time.Date(2026, 11, 24, 12, 0, 0, 0, platform.ReportZone))
+	if err != nil {
+		t.Fatalf("ZIP Encode: %v", err)
+	}
+
+	zr, err := zip.NewReader(bytes.NewReader(rawZip), int64(len(rawZip)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	fname1, _ := ParsePosterFilename(u1)
+	fname2, _ := ParsePosterFilename(u2)
+	if !names["catalog.json"] || !names["posters/"+fname1] || !names["posters/"+fname2] {
+		t.Fatalf("ZIP 条目缺失: %+v", names)
+	}
+	// 相同海报文件只应打入一份。
+	if len(zr.File) != 3 {
+		t.Fatalf("ZIP 条目数 = %d，应去重为 3（1 manifest + 2 posters）", len(zr.File))
+	}
+
+	decoded, err := reg.Decode("beer-catalog.zip", rawZip)
+	if err != nil {
+		t.Fatalf("ZIP Decode: %v", err)
+	}
+	if len(decoded) != 3 {
+		t.Fatalf("decoded len = %d", len(decoded))
+	}
+	if decoded[0].Poster == nil || !bytes.Equal(decoded[0].Poster.Data, samplePNGBytes()) {
+		t.Fatalf("第 1 条解码酒标字节不对: %+v", decoded[0].Poster)
+	}
+	if decoded[2].Poster == nil || !bytes.Equal(decoded[2].Poster.Data, sampleJPEGBytes()) {
+		t.Fatalf("第 3 条解码酒标字节不对: %+v", decoded[2].Poster)
+	}
+
+	// 支持额外包了一层目录的压缩包（例如 macOS 解压后再压缩）。
+	var nestedBuf bytes.Buffer
+	zw := zip.NewWriter(&nestedBuf)
+	for _, f := range zr.File {
+		rc, _ := f.Open()
+		b, _ := io.ReadAll(rc)
+		_ = rc.Close()
+		w, _ := zw.Create("backup-folder/" + f.Name)
+		_, _ = w.Write(b)
+	}
+	_ = zw.Close()
+	nestedItems, err := reg.Decode("nested.zip", nestedBuf.Bytes())
+	if err != nil || len(nestedItems) != 3 || nestedItems[0].Poster == nil {
+		t.Fatalf("嵌套单层目录 ZIP 解码失败: len=%d err=%v", len(nestedItems), err)
+	}
+
+	// 安全边界：拦截 zip-slip、SVG 伪装以及缺失 catalog.json 的压缩包。
+	makeBadZip := func(entries map[string][]byte) []byte {
+		var b bytes.Buffer
+		w := zip.NewWriter(&b)
+		for k, v := range entries {
+			ew, _ := w.Create(k)
+			_, _ = ew.Write(v)
+		}
+		_ = w.Close()
+		return b.Bytes()
+	}
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"zip-slip", makeBadZip(map[string][]byte{"catalog.json": []byte(`{"items":[{"name":"A","poster_file":"../evil.png"}]}`), "../evil.png": samplePNGBytes()})},
+		{"fake-svg", makeBadZip(map[string][]byte{"catalog.json": []byte(`{"items":[{"name":"A","poster_file":"posters/a.png"}]}`), "posters/a.png": []byte(`<svg/>`)})},
+		{"no-catalog", makeBadZip(map[string][]byte{"posters/a.png": samplePNGBytes()})},
+		{"not-zip", []byte("厂牌,酒名\nA,B\n")},
+	} {
+		if _, err := zipCodec.Decode(tc.raw); err == nil {
+			t.Errorf("%s 应拒绝非法压缩包", tc.name)
 		}
 	}
 }

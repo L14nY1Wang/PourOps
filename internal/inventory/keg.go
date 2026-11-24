@@ -563,17 +563,23 @@ func PurchaseBeerTx(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, cou
 
 // PurchaseBeerTxWithCategories 使用门店当前动态酒款分类表完成进货入库、建桶与历史酒单沉淀。
 func PurchaseBeerTxWithCategories(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, count, capacityML, costCents int, allowed []string) (int64, error) {
+	id, _, err := PurchaseBeerTxWithPosterCleanup(ctx, pool, b, count, capacityML, costCents, allowed)
+	return id, err
+}
+
+// PurchaseBeerTxWithPosterCleanup 在完成进货入库后同时返回被替换的旧本地酒标地址，供提交后清理孤儿图片。
+func PurchaseBeerTxWithPosterCleanup(ctx context.Context, pool *pgxpool.Pool, b catalog.Beer, count, capacityML, costCents int, allowed []string) (int64, []string, error) {
 	b.Brewery = strings.TrimSpace(b.Brewery)
 	b.Name = strings.TrimSpace(b.Name)
 	b.Style = strings.TrimSpace(b.Style)
 	b.PosterURL = strings.TrimSpace(b.PosterURL)
 	if _, err := platform.ValidateBeerFieldsWithCategories(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder, allowed); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	defer tx.Rollback(ctx) // 已提交时回滚是空操作
 
@@ -581,10 +587,14 @@ func PurchaseBeerTxWithCategories(ctx context.Context, pool *pgxpool.Pool, b cat
 	target := b
 	existing, err := catalog.FindBeerForUpdate(ctx, tx, b.Brewery, b.Name)
 	var extraAllowed []string
+	var oldPosters []string
 	switch {
 	case err == nil:
 		if existing.Category != "" {
 			extraAllowed = append(extraAllowed, existing.Category)
+		}
+		if b.PosterURL != "" && existing.PosterURL != "" && existing.PosterURL != b.PosterURL {
+			oldPosters = append(oldPosters, existing.PosterURL)
 		}
 		merged := existing
 		if b.Brewery != "" {
@@ -623,24 +633,33 @@ func PurchaseBeerTxWithCategories(ctx context.Context, pool *pgxpool.Pool, b cat
 		target = merged
 	case errors.Is(err, pgx.ErrNoRows):
 	default:
-		return 0, err
+		return 0, nil, err
+	}
+
+	if target.PosterURL != "" {
+		if prevCatPoster := catalog.LookupCatalogPoster(ctx, tx, target.Brewery, target.Name); prevCatPoster != "" && prevCatPoster != target.PosterURL {
+			oldPosters = append(oldPosters, prevCatPoster)
+		}
 	}
 
 	id, err := catalog.SaveBeerWithCategories(ctx, tx, target, allowed, extraAllowed...)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if err := PurchaseKegs(ctx, tx, id, count, capacityML, costCents); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	detail := fmt.Sprintf("%d 桶 × %dml，进价 %s/桶", count, capacityML, platform.PriceText(costCents))
 	if err := platform.LogOperation(ctx, tx, platform.OpPurchase, platform.BeerSubject(target.Brewery, target.Name), detail); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if err := catalog.UpsertCatalogFromBeerWithCategories(ctx, tx, target, capacityML, costCents, true, allowed); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
-	return id, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return 0, nil, err
+	}
+	return id, oldPosters, nil
 }
 
 // LatestBeerKegSpec 查询酒款当前或最近关联的桶容与进价（缺失时回退历史酒单或默认 20000ml），供编辑页实时测算用。

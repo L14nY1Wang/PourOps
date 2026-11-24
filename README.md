@@ -11,7 +11,7 @@
 ## 核心能力
 
 - **酒单 · 桶装与盈亏测算（`/admin/beers`、`/admin/kegs`）**：进货入库、按号位开桶上架、下架不挪位自动标为售罄；支持按桶进价、容量与可配置**默认可售比例**（默认 `80%`，预留打酒损耗）及**目标毛利率**（默认 `50%`）自动计算回本线与单杯推荐价，并在入库/编辑/单桶页提供实时交互式试算滑块。
-- **历史酒单与多源检索（`/admin/beers/catalog`）**：独立沉淀酒款档案（厂牌 + 酒名唯一去重），支持 CSV / JSON 批量导入导出（`catalog.Codec`），并集成多源酒款搜索聚合接口，单源超时或失败时自动降级。
+- **后台历史酒单档案与本地酒标存储**：进货与编辑自动按「厂牌 + 酒名」去重沉淀历史资料并支持多源搜索自动填充；上传或外链抓取的酒标均统一保存为本地唯一文件名图片（`/posters/{name}`），更换或清空时自动清理旧文件仅保留最新一张，并在系统设置提供自包含 `.zip` 压缩包（含 `catalog.json` 与酒标图片）批量导入导出。
 - **POS 点餐与拆单结账（`/pos/`）**：支持吧台/桌位管理、多杯型（`150 / 330 / 500ml`）子行独立增减与勾选拆单；结账在同一数据库事务内串行锁单并落库 `keg_pours` / `retail_sales` / `payments`，库存不足整单回滚。
 - **经营概览与只读审计流水（`/admin/`、`/admin/records`）**：营收/毛利趋势、100% 容量摊销口径核查、POS 分时段实收、零售低库存预警，以及基于 PostgreSQL `RepeatableRead + ReadOnly` 快照的销售订单与营运流水审计台账。
 - **账号权限与两步验证（`/admin/users`、`/account/security`）**：BOSS / 店长 / 店员三角色隔离；支持基于 TOTP 的两步验证（AES-GCM 密钥加密 + 一次性恢复码 + 连续试错锁定 + `auth_version` 全端会话失效）。
@@ -34,7 +34,7 @@
 │   ├── ui/                         # 布局 ViewModel（Layout/Page）、角色守卫、{{asset}} 指纹与模板渲染器
 │   ├── settings/                   # 门店系统参数缓存（SettingsStore）与 BOSS 设置页面
 │   ├── auth/                       # 会话签名、权限守卫、账号管理、TOTP 2FA 与恢复码
-│   ├── catalog/                    # 酒款主档、历史酒单维护与 Codec 导入导出注册表
+│   ├── catalog/                    # 酒款主档、历史酒单后台档案、本地酒标存储（PosterStore）与 ZIP Codec 导入导出
 │   ├── lookup/                     # 多源酒款检索聚合（Provider 接口与本地/远端检索实现）
 │   ├── screen/                     # 电视大屏接口（/screen/、/screen/playlist.json、/api/screen/playlist、SSE Hub）
 │   ├── inventory/                  # 酒桶进销存、开/结桶状态机、可配置盈亏测算与零售 SKU 管理
@@ -50,7 +50,7 @@
 
 ### 编译期扩展点与事件机制
 
-- **`catalog.Codec` / `CodecRegistry`**：注册新的历史酒单导入导出格式（默认内置 CSV / JSON）。
+- **`catalog.Codec` / `CodecRegistry`**：注册历史酒单导入导出格式（默认内置带本地酒标图片的 ZIP 压缩包以及内部 CSV / JSON 编解码器）。
 - **`lookup.Provider` / `Service`**：扩展酒款检索数据源，支持按序聚合与单源故障降级。
 - **`pos.PaymentGateway` & `pos.ReceiptPrinter`**：替换或扩展 POS 收款渠道确认与热敏小票打印（默认 `ManualGateway` / `NoopPrinter`）。
 - **`event.EventBus` & `WebhookDispatcher`**：支持 `screen.changed`、`beer.purchased`、`beer.tapped`、`keg.finished`、`order.paid`、`retail.low_stock`、`webhook.test` 领域事件（均在数据库事务 `Commit` 成功后发布）。
@@ -94,6 +94,7 @@ ADDR='127.0.0.1:8080' \
 | `DATABASE_URL` | `postgres://localhost:5432/bar?sslmode=disable` | PostgreSQL 连接串 |
 | `ADDR` | `:8080` | HTTP 监听地址 |
 | `BRAND` | `PourOps` | 默认门店名称（首次后可在 `/admin/settings` 持久化修改） |
+| `POSTER_DIR` | `posters` | 本地酒标图片持久化目录（生产部署建议放在可写持久卷或随二进制目录同级） |
 | `BOSS_PASSWORD` | 无 | 仅在 `users` 表为空时初始化 `boss` 账号，要求 ≥6 位，不写入日志 |
 | `SESSION_SECRET` | 进程随机 | 会话与 2FA 挑战签名密钥；不设则每次重启后现有会话失效 |
 | `TWO_FACTOR_KEY` | 无 | 32 字节十六进制密钥（`openssl rand -hex 32`），用于加密 TOTP 密钥；缺失时不可新启用 2FA |

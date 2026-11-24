@@ -14,6 +14,7 @@ import (
 
 	"pourops/internal/app"
 	"pourops/internal/auth"
+	"pourops/internal/catalog"
 	"pourops/internal/event"
 	"pourops/internal/lookup"
 	"pourops/internal/platform"
@@ -26,6 +27,7 @@ func main() {
 	dsn := platform.Env("DATABASE_URL", "postgres://localhost:5432/bar?sslmode=disable")
 	addr := platform.Env("ADDR", ":8080")
 	brand := platform.Env("BRAND", "PourOps")
+	posterDir := platform.Env("POSTER_DIR", "posters")
 	secret := []byte(platform.Env("SESSION_SECRET", platform.RandomHex(32)))
 	jiuheBaseURL := platform.Env("JIUHE_API_BASE", lookup.DefaultJiuheBaseURL)
 
@@ -55,6 +57,18 @@ func main() {
 	webhooks.Attach(bus)
 	screenHub := screen.NewHub(bus)
 
+	posterStore, err := catalog.NewPosterStore(posterDir)
+	if err != nil {
+		log.Fatalf("初始化酒标存储失败: %v", err)
+	}
+	go func() {
+		locCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if n := catalog.LocalizeAllPosters(locCtx, pool, posterStore); n > 0 {
+			log.Printf("已将 %d 个远程酒标本地化保存到 %s", n, posterStore.Dir())
+		}
+	}()
+
 	assets, err := app.NewAssets()
 	if err != nil {
 		log.Fatalf("构建静态资源清单失败: %v", err)
@@ -69,6 +83,7 @@ func main() {
 		ScreenHub:    screenHub,
 		Assets:       assets,
 		Renderer:     renderer,
+		Posters:      posterStore,
 		Secret:       secret,
 		JiuheBaseURL: jiuheBaseURL,
 	})

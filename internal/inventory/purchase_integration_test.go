@@ -1,12 +1,16 @@
 package inventory
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -329,5 +333,149 @@ func TestDynamicCategoriesPurchaseEditAndDeleteFallback(t *testing.T) {
 	})
 	if wNewRejected.Code != http.StatusBadRequest || !strings.Contains(wNewRejected.Body.String(), "酒款分类") {
 		t.Fatalf("删除预设分类后新进货应返回 400 且提示酒款分类，实际 code=%d", wNewRejected.Code)
+	}
+}
+
+type invRoundTripFn func(*http.Request) (*http.Response, error)
+
+func (f invRoundTripFn) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func multipartBeerPost(handler http.HandlerFunc, fields url.Values, fileField, fileName string, fileData []byte) *httptest.ResponseRecorder {
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for k, vs := range fields {
+		for _, v := range vs {
+			_ = mw.WriteField(k, v)
+		}
+	}
+	if fileField != "" && len(fileData) > 0 {
+		fw, _ := mw.CreateFormFile(fileField, fileName)
+		_, _ = fw.Write(fileData)
+	}
+	_ = mw.Close()
+
+	req := httptest.NewRequest(http.MethodPost, "/", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	w := httptest.NewRecorder()
+	handler(w, req)
+	return w
+}
+
+func countRegularFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+func TestPosterUploadRemoteFetchReplaceAndCleanupKeepsOnlyLatest(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	svc, _, _ := newTestService(t, pool)
+	ctx := context.Background()
+
+	pngBytes := []byte{
+		0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n',
+		0x00, 0x00, 0x00, 0x0D, 'I', 'H', 'D', 'R',
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
+	}
+	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9}
+
+	svc.posters.SetHTTPClientForTest(&http.Client{Transport: invRoundTripFn(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(bytes.NewReader(pngBytes)),
+		}, nil
+	})}, false)
+
+	// 1. 上传本地 PNG 进货 -> 生成唯一 /posters/*.png 并写入 beers 与 beer_catalog。
+	w1 := multipartBeerPost(svc.PurchaseBeer, url.Values{
+		"brewery": {"测试厂"}, "name": {"海豹"}, "style": {"IPA"}, "category": {"IPA"},
+		"kegs": {"1"}, "capacity_ml": {"20000"}, "cost": {"1000"}, "price_330": {"45"},
+	}, "poster_file", "logo.png", pngBytes)
+	if w1.Code != http.StatusSeeOther {
+		t.Fatalf("上传酒标进货失败: code=%d body=%s", w1.Code, w1.Body.String())
+	}
+	var beerID int64
+	var poster1, catPoster1 string
+	if err := pool.QueryRow(ctx, `select id, poster_url from beers where name='海豹'`).Scan(&beerID, &poster1); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select poster_url from beer_catalog where name='海豹'`).Scan(&catPoster1); err != nil {
+		t.Fatal(err)
+	}
+	if !catalog.IsLocalPosterURL(poster1) || poster1 != catPoster1 {
+		t.Fatalf("上传酒标未同步保存到两表: beer=%q catalog=%q", poster1, catPoster1)
+	}
+	if files := countRegularFiles(t, svc.posters.Dir()); len(files) != 1 || filepath.Base(poster1) != files[0] {
+		t.Fatalf("磁盘应仅有 1 个酒标文件，实际 %+v", files)
+	}
+
+	// 2. 编辑更换为 JPEG -> 新图生成唯一文件名，旧 PNG 被清理只留最新一张。
+	w2 := multipartBeerPost(svc.SaveBeer, url.Values{
+		"id": {fmt.Sprintf("%d", beerID)}, "brewery": {"测试厂"}, "name": {"海豹"}, "style": {"IPA"}, "category": {"IPA"},
+		"poster_url": {poster1}, "price_330": {"48"},
+	}, "poster_file", "new.jpg", jpegBytes)
+	if w2.Code != http.StatusSeeOther {
+		t.Fatalf("替换酒标编辑失败: code=%d body=%s", w2.Code, w2.Body.String())
+	}
+	var poster2, catPoster2 string
+	if err := pool.QueryRow(ctx, `select poster_url from beers where id=$1`, beerID).Scan(&poster2); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select poster_url from beer_catalog where name='海豹'`).Scan(&catPoster2); err != nil {
+		t.Fatal(err)
+	}
+	if !catalog.IsLocalPosterURL(poster2) || poster2 == poster1 || poster2 != catPoster2 || !strings.HasSuffix(poster2, ".jpg") {
+		t.Fatalf("替换后酒标路径不对: p1=%q p2=%q cat=%q", poster1, poster2, catPoster2)
+	}
+	if svc.posters.Exists(poster1) {
+		t.Fatalf("替换后旧酒标 %s 应被删除", poster1)
+	}
+	if files := countRegularFiles(t, svc.posters.Dir()); len(files) != 1 || filepath.Base(poster2) != files[0] {
+		t.Fatalf("替换后磁盘应只留最新 1 个酒标文件，实际 %+v", files)
+	}
+
+	// 3. 编辑清空 poster_url -> 两表均清空且最新 JPEG 也被清理。
+	w3 := purchasePostForm(svc.SaveBeer, url.Values{
+		"id": {fmt.Sprintf("%d", beerID)}, "brewery": {"测试厂"}, "name": {"海豹"}, "style": {"IPA"}, "category": {"IPA"},
+		"poster_url": {""}, "price_330": {"48"},
+	})
+	if w3.Code != http.StatusSeeOther {
+		t.Fatalf("清空酒标保存失败: code=%d", w3.Code)
+	}
+	var poster3, catPoster3 string
+	_ = pool.QueryRow(ctx, `select poster_url from beers where id=$1`, beerID).Scan(&poster3)
+	_ = pool.QueryRow(ctx, `select poster_url from beer_catalog where name='海豹'`).Scan(&catPoster3)
+	if poster3 != "" || catPoster3 != "" {
+		t.Fatalf("清空酒标应同步清除两表: beer=%q catalog=%q", poster3, catPoster3)
+	}
+	if files := countRegularFiles(t, svc.posters.Dir()); len(files) != 0 {
+		t.Fatalf("清空后磁盘应无残留文件，实际 %+v", files)
+	}
+
+	// 4. 填写外链 URL 进货 -> 提交时自动拉取并保存为本地唯一文件名。
+	w4 := purchasePostForm(svc.PurchaseBeer, url.Values{
+		"brewery": {"远端厂"}, "name": {"海浪"}, "style": {"Lager"}, "category": {"拉格"},
+		"poster_url": {"https://cdn.example/wave.png"}, "kegs": {"1"}, "capacity_ml": {"20000"}, "cost": {"900"}, "price_330": {"38"},
+	})
+	if w4.Code != http.StatusSeeOther {
+		t.Fatalf("外链进货失败: code=%d body=%s", w4.Code, w4.Body.String())
+	}
+	var poster4 string
+	if err := pool.QueryRow(ctx, `select poster_url from beers where name='海浪'`).Scan(&poster4); err != nil {
+		t.Fatal(err)
+	}
+	if !catalog.IsLocalPosterURL(poster4) || !svc.posters.Exists(poster4) {
+		t.Fatalf("外链未转为本地保存: %q", poster4)
 	}
 }

@@ -8,12 +8,11 @@
     {{if .Keg.ID}}
     <a class="button button--secondary" href="/admin/kegs/{{.Keg.ID}}"><i class="bi bi-graph-up-arrow" aria-hidden="true"></i>查看酒桶盈亏</a>
     {{end}}
-    <a class="button button--secondary" href="/admin/beers/catalog"><i class="bi bi-journal-bookmark" aria-hidden="true"></i>历史酒单</a>
     <a class="button button--secondary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
   </div>
 </div>
 
-<form class="admin-form card editor-card" method="post" action="/admin/beers">
+<form class="admin-form card editor-card" method="post" action="/admin/beers" enctype="multipart/form-data">
   <input type="hidden" name="id" value="{{if .Beer.ID}}{{.Beer.ID}}{{end}}">
   <div class="card__content">
     <fieldset class="form-section">
@@ -29,12 +28,18 @@
             <div class="poster-placeholder" id="poster-preview-fallback" {{if .Beer.PosterURL}}hidden{{end}}>
               <i class="bi bi-image" aria-hidden="true"></i>
               <span id="poster-placeholder-title">暂无酒标</span>
-              <small id="poster-placeholder-note">搜索酒名自动填充，或粘贴图片地址</small>
+              <small id="poster-placeholder-note">搜索酒名自动填充、上传图片或粘贴图片地址</small>
             </div>
           </div>
           <div class="editor-field">
             <label class="label" for="poster_url">酒标图片地址</label>
             <input class="form-control" type="text" id="poster_url" name="poster_url" value="{{.Beer.PosterURL}}" placeholder="https://...">
+            <div class="description">外链自动本地化保存；更换或清空酒标后将自动删除旧图片</div>
+          </div>
+          <div class="editor-field">
+            <label class="label" for="poster_file">替换上传本地酒标</label>
+            <input class="form-control" type="file" id="poster_file" name="poster_file" accept="image/jpeg,image/png,image/webp,image/gif">
+            <div class="description">支持 JPG / PNG / WebP / GIF（≤ 5MB），仅保留最新一张</div>
           </div>
         </div>
 

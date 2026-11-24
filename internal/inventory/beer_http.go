@@ -1,15 +1,13 @@
 package inventory
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"log"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/jackc/pgx/v5"
 
 	"pourops/internal/catalog"
 	"pourops/internal/event"
@@ -17,6 +15,61 @@ import (
 	"pourops/internal/settings"
 	"pourops/internal/ui"
 )
+
+func parseBeerRequestForm(w http.ResponseWriter, r *http.Request) (func(), error) {
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if strings.HasPrefix(ct, "multipart/") {
+		r.Body = http.MaxBytesReader(w, r.Body, catalog.MaxPosterBytes+2<<20)
+		if err := r.ParseMultipartForm(catalog.MaxPosterBytes); err != nil {
+			return func() {}, platform.UserErr("上传图片过大或表单格式不正确（酒标上限 5MB）")
+		}
+		return func() {
+			if r.MultipartForm != nil {
+				_ = r.MultipartForm.RemoveAll()
+			}
+		}, nil
+	}
+	if err := r.ParseForm(); err != nil {
+		return func() {}, platform.UserErr("表单格式不正确")
+	}
+	return func() {}, nil
+}
+
+func (s *Service) resolveSubmittedPoster(ctx context.Context, r *http.Request, rawURL string) (finalURL string, createdLocal string, err error) {
+	file, _, ferr := r.FormFile("poster_file")
+	switch {
+	case ferr == nil:
+		defer file.Close()
+		if s.posters == nil {
+			return "", "", platform.UserErr("酒标存储未初始化")
+		}
+		savedURL, saveErr := s.posters.SaveReader(file)
+		if saveErr != nil {
+			return "", "", saveErr
+		}
+		return savedURL, savedURL, nil
+	case errors.Is(ferr, http.ErrMissingFile), errors.Is(ferr, http.ErrNotMultipart):
+	default:
+		return "", "", platform.UserErr("读取上传酒标失败，请重试")
+	}
+
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return "", "", nil
+	}
+	lower := strings.ToLower(rawURL)
+	if (strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")) && s.posters != nil {
+		savedURL, fetchErr := s.posters.SaveFromURL(ctx, rawURL)
+		if fetchErr != nil {
+			return "", "", fetchErr
+		}
+		return savedURL, savedURL, nil
+	}
+	if catalog.IsLocalPosterURL(rawURL) && s.posters != nil && !s.posters.Exists(rawURL) {
+		return "", "", platform.UserErr("指定的本地酒标文件不存在，请重新上传或粘贴图片地址")
+	}
+	return rawURL, "", nil
+}
 
 // BeerRow 是酒单列表的一行：酒款 + 当前在售的那一桶（没有则 nil）+ 上次结桶复盘。
 type BeerRow struct {
@@ -124,40 +177,13 @@ func (s *Service) PurchasePage(w http.ResponseWriter, r *http.Request) {
 		KegCount: 1,
 		Pricing:  s.currentPricing(),
 	}
-	if rawID := strings.TrimSpace(r.URL.Query().Get("catalog_id")); rawID != "" {
-		if cid, err := strconv.ParseInt(rawID, 10, 64); err == nil && cid > 0 && s.pool != nil {
-			c, err := catalog.GetCatalogBeer(r.Context(), s.pool, cid)
-			switch {
-			case err == nil:
-				data.Beer = catalog.Beer{
-					Brewery:   c.Brewery,
-					Name:      c.Name,
-					Style:     c.Style,
-					Category:  c.Category,
-					ABV:       c.ABV,
-					IBU:       c.IBU,
-					Price150:  c.Price150,
-					Price330:  c.Price330,
-					Price500:  c.Price500,
-					UT:        c.UT,
-					UTCount:   c.UTCount,
-					Tags:      c.Tags,
-					PosterURL: c.PosterURL,
-				}
-				if c.CapacityML > 0 {
-					data.Keg.CapacityML = c.CapacityML
-				}
-				data.CostInput = c.CostInput()
-				data.Msg = fmt.Sprintf("已从历史酒单带入「%s」的资料，核对进货桶数与价格后即可入库", platform.BeerSubject(c.Brewery, c.Name))
-			case errors.Is(err, pgx.ErrNoRows):
-				data.Err = "指定的历史酒款不存在，可重新搜索或手动填写"
-			}
-		}
-	}
 	s.renderer.Render(w, r, "admin/purchase.html", data)
 }
 
 func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
+	cleanupForm, reqErr := parseBeerRequestForm(w, r)
+	defer cleanupForm()
+
 	rawCost := strings.TrimSpace(r.FormValue("cost"))
 	rawKegs := strings.TrimSpace(r.FormValue("kegs"))
 	rawCap := strings.TrimSpace(r.FormValue("capacity_ml"))
@@ -211,6 +237,9 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	switch {
+	case reqErr != nil:
+		fail(http.StatusBadRequest, reqErr.Error())
+		return
 	case formErr != nil:
 		fail(http.StatusBadRequest, formErr.Error())
 		return
@@ -227,7 +256,27 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, costErr.Error())
 		return
 	}
-	beerID, err := PurchaseBeerTxWithCategories(r.Context(), s.pool, b, count, capacity, costCents, cats)
+
+	ctx := r.Context()
+	finalPoster, createdLocal, posterErr := s.resolveSubmittedPoster(ctx, r, parsed.PosterURL)
+	if posterErr != nil {
+		if msg, ok := platform.UserErrorMessage(posterErr); ok {
+			fail(http.StatusBadRequest, msg)
+			return
+		}
+		log.Printf("purchase poster: %v", posterErr)
+		fail(http.StatusInternalServerError, "保存酒标失败，请稍后重试")
+		return
+	}
+	b.PosterURL = finalPoster
+	committed := false
+	defer func() {
+		if !committed && createdLocal != "" && s.posters != nil {
+			_ = s.posters.Delete(createdLocal)
+		}
+	}()
+
+	beerID, oldPosters, err := PurchaseBeerTxWithPosterCleanup(ctx, s.pool, b, count, capacity, costCents, cats)
 	if err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			fail(http.StatusBadRequest, msg)
@@ -237,6 +286,9 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusInternalServerError, "入库失败，请稍后重试")
 		return
 	}
+	committed = true
+	catalog.CleanupUnusedPosters(ctx, s.pool, s.posters, oldPosters...)
+
 	subject := platform.BeerSubject(b.Brewery, b.Name)
 	s.publish(r, event.EventScreenChanged, subject, map[string]any{
 		"action":  "beer.purchased",
@@ -334,10 +386,9 @@ func (s *Service) EditBeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "表单格式不正确", http.StatusBadRequest)
-		return
-	}
+	cleanupForm, reqErr := parseBeerRequestForm(w, r)
+	defer cleanupForm()
+
 	ctx := r.Context()
 	var beerID int64
 	if id := r.FormValue("id"); id != "" {
@@ -345,9 +396,18 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 	}
 	cats := s.currentCategories()
 	var extraAllowed []string
+	var oldPosters []string
 	if beerID > 0 && s.pool != nil {
-		if ex, err := catalog.GetBeer(ctx, s.pool, beerID); err == nil && ex.Category != "" {
-			extraAllowed = append(extraAllowed, ex.Category)
+		if ex, err := catalog.GetBeer(ctx, s.pool, beerID); err == nil {
+			if ex.Category != "" {
+				extraAllowed = append(extraAllowed, ex.Category)
+			}
+			if ex.PosterURL != "" {
+				oldPosters = append(oldPosters, ex.PosterURL)
+			}
+			if prevCat := catalog.LookupCatalogPoster(ctx, s.pool, ex.Brewery, ex.Name); prevCat != "" {
+				oldPosters = append(oldPosters, prevCat)
+			}
 		}
 	}
 
@@ -391,6 +451,10 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 			Pricing:   pricing,
 		})
 	}
+	if reqErr != nil {
+		renderFail(http.StatusBadRequest, reqErr.Error())
+		return
+	}
 	if formErr != nil {
 		renderFail(http.StatusBadRequest, formErr.Error())
 		return
@@ -399,6 +463,29 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusBadRequest, sortErr.Error())
 		return
 	}
+
+	finalPoster, createdLocal, posterErr := s.resolveSubmittedPoster(ctx, r, parsed.PosterURL)
+	if posterErr != nil {
+		if msg, ok := platform.UserErrorMessage(posterErr); ok {
+			renderFail(http.StatusBadRequest, msg)
+			return
+		}
+		log.Printf("save beer poster (%d): %v", b.ID, posterErr)
+		renderFail(http.StatusInternalServerError, "保存酒标失败，请稍后重试")
+		return
+	}
+	b.PosterURL = finalPoster
+	committed := false
+	defer func() {
+		if !committed && createdLocal != "" && s.posters != nil {
+			_ = s.posters.Delete(createdLocal)
+		}
+	}()
+
+	if prevCat := catalog.LookupCatalogPoster(ctx, s.pool, b.Brewery, b.Name); prevCat != "" {
+		oldPosters = append(oldPosters, prevCat)
+	}
+
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		log.Printf("save beer begin (%d): %v", b.ID, err)
@@ -416,7 +503,7 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return
 	}
-	if err := catalog.UpsertCatalogFromBeerWithCategories(ctx, tx, b, 0, 0, false, cats); err != nil {
+	if err := catalog.UpsertCatalogFromBeerFull(ctx, tx, b, 0, 0, false, true, cats); err != nil {
 		log.Printf("save beer catalog sync (%d): %v", b.ID, err)
 		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return
@@ -426,6 +513,15 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return
 	}
+	committed = true
+	cleanupCandidates := make([]string, 0, len(oldPosters))
+	for _, oldURL := range oldPosters {
+		if oldURL != b.PosterURL {
+			cleanupCandidates = append(cleanupCandidates, oldURL)
+		}
+	}
+	catalog.CleanupUnusedPosters(ctx, s.pool, s.posters, cleanupCandidates...)
+
 	s.publish(r, event.EventScreenChanged, platform.BeerSubject(b.Brewery, b.Name), map[string]any{
 		"action":  "beer.saved",
 		"beer_id": savedID,
@@ -450,6 +546,12 @@ func (s *Service) ToggleBeerHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) DeleteBeerHandler(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var oldPoster string
+	if s.pool != nil {
+		if b, err := catalog.GetBeer(r.Context(), s.pool, id); err == nil {
+			oldPoster = b.PosterURL
+		}
+	}
 	if err := catalog.DeleteBeer(r.Context(), s.pool, id); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			http.Redirect(w, r, "/admin/beers?err="+platform.URLMsg(msg), http.StatusSeeOther)
@@ -459,6 +561,7 @@ func (s *Service) DeleteBeerHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/beers?err="+platform.URLMsg("删除失败，请稍后重试"), http.StatusSeeOther)
 		return
 	}
+	catalog.CleanupUnusedPosters(r.Context(), s.pool, s.posters, oldPoster)
 	s.publish(r, event.EventScreenChanged, "", map[string]any{
 		"action":  "beer.deleted",
 		"beer_id": id,

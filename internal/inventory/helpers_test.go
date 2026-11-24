@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"pourops/internal/catalog"
 	"pourops/internal/event"
 	"pourops/internal/settings"
 	"pourops/internal/ui"
@@ -20,5 +21,9 @@ func newTestService(t *testing.T, pool *pgxpool.Pool) (*Service, *settings.Setti
 	t.Helper()
 	cfg := settings.NewSettingsStore(pool, "PourOps")
 	bus := event.NewEventBus()
-	return NewService(pool, testRenderer(t), cfg, bus), cfg, bus
+	posters, err := catalog.NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewService(pool, testRenderer(t), cfg, bus, posters), cfg, bus
 }

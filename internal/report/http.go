@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"pourops/internal/platform"
 	"pourops/internal/settings"
 	"pourops/internal/ui"
 )
@@ -28,6 +29,7 @@ type DashboardPage struct {
 type AnalyticsPage struct {
 	ui.Layout
 	Sales        SalesInsights
+	Audience     AudienceInsights
 	ReportPeriod string
 	ReportStart  string
 	ReportEnd    string
@@ -140,6 +142,13 @@ func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
 	s.renderer.Render(w, r, "admin/dashboard.html", data)
 }
 
+func (s *Service) currentCategories() []string {
+	if s.settings != nil {
+		return s.settings.BeerCategories()
+	}
+	return platform.DefaultBeerCategories
+}
+
 func (s *Service) Analytics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := r.URL.Query()
@@ -172,6 +181,10 @@ func (s *Service) Analytics(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(ctx)
 	if data.Sales, err = LoadSalesInsights(ctx, tx, win.start, win.end); err != nil {
+		down(err)
+		return
+	}
+	if data.Audience, err = LoadAudienceInsights(ctx, tx, win.start, win.end, s.currentCategories()); err != nil {
 		down(err)
 		return
 	}

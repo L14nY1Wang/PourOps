@@ -1,19 +1,39 @@
 (() => {
   const posterInput = document.getElementById('poster_url');
+  const posterFileInput = document.getElementById('poster_file');
   const posterImg = document.getElementById('poster-preview-img');
   const posterFb = document.getElementById('poster-preview-fallback');
   const fbTitle = document.getElementById('poster-placeholder-title');
   const fbNote = document.getElementById('poster-placeholder-note');
+  let localPreviewUrl = '';
+
+  const revokeLocalPreview = () => {
+    if (!localPreviewUrl) return;
+    if (window.URL && typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(localPreviewUrl);
+    }
+    localPreviewUrl = '';
+  };
 
   const syncPoster = () => {
     if (!posterInput || !posterImg || !posterFb) return;
+    revokeLocalPreview();
+    if (posterFileInput && posterFileInput.files && posterFileInput.files[0]) {
+      if (window.URL && typeof URL.createObjectURL === 'function') {
+        localPreviewUrl = URL.createObjectURL(posterFileInput.files[0]);
+        posterImg.src = localPreviewUrl;
+        posterImg.hidden = false;
+        posterFb.hidden = true;
+        return;
+      }
+    }
     const v = posterInput.value.trim();
     if (!v) {
       posterImg.hidden = true;
       posterImg.removeAttribute('src');
       posterFb.hidden = false;
       if (fbTitle) fbTitle.textContent = '暂无酒标';
-      if (fbNote) fbNote.textContent = '搜索酒名自动填充，或粘贴图片地址';
+      if (fbNote) fbNote.textContent = '搜索酒名自动填充、上传图片或粘贴图片地址';
       return;
     }
     posterImg.src = v;
@@ -25,10 +45,18 @@
       posterImg.hidden = true;
       posterFb.hidden = false;
       if (fbTitle) fbTitle.textContent = '酒标加载失败';
-      if (fbNote) fbNote.textContent = '可重新搜索或手动替换图片地址';
+      if (fbNote) fbNote.textContent = '可重新搜索、上传图片或替换图片地址';
     });
   }
-  if (posterInput) posterInput.addEventListener('input', syncPoster);
+  if (posterInput) {
+    posterInput.addEventListener('input', () => {
+      if (posterFileInput && posterFileInput.value) posterFileInput.value = '';
+      syncPoster();
+    });
+  }
+  if (posterFileInput) {
+    posterFileInput.addEventListener('change', syncPoster);
+  }
 
   const wrap = document.getElementById('beer-lookup-wrap');
   const nameInput = document.getElementById('name');
@@ -40,7 +68,6 @@
   const mode = wrap.dataset.mode || 'purchase';
   const isPurchase = mode === 'purchase';
   const isEdit = mode === 'edit';
-  const showCatalogLink = mode !== 'catalog';
   const fieldKeys = {
     brewery: 'brewery',
     name: 'name',
@@ -90,13 +117,7 @@
     const span = document.createElement('span');
     span.textContent = text;
     statusEl.appendChild(span);
-    if (showCatalogLink && opts.catalogLink) {
-      const link = document.createElement('a');
-      link.href = '/admin/beers/catalog';
-      link.className = 'lookup-switch-btn';
-      link.textContent = '管理 / 导入历史酒单';
-      statusEl.appendChild(link);
-    } else if (opts.showSwitch && candidates.length > 1) {
+    if (opts.showSwitch && candidates.length > 1) {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'lookup-switch-btn';
@@ -211,7 +232,10 @@
         el.dataset.autofilled = '1';
         delete el.dataset.userEdited;
         if (key === 'category') el.dispatchEvent(new Event('change', { bubbles: true }));
-        if (key === 'poster_url') syncPoster();
+        if (key === 'poster_url') {
+          if (posterFileInput && posterFileInput.value) posterFileInput.value = '';
+          syncPoster();
+        }
         flashField(el);
         filled++;
         return;
@@ -220,7 +244,10 @@
         el.value = key === 'capacity_ml' ? '20000' : '';
         delete el.dataset.autofilled;
         if (key === 'category') el.dispatchEvent(new Event('change', { bubbles: true }));
-        if (key === 'poster_url') syncPoster();
+        if (key === 'poster_url') {
+          if (posterFileInput && posterFileInput.value) posterFileInput.value = '';
+          syncPoster();
+        }
       }
     });
 
@@ -292,8 +319,7 @@
           closeMenu();
           setStatus(
             'warn',
-            data.warning || (isPurchase ? '未搜到「' + q + '」，手动填写入库后会自动存入历史酒单' : '未搜到「' + q + '」，请换个关键词或直接手动填写'),
-            { catalogLink: true }
+            data.warning || (isPurchase ? '未搜到「' + q + '」，手动填写入库后会自动存入历史酒单' : '未搜到「' + q + '」，请换个关键词或直接手动填写')
           );
         }
         return;
@@ -302,12 +328,11 @@
       renderMenu(candidates);
       menu.hidden = false;
       if (data.warning) {
-        setStatus('warn', data.warning, { catalogLink: !candidates.length });
+        setStatus('warn', data.warning);
       } else if (!candidates.length) {
         setStatus(
           'warn',
-          q ? '未搜到匹配酒款，请换个关键词或手动填写' : '历史酒单暂无记录，请手动填写',
-          { catalogLink: true }
+          q ? '未搜到匹配酒款，请换个关键词或手动填写' : '历史酒单暂无记录，请手动填写'
         );
       } else if (!q) {
         setStatus('ok', '已列出最近 ' + candidates.length + ' 款历史酒单，请从下拉列表选择一款');

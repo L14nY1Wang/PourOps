@@ -1,9 +1,11 @@
 package catalog
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
@@ -14,32 +16,29 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"testing/fstest"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/platform"
 	"pourops/internal/settings"
-	"pourops/internal/ui"
 	"pourops/migrations"
 )
 
-func testCatalogRenderer() *ui.Renderer {
-	fsys := fstest.MapFS{
-		ui.AdminLayoutFile:                  {Data: []byte(`{{define "layout"}}{{.Err}}{{template "content" .}}{{end}}`)},
-		"templates/admin/catalog_form.html": {Data: []byte(`{{define "content"}}<input name="name" value="{{.CatalogItem.Name}}"><input name="capacity_ml" value="{{.CatalogItem.CapacityML}}"><input name="cost" value="{{.CostInput}}">{{end}}`)},
-		"templates/admin/catalog.html":      {Data: []byte(`{{define "content"}}{{range .Catalog}}{{.Name}}{{end}}{{end}}`)},
-	}
-	return ui.MustRenderer(fsys, nil, func() string { return "PourOps" }, "admin/catalog_form.html", "admin/catalog.html")
+type roundTripFn func(*http.Request) (*http.Response, error)
+
+func (f roundTripFn) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
-func postForm(h http.HandlerFunc, form url.Values) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rec := httptest.NewRecorder()
-	h(rec, req)
-	return rec
+func mockPosterClient(png []byte) *http.Client {
+	return &http.Client{Transport: roundTripFn(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(bytes.NewReader(png)),
+		}, nil
+	})}
 }
 
 func TestCatalogMigrationBackfillFromBeersAndKegs(t *testing.T) {
@@ -159,20 +158,28 @@ func TestCatalogMigrationBackfillFromBeersAndKegs(t *testing.T) {
 func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
 	cfg := settings.NewSettingsStore(pool, "PourOps")
-	svc := NewService(pool, testCatalogRenderer(), cfg, nil)
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHTTPClientForTest(mockPosterClient(samplePNGBytes()), false)
+	svc := NewService(pool, cfg, nil, store)
 	ctx := context.Background()
 
-	_, err := SaveCatalogBeer(ctx, pool, CatalogBeer{
+	oldLocalPoster, err := store.SaveBytes(samplePNGBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveCatalogBeer(ctx, pool, CatalogBeer{
 		Brewery:    "树屋",
 		Name:       "尤利乌斯",
 		Style:      "IPA - Hazy",
 		Category:   "IPA",
-		PosterURL:  "https://assets.untappd.com/julius.jpg",
+		PosterURL:  oldLocalPoster,
 		CapacityML: 20000,
 		CostCents:  130000,
 		Price330:   5800,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,7 +189,7 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resSkip, err := ImportCatalogBeers(ctx, pool, partialItems, "skip")
+	resSkip, err := ImportCatalogBeersWithPosters(ctx, pool, store, partialItems, "skip", platform.DefaultBeerCategories)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +197,7 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 		t.Fatalf("skip 统计不对: %+v", resSkip)
 	}
 
-	resMerge, err := ImportCatalogBeers(ctx, pool, partialItems, "merge")
+	resMerge, err := ImportCatalogBeersWithPosters(ctx, pool, store, partialItems, "merge", platform.DefaultBeerCategories)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,19 +208,28 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	if err != nil || len(after) != 1 {
 		t.Fatal(err)
 	}
-	if after[0].Price330 != 6600 || after[0].PosterURL != "https://assets.untappd.com/julius.jpg" || after[0].CostCents != 130000 {
+	if after[0].Price330 != 6600 || after[0].PosterURL != oldLocalPoster || after[0].CostCents != 130000 {
 		t.Fatalf("部分列 merge 不该清除原有海报或进价: %+v", after[0])
 	}
 
+	// 导出为自包含 .zip 压缩包。
 	recExp := httptest.NewRecorder()
-	svc.CatalogExport(recExp, httptest.NewRequest(http.MethodGet, "/admin/beers/catalog/export?format=csv", nil))
-	if recExp.Code != http.StatusOK || !strings.Contains(recExp.Header().Get("Content-Type"), "text/csv") {
-		t.Fatalf("导出 CSV 响应不对: code=%d ct=%q", recExp.Code, recExp.Header().Get("Content-Type"))
+	svc.CatalogExport(recExp, httptest.NewRequest(http.MethodGet, "/admin/settings/catalog/export", nil))
+	if recExp.Code != http.StatusOK || !strings.Contains(recExp.Header().Get("Content-Type"), "application/zip") {
+		t.Fatalf("导出 ZIP 响应不对: code=%d ct=%q", recExp.Code, recExp.Header().Get("Content-Type"))
+	}
+	zr, err := zip.NewReader(bytes.NewReader(recExp.Body.Bytes()), int64(recExp.Body.Len()))
+	if err != nil {
+		t.Fatalf("导出的响应不是有效 ZIP: %v", err)
+	}
+	if len(zr.File) != 2 {
+		t.Fatalf("ZIP 应包含 catalog.json 与 1 张酒标，实际 %d 个文件", len(zr.File))
 	}
 
+	// 导入前替换新图片并校验导入后旧酒标已从磁盘移除，仅保留最新一张。
 	var mpBody bytes.Buffer
 	mw := multipart.NewWriter(&mpBody)
-	fw, err := mw.CreateFormFile("file", "roundtrip.csv")
+	fw, err := mw.CreateFormFile("file", "roundtrip.zip")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +237,7 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	_ = mw.WriteField("mode", "merge")
 	_ = mw.Close()
 
-	reqImp := httptest.NewRequest(http.MethodPost, "/admin/beers/catalog/import", &mpBody)
+	reqImp := httptest.NewRequest(http.MethodPost, "/admin/settings/catalog/import", &mpBody)
 	reqImp.Header.Set("Content-Type", mw.FormDataContentType())
 	recImp := httptest.NewRecorder()
 	svc.CatalogImport(recImp, reqImp)
@@ -229,15 +245,33 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 		t.Fatalf("导入应 303 重定向，实际 %d: %s", recImp.Code, recImp.Body.String())
 	}
 	loc, _ := url.QueryUnescape(recImp.Header().Get("Location"))
-	if !strings.Contains(loc, "新增 0 款，更新 2 款，跳过 0 款") {
+	if !strings.HasPrefix(loc, "/admin/settings?msg=") || !strings.Contains(loc, "新增 0 款，更新 2 款，跳过 0 款") {
 		t.Fatalf("导入提示不对: %s", loc)
+	}
+	if store.Exists(oldLocalPoster) {
+		t.Fatalf("覆盖导入后旧本地酒标 %s 应被清理，仅保留最新版本", oldLocalPoster)
+	}
+
+	// 非 zip 上传（如直接传 CSV）应返回明确提示。
+	var csvMP bytes.Buffer
+	cw := multipart.NewWriter(&csvMP)
+	cfw, _ := cw.CreateFormFile("file", "bad.csv")
+	_, _ = cfw.Write([]byte("酒名\n测试\n"))
+	_ = cw.Close()
+	reqCSV := httptest.NewRequest(http.MethodPost, "/admin/settings/catalog/import", &csvMP)
+	reqCSV.Header.Set("Content-Type", cw.FormDataContentType())
+	recCSV := httptest.NewRecorder()
+	svc.CatalogImport(recCSV, reqCSV)
+	locCSV, _ := url.QueryUnescape(recCSV.Header().Get("Location"))
+	if recCSV.Code != http.StatusSeeOther || !strings.Contains(locCSV, ".zip") {
+		t.Fatalf("非 zip 文件导入应跳转到 /admin/settings 提示 .zip，实际 code=%d loc=%q", recCSV.Code, locCSV)
 	}
 
 	badBatch := []ImportItem{
-		{Beer: CatalogBeer{Brewery: "回滚厂", Name: "好行", CapacityML: 20000}},
+		{Beer: CatalogBeer{Brewery: "回滚厂", Name: "好行", CapacityML: 20000}, Poster: &PosterPayload{Filename: "a.png", Data: samplePNGBytes()}},
 		{Beer: CatalogBeer{Brewery: "回滚厂", Name: ""}},
 	}
-	if _, err := ImportCatalogBeers(ctx, pool, badBatch, "merge"); err == nil {
+	if _, err := ImportCatalogBeersWithPosters(ctx, pool, store, badBatch, "merge", platform.DefaultBeerCategories); err == nil {
 		t.Fatal("包含空酒名的批次应失败")
 	}
 	if found, err := ListCatalogBeers(ctx, pool, "回滚厂", ""); err != nil || len(found) != 0 {
@@ -245,29 +279,63 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	}
 }
 
+func TestLocalizeAllPostersDownloadsOnceAndUpdatesBothTables(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetHTTPClientForTest(mockPosterClient(samplePNGBytes()), false)
+	ctx := context.Background()
+
+	const remoteURL = "https://cdn.example/beer-42.png"
+	b := Beer{Brewery: "高岩", Name: "苹果西打", Style: "Dry Cider", Category: "西打", PosterURL: remoteURL, Price330: 4200}
+	if _, err := SaveBeerWithCategories(ctx, pool, b, platform.DefaultBeerCategories); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpsertCatalogFromBeerWithCategories(ctx, pool, b, 20000, 90000, true, platform.DefaultBeerCategories); err != nil {
+		t.Fatal(err)
+	}
+
+	n := LocalizeAllPosters(ctx, pool, store)
+	if n != 1 {
+		t.Fatalf("LocalizeAllPosters = %d, want 1", n)
+	}
+	var beerPoster, catPoster string
+	if err := pool.QueryRow(ctx, `select poster_url from beers where name='苹果西打'`).Scan(&beerPoster); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select poster_url from beer_catalog where name='苹果西打'`).Scan(&catPoster); err != nil {
+		t.Fatal(err)
+	}
+	if !IsLocalPosterURL(beerPoster) || beerPoster != catPoster || !store.Exists(beerPoster) {
+		t.Fatalf("远程酒标本地化同步失败: beer=%q catalog=%q", beerPoster, catPoster)
+	}
+}
+
 func TestCatalogSaveStrictValidation(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
-	svc := NewService(pool, testCatalogRenderer(), nil, nil)
+	ctx := context.Background()
+	overInt := 2147483648
+	badABV := 101.0
+	negIBU := -1
+	badUT := 5.5
 
 	for _, tc := range []struct {
-		field, val, want string
+		name string
+		item CatalogBeer
+		want string
 	}{
-		{"name", "", "酒款名称不能为空"},
-		{"capacity_ml", "2147483648", "超出范围"},
-		{"cost", "30000000", "金额过大"},
-		{"abv", "101", "ABV"},
-		{"ibu", "-1", "IBU"},
-		{"ut_rating", "5.5", "UT"},
-		{"ut_count", "2147483648", "评分人数"},
-		{"category", "rainbow", "酒款分类"},
-		{"poster_url", "javascript:alert(1)", "酒标"},
-		{"price_330", "30000000", "330ml"},
+		{"空酒名", CatalogBeer{CapacityML: 20000}, "酒款名称"},
+		{"坏分类", CatalogBeer{Name: "A", Category: "rainbow", CapacityML: 20000}, "酒款分类"},
+		{"坏ABV", CatalogBeer{Name: "A", ABV: &badABV, CapacityML: 20000}, "ABV"},
+		{"坏IBU", CatalogBeer{Name: "A", IBU: &negIBU, CapacityML: 20000}, "IBU"},
+		{"坏UT", CatalogBeer{Name: "A", UT: &badUT, CapacityML: 20000}, "UT"},
+		{"坏酒标", CatalogBeer{Name: "A", PosterURL: "javascript:alert(1)", CapacityML: 20000}, "酒标"},
+		{"坏售价", CatalogBeer{Name: "A", Price330: overInt, CapacityML: 20000}, "金额过大"},
 	} {
-		form := url.Values{"name": {"历史酒测试"}, "capacity_ml": {"20000"}}
-		form.Set(tc.field, tc.val)
-		w := postForm(svc.CatalogSave, form)
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), tc.want) {
-			t.Fatalf("%s=%q 应返回 400 且包含 %q，实际 code=%d body=%s", tc.field, tc.val, tc.want, w.Code, w.Body.String())
+		if _, err := SaveCatalogBeerWithCategories(ctx, pool, tc.item, platform.DefaultBeerCategories); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s 应拒绝并包含 %q，实际: %v", tc.name, tc.want, err)
 		}
 	}
 }
@@ -338,19 +406,20 @@ func TestCatalogDBErrorSanitization(t *testing.T) {
 	}
 	closedPool.Close()
 
-	badSvc := NewService(closedPool, testCatalogRenderer(), nil, nil)
+	badSvc := NewService(closedPool, nil, nil, nil)
 
-	wCat := postForm(badSvc.CatalogSave, url.Values{"name": {"测试"}})
-	if wCat.Code != http.StatusInternalServerError || !strings.Contains(wCat.Body.String(), "保存失败，请稍后重试") || strings.Contains(wCat.Body.String(), "closed pool") {
-		t.Fatalf("CatalogSave DB 错误未脱敏: code=%d body=%s", wCat.Code, wCat.Body.String())
-	}
+	zipBuf := bytes.NewBuffer(nil)
+	zw := zip.NewWriter(zipBuf)
+	cw, _ := zw.Create("catalog.json")
+	_, _ = cw.Write([]byte(`{"items":[{"name":"测试"}]}`))
+	_ = zw.Close()
 
 	var mp bytes.Buffer
 	mw := multipart.NewWriter(&mp)
-	fw, _ := mw.CreateFormFile("file", "test.csv")
-	_, _ = fw.Write([]byte("酒名\n测试\n"))
+	fw, _ := mw.CreateFormFile("file", "test.zip")
+	_, _ = fw.Write(zipBuf.Bytes())
 	_ = mw.Close()
-	reqImp := httptest.NewRequest(http.MethodPost, "/admin/beers/catalog/import", &mp)
+	reqImp := httptest.NewRequest(http.MethodPost, "/admin/settings/catalog/import", &mp)
 	reqImp.Header.Set("Content-Type", mw.FormDataContentType())
 	wImp := httptest.NewRecorder()
 	badSvc.CatalogImport(wImp, reqImp)
@@ -482,31 +551,29 @@ func TestMigration0012BeerCategoriesAndDynamicSettings(t *testing.T) {
 	if err := cfg.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cfg.AddBeerCategory(ctx, "赛松"); err != nil {
+	allowed, err := cfg.AddBeerCategory(ctx, "赛松")
+	if err != nil {
 		t.Fatal(err)
 	}
-	svc := NewService(pool, testCatalogRenderer(), cfg, nil)
 
-	wAdd := postForm(svc.CatalogSave, url.Values{"name": {"农舍赛松"}, "category": {"赛松"}, "capacity_ml": {"20000"}})
-	if wAdd.Code != http.StatusSeeOther {
-		t.Fatalf("新增自定义分类酒款应成功 303，实际 %d: %s", wAdd.Code, wAdd.Body.String())
+	if _, err := SaveCatalogBeerWithCategories(ctx, pool, CatalogBeer{Name: "农舍赛松", Category: "赛松", CapacityML: 20000}, allowed); err != nil {
+		t.Fatalf("新增自定义分类历史酒款失败: %v", err)
 	}
 	list, err := ListCatalogBeers(ctx, pool, "农舍赛松", "赛松")
 	if err != nil || len(list) != 1 || list[0].Category != "赛松" {
 		t.Fatalf("按自定义分类筛选历史酒单失败: len=%d list=%+v err=%v", len(list), list, err)
 	}
 
-	if _, err := cfg.DeleteBeerCategory(ctx, "赛松"); err != nil {
+	allowedAfterDel, err := cfg.DeleteBeerCategory(ctx, "赛松")
+	if err != nil {
 		t.Fatal(err)
 	}
-	wEditExisting := postForm(svc.CatalogSave, url.Values{
-		"id": {fmt.Sprintf("%d", list[0].ID)}, "name": {"农舍赛松-编辑"}, "category": {"赛松"}, "capacity_ml": {"20000"},
-	})
-	if wEditExisting.Code != http.StatusSeeOther {
-		t.Fatalf("分类被删后编辑既有历史酒款仍应成功 303，实际 %d: %s", wEditExisting.Code, wEditExisting.Body.String())
+	edited := list[0]
+	edited.Name = "农舍赛松-编辑"
+	if _, err := SaveCatalogBeerWithCategories(ctx, pool, edited, allowedAfterDel, list[0].Category); err != nil {
+		t.Fatalf("分类被删后编辑既有历史酒款仍应成功: %v", err)
 	}
-	wNewRejected := postForm(svc.CatalogSave, url.Values{"name": {"新赛松"}, "category": {"赛松"}, "capacity_ml": {"20000"}})
-	if wNewRejected.Code != http.StatusBadRequest {
-		t.Fatalf("分类被删后新建历史酒款应返回 400，实际 %d", wNewRejected.Code)
+	if _, err := SaveCatalogBeerWithCategories(ctx, pool, CatalogBeer{Name: "新赛松", Category: "赛松", CapacityML: 20000}, allowedAfterDel); err == nil {
+		t.Fatal("分类被删后新建历史酒款应拒绝")
 	}
 }

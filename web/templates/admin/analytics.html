@@ -4,7 +4,7 @@
 <div class="page-heading">
   <div>
     <h1 class="page-title mb-0">数据分析</h1>
-    <p class="overview-sub">销售走势与营收结构 · {{template "periodLabel" .}} · 营业日 07:00–次日 07:00</p>
+    <p class="overview-sub">销售走势、营收结构与酒单分类客户群画像 · {{template "periodLabel" .}} · 营业日 07:00–次日 07:00</p>
   </div>
   <div class="heading-actions">
     <span class="date-label"><i class="bi bi-calendar3" aria-hidden="true"></i>{{.ReportStart}} 至 {{.ReportEnd}}</span>
@@ -67,6 +67,79 @@
   {{end}}
 </section>
 
+<section class="card chart-panel analytics-audience-panel" aria-labelledby="audience-title">
+  <div class="panel-heading">
+    <div>
+      <h2 id="audience-title">客户群分析</h2>
+      <p>按酒单分类统计桶装精酿客群口味偏好、消费贡献与饮用习惯 · 共 {{.Audience.TotalCups}} 杯（{{.Audience.TotalVolumeText}} · 均价 {{.Audience.AvgCupText}}）</p>
+    </div>
+    {{if .Audience.HasData}}
+    <div class="audience-controls">
+      <div class="audience-toggle" role="group" aria-label="客户群统计指标">
+        <button type="button" class="audience-toggle-btn active" data-audience-metric="cups" aria-pressed="true">按杯数</button>
+        <button type="button" class="audience-toggle-btn" data-audience-metric="revenue" aria-pressed="false">按营收</button>
+      </div>
+      {{if .Audience.CanRadar}}
+      <div class="audience-toggle" role="group" aria-label="图表视图切换">
+        <button type="button" class="audience-toggle-btn active" data-audience-type="doughnut" aria-pressed="true">环形图</button>
+        <button type="button" class="audience-toggle-btn" data-audience-type="radar" aria-pressed="false">雷达图</button>
+      </div>
+      {{end}}
+    </div>
+    {{else}}
+    <span class="panel-period">{{template "periodLabel" .}}</span>
+    {{end}}
+  </div>
+
+  {{if .Audience.HasData}}
+  <div class="audience-highlights">
+    {{with .Audience.TopCategory}}
+    <div class="audience-highlight">
+      <span class="audience-highlight-k">主力客群偏好</span>
+      <strong class="audience-highlight-v"><span class="audience-dot" style="{{.DotStyle}}"></span>{{.Category}}（{{.CupShareText}}）</strong>
+      <small>售出 {{.Cups}} 杯 · 环比 {{.CupsChangeText}} · 均价 {{.AvgCupText}}</small>
+    </div>
+    {{end}}
+    {{with .Audience.HighestAvgCupCategory}}
+    <div class="audience-highlight">
+      <span class="audience-highlight-k">高客单偏好风格</span>
+      <strong class="audience-highlight-v"><span class="audience-dot" style="{{.DotStyle}}"></span>{{.Category}}（均价 {{.AvgCupText}}）</strong>
+      <small>营收 {{.RevenueText}}（占 {{.RevShareText}}）· 毛利率 {{.MarginText}}</small>
+    </div>
+    {{end}}
+    <div class="audience-highlight">
+      <span class="audience-highlight-k">杯型与饮用场景</span>
+      <strong class="audience-highlight-v">{{.Audience.CupSizes.DominantLabel}}</strong>
+      <small>小杯 {{.Audience.CupSizes.SmallShareText}} · 标准杯 {{.Audience.CupSizes.MediumShareText}} · 大杯 {{.Audience.CupSizes.LargeShareText}}{{if .Audience.Spots.HasData}} · {{.Audience.Spots.SummaryText}}{{end}}</small>
+    </div>
+  </div>
+
+  <div class="audience-grid">
+    <div class="chart-container audience-chart-box">
+      <canvas id="audienceChart" role="img" aria-label="按酒单分类的客户群口味偏好分析图">客户群分类偏好明细见右侧列表。</canvas>
+    </div>
+    <div class="audience-list" aria-label="各酒款分类客群消费明细">
+      {{range .Audience.Segments}}
+      <div class="audience-row">
+        <div class="audience-row-head">
+          <span class="audience-cat"><span class="audience-dot" style="{{.DotStyle}}"></span><strong>{{.Category}}</strong>{{if .HasABV}}<span class="audience-abv">{{.ABVText}}</span>{{end}}</span>
+          <span class="audience-row-val"><strong>{{.Cups}} 杯</strong>（{{.CupShareText}}）<span class="audience-delta">环比 {{.CupsChangeText}}</span></span>
+        </div>
+        <div class="audience-bar-track" aria-hidden="true"><div class="audience-bar-fill" style="{{.BarStyle}}"></div></div>
+        <div class="audience-row-meta">
+          <span>出酒 {{.VolumeText}}</span>
+          <span>营收 {{.RevenueText}}（{{.RevShareText}}）</span>
+          <span>均价 {{.AvgCupText}} · 毛利率 {{.MarginText}}</span>
+        </div>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{else}}
+  <div class="empty-state"><i class="bi bi-pie-chart" aria-hidden="true"></i><p>所选时间内还没有桶装精酿销售记录</p></div>
+  {{end}}
+</section>
+
 <section class="card keg-panel analytics-daily-card" aria-labelledby="daily-title">
   <div class="panel-heading">
     <div>
@@ -112,12 +185,14 @@
     <li>营业日统一按北京时间当日 07:00 至次日 07:00 划分，凌晨跨零点销售归入前一个营业日。</li>
     <li>营业额统计含 POS 已结账销售与手工补录（桶装精酿 + 零售商品），按日分品类舍入至分并与顶部 KPI 完全对账。</li>
     <li>桶装成本按实际售出毫升占整桶 100% 容量摊销；毛利＝营业额 − 商品成本，不是净利润。</li>
+    <li>客户群分析按酒款分类（兼容旧分类并自动按风格补全）汇总桶装销量、均价与酒精度偏好，并联动 POS 已结账台位识别吧台与桌台客群差异。</li>
     <li>如需查看实时库存状态与分时段 POS 实收，请前往<a href="/admin/">经营概览</a>。</li>
   </ul>
 </section>
 
 {{if not .Err}}
 {{if .Sales.HasData}}<script type="application/json" id="sales-trend-data">{{.Sales.TrendJSON}}</script>{{end}}
+{{if .Audience.HasData}}<script type="application/json" id="audience-data">{{.Audience.ChartJSON}}</script>{{end}}
 {{end}}
 {{end}}
 
@@ -142,77 +217,235 @@
     g.addColorStop(1, hex + '00');
     return g;
   };
-  const el = document.getElementById('sales-trend-data');
-  const canvas = document.getElementById('salesChart');
-  if (!el || !canvas) return;
-  let trend = null;
-  try { trend = JSON.parse(el.textContent); } catch (e) { return; }
-  if (!trend || !trend.length) return;
-
   const money = v => '¥' + Number(v || 0).toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   const p0 = palette();
   Chart.defaults.color = p0.muted;
   Chart.defaults.borderColor = p0.separator;
-  const ctx = canvas.getContext('2d');
 
-  const chart = new Chart(canvas, {
-    type: 'line',
-    data: {
-      labels: trend.map(r => r.date),
-      datasets: [
-        {label: '营业额', data: trend.map(r => r.revenue), borderColor: p0.accent, backgroundColor: areaGrad(ctx, p0.accent, '24'), fill: true, pointBackgroundColor: p0.accent, borderWidth: 2.2, tension: .34, pointRadius: 2.5, pointHoverRadius: 5},
-        {label: '毛利', data: trend.map(r => r.profit), borderColor: p0.success, backgroundColor: areaGrad(ctx, p0.success, '16'), fill: true, pointBackgroundColor: p0.success, borderWidth: 2, borderDash: [5, 3], tension: .34, pointRadius: 2, pointHoverRadius: 4},
-      ],
-    },
-    options: {
+  let salesChart = null;
+  const salesEl = document.getElementById('sales-trend-data');
+  const salesCanvas = document.getElementById('salesChart');
+  if (salesEl && salesCanvas) {
+    try {
+      const trend = JSON.parse(salesEl.textContent);
+      if (Array.isArray(trend) && trend.length) {
+        const ctx = salesCanvas.getContext('2d');
+        salesChart = new Chart(salesCanvas, {
+          type: 'line',
+          data: {
+            labels: trend.map(r => r.date),
+            datasets: [
+              {label: '营业额', data: trend.map(r => r.revenue), borderColor: p0.accent, backgroundColor: areaGrad(ctx, p0.accent, '24'), fill: true, pointBackgroundColor: p0.accent, borderWidth: 2.2, tension: .34, pointRadius: 2.5, pointHoverRadius: 5},
+              {label: '毛利', data: trend.map(r => r.profit), borderColor: p0.success, backgroundColor: areaGrad(ctx, p0.success, '16'), fill: true, pointBackgroundColor: p0.success, borderWidth: 2, borderDash: [5, 3], tension: .34, pointRadius: 2, pointHoverRadius: 4},
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: reduced ? false : {duration: 420},
+            color: p0.muted,
+            interaction: {mode: 'index', intersect: false},
+            plugins: {
+              legend: {position: 'bottom', labels: {boxWidth: 8, boxHeight: 8, usePointStyle: true, padding: 14, color: p0.muted, font: {size: 11}}},
+              tooltip: {
+                backgroundColor: p0.surface,
+                titleColor: p0.fg,
+                bodyColor: p0.muted,
+                borderColor: p0.separator,
+                borderWidth: 1,
+                displayColors: true,
+                boxPadding: 4,
+                padding: 10,
+                cornerRadius: 10,
+                callbacks: {label: c => ` ${c.dataset.label}：${money(c.parsed.y)}`},
+              },
+            },
+            scales: {
+              x: {grid: {display: false}, border: {display: false}, ticks: {color: p0.muted, font: {size: 10}, maxRotation: 0, autoSkipPadding: 12}},
+              y: {beginAtZero: true, border: {display: false}, grid: {color: p0.separator}, ticks: {color: p0.muted, font: {size: 10}, maxTicksLimit: 5, callback: v => '¥' + v}},
+            },
+          },
+        });
+      }
+    } catch (e) {}
+  }
+
+  let audienceChart = null;
+  let audienceMetric = 'cups';
+  let audienceType = 'doughnut';
+  let segments = null;
+  const audEl = document.getElementById('audience-data');
+  const audCanvas = document.getElementById('audienceChart');
+  if (audEl && audCanvas) {
+    try {
+      const parsed = JSON.parse(audEl.textContent);
+      if (Array.isArray(parsed) && parsed.length) segments = parsed;
+    } catch (e) {}
+  }
+
+  const buildAudienceChart = p => {
+    if (!segments || !audCanvas) return;
+    if (audienceChart) {
+      audienceChart.destroy();
+      audienceChart = null;
+    }
+    const isRev = audienceMetric === 'revenue';
+    const values = segments.map(s => isRev ? s.revenue : s.cups);
+    const dataset = audienceType === 'radar'
+      ? {
+          label: isRev ? '营收贡献 (元)' : '消费杯数 (杯)',
+          data: values,
+          borderColor: p.accent,
+          backgroundColor: p.accent + '28',
+          pointBackgroundColor: segments.map(s => s.color),
+          pointBorderColor: p.surface,
+          pointBorderWidth: 1.5,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2,
+        }
+      : {
+          label: isRev ? '营收贡献' : '消费杯数',
+          data: values,
+          backgroundColor: segments.map(s => s.color),
+          borderColor: p.surface,
+          borderWidth: 2,
+          hoverOffset: 6,
+        };
+
+    const opts = {
       responsive: true,
       maintainAspectRatio: false,
-      animation: reduced ? false : {duration: 420},
-      color: p0.muted,
-      interaction: {mode: 'index', intersect: false},
+      animation: reduced ? false : {duration: 360},
+      color: p.muted,
       plugins: {
-        legend: {position: 'bottom', labels: {boxWidth: 8, boxHeight: 8, usePointStyle: true, padding: 14, color: p0.muted, font: {size: 11}}},
+        legend: {
+          display: audienceType === 'doughnut',
+          position: 'bottom',
+          labels: {boxWidth: 9, boxHeight: 9, usePointStyle: true, padding: 12, color: p.muted, font: {size: 11}},
+        },
         tooltip: {
-          backgroundColor: p0.surface,
-          titleColor: p0.fg,
-          bodyColor: p0.muted,
-          borderColor: p0.separator,
+          backgroundColor: p.surface,
+          titleColor: p.fg,
+          bodyColor: p.muted,
+          borderColor: p.separator,
           borderWidth: 1,
           displayColors: true,
           boxPadding: 4,
           padding: 10,
           cornerRadius: 10,
-          callbacks: {label: c => ` ${c.dataset.label}：${money(c.parsed.y)}`},
+          callbacks: {
+            label: ctx => {
+              const seg = segments[ctx.dataIndex];
+              if (!seg) return '';
+              if (audienceMetric === 'revenue') {
+                return ` ${seg.category}：${money(seg.revenue)}（占比 ${seg.rev_share}% · 毛利 ${money(seg.profit)}）`;
+              }
+              return ` ${seg.category}：${seg.cups} 杯（占比 ${seg.cup_share}% · 均价 ${money(seg.avg_cup)}）`;
+            },
+          },
         },
       },
-      scales: {
-        x: {grid: {display: false}, border: {display: false}, ticks: {color: p0.muted, font: {size: 10}, maxRotation: 0, autoSkipPadding: 12}},
-        y: {beginAtZero: true, border: {display: false}, grid: {color: p0.separator}, ticks: {color: p0.muted, font: {size: 10}, maxTicksLimit: 5, callback: v => '¥' + v}},
-      },
-    },
-  });
+    };
+    if (audienceType === 'doughnut') {
+      opts.cutout = '62%';
+    } else {
+      opts.scales = {
+        r: {
+          beginAtZero: true,
+          grid: {color: p.separator},
+          angleLines: {color: p.separator},
+          ticks: {display: false},
+          pointLabels: {color: p.fg, font: {size: 11, weight: '600'}},
+        },
+      };
+    }
+    audienceChart = new Chart(audCanvas, {
+      type: audienceType,
+      data: {labels: segments.map(s => s.category), datasets: [dataset]},
+      options: opts,
+    });
+  };
+
+  if (segments) {
+    buildAudienceChart(p0);
+    document.querySelectorAll('[data-audience-metric]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const next = btn.dataset.audienceMetric;
+        if (!next || next === audienceMetric) return;
+        audienceMetric = next;
+        document.querySelectorAll('[data-audience-metric]').forEach(b => {
+          const active = b === btn;
+          b.classList.toggle('active', active);
+          b.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        if (audienceChart) {
+          const isRev = audienceMetric === 'revenue';
+          audienceChart.data.datasets[0].label = isRev ? '营收贡献' : '消费杯数';
+          audienceChart.data.datasets[0].data = segments.map(s => isRev ? s.revenue : s.cups);
+          audienceChart.update();
+        }
+      });
+    });
+    document.querySelectorAll('[data-audience-type]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const next = btn.dataset.audienceType;
+        if (!next || next === audienceType) return;
+        audienceType = next;
+        document.querySelectorAll('[data-audience-type]').forEach(b => {
+          const active = b === btn;
+          b.classList.toggle('active', active);
+          b.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+        buildAudienceChart(palette());
+      });
+    });
+  }
 
   document.addEventListener('pourops:theme-change', () => {
     const p = palette();
     Chart.defaults.color = p.muted;
     Chart.defaults.borderColor = p.separator;
-    chart.options.color = p.muted;
-    chart.options.plugins.legend.labels.color = p.muted;
-    chart.options.plugins.tooltip.backgroundColor = p.surface;
-    chart.options.plugins.tooltip.titleColor = p.fg;
-    chart.options.plugins.tooltip.bodyColor = p.muted;
-    chart.options.plugins.tooltip.borderColor = p.separator;
-    for (const scale of Object.values(chart.options.scales)) {
-      if (scale.ticks) scale.ticks.color = p.muted;
-      if (scale.grid) scale.grid.color = p.separator;
+    if (salesChart) {
+      salesChart.options.color = p.muted;
+      salesChart.options.plugins.legend.labels.color = p.muted;
+      salesChart.options.plugins.tooltip.backgroundColor = p.surface;
+      salesChart.options.plugins.tooltip.titleColor = p.fg;
+      salesChart.options.plugins.tooltip.bodyColor = p.muted;
+      salesChart.options.plugins.tooltip.borderColor = p.separator;
+      for (const scale of Object.values(salesChart.options.scales)) {
+        if (scale.ticks) scale.ticks.color = p.muted;
+        if (scale.grid) scale.grid.color = p.separator;
+      }
+      salesChart.data.datasets[0].borderColor = p.accent;
+      salesChart.data.datasets[0].pointBackgroundColor = p.accent;
+      salesChart.data.datasets[0].backgroundColor = areaGrad(salesChart.ctx, p.accent, '24');
+      salesChart.data.datasets[1].borderColor = p.success;
+      salesChart.data.datasets[1].pointBackgroundColor = p.success;
+      salesChart.data.datasets[1].backgroundColor = areaGrad(salesChart.ctx, p.success, '16');
+      salesChart.update('none');
     }
-    chart.data.datasets[0].borderColor = p.accent;
-    chart.data.datasets[0].pointBackgroundColor = p.accent;
-    chart.data.datasets[0].backgroundColor = areaGrad(chart.ctx, p.accent, '24');
-    chart.data.datasets[1].borderColor = p.success;
-    chart.data.datasets[1].pointBackgroundColor = p.success;
-    chart.data.datasets[1].backgroundColor = areaGrad(chart.ctx, p.success, '16');
-    chart.update('none');
+    if (audienceChart) {
+      audienceChart.options.color = p.muted;
+      audienceChart.options.plugins.legend.labels.color = p.muted;
+      audienceChart.options.plugins.tooltip.backgroundColor = p.surface;
+      audienceChart.options.plugins.tooltip.titleColor = p.fg;
+      audienceChart.options.plugins.tooltip.bodyColor = p.muted;
+      audienceChart.options.plugins.tooltip.borderColor = p.separator;
+      if (audienceType === 'doughnut') {
+        audienceChart.data.datasets[0].borderColor = p.surface;
+      } else {
+        audienceChart.data.datasets[0].borderColor = p.accent;
+        audienceChart.data.datasets[0].backgroundColor = p.accent + '28';
+        audienceChart.data.datasets[0].pointBorderColor = p.surface;
+        if (audienceChart.options.scales?.r) {
+          audienceChart.options.scales.r.grid.color = p.separator;
+          audienceChart.options.scales.r.angleLines.color = p.separator;
+          audienceChart.options.scales.r.pointLabels.color = p.fg;
+        }
+      }
+      audienceChart.update('none');
+    }
   });
 })();
 </script>

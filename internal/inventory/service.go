@@ -5,6 +5,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"pourops/internal/catalog"
 	"pourops/internal/event"
 	"pourops/internal/platform"
 	"pourops/internal/settings"
@@ -17,14 +18,16 @@ type Service struct {
 	renderer *ui.Renderer
 	settings *settings.SettingsStore
 	bus      *event.EventBus
+	posters  *catalog.PosterStore
 }
 
-func NewService(pool *pgxpool.Pool, renderer *ui.Renderer, cfg *settings.SettingsStore, bus *event.EventBus) *Service {
+func NewService(pool *pgxpool.Pool, renderer *ui.Renderer, cfg *settings.SettingsStore, bus *event.EventBus, posters *catalog.PosterStore) *Service {
 	return &Service{
 		pool:     pool,
 		renderer: renderer,
 		settings: cfg,
 		bus:      bus,
+		posters:  posters,
 	}
 }
 

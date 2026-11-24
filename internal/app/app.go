@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 
@@ -29,6 +30,7 @@ type Deps struct {
 	ScreenHub    *screen.Hub
 	Assets       *ui.AssetManifest
 	Renderer     *ui.Renderer
+	Posters      *catalog.PosterStore
 	Secret       []byte
 	JiuheBaseURL string
 }
@@ -67,7 +69,7 @@ func NewHandler(deps Deps) http.Handler {
 	}
 	guards := authSvc.Guards()
 
-	catalogSvc := catalog.NewService(deps.Pool, deps.Renderer, deps.Settings, catalog.NewDefaultCodecRegistryWithCategories(catsFn))
+	catalogSvc := catalog.NewService(deps.Pool, deps.Settings, catalog.NewDefaultCodecRegistryWithOptions(catsFn, deps.Posters), deps.Posters)
 	localLookup := lookup.NewLocalCatalogProvider(deps.Pool)
 	localLookup.SetCategoriesFn(catsFn)
 	jiuheLookup := lookup.NewJiuheProvider(deps.JiuheBaseURL, nil)
@@ -75,10 +77,16 @@ func NewHandler(deps Deps) http.Handler {
 	lookupSvc := lookup.NewService(localLookup, jiuheLookup)
 	// screen.Service.PlaylistJSON 从 static/screen/playlist.json 读取，需传入根 StaticFS。
 	screenSvc := screen.NewService(deps.Pool, deps.ScreenHub, deps.Settings, deps.Renderer, web.StaticFS)
-	invSvc := inventory.NewService(deps.Pool, deps.Renderer, deps.Settings, deps.Bus)
+	invSvc := inventory.NewService(deps.Pool, deps.Renderer, deps.Settings, deps.Bus, deps.Posters)
 	posSvc := pos.NewService(deps.Pool, deps.Renderer, deps.Bus, pos.ManualGateway{}, pos.NoopPrinter{})
 	reportSvc := report.NewService(deps.Pool, deps.Renderer, deps.Settings)
 	settingsSvc := settings.NewService(deps.Settings, deps.Webhooks, deps.Renderer)
+	settingsSvc.SetCatalogCountFn(func(ctx context.Context) (int, error) {
+		if deps.Pool == nil {
+			return 0, nil
+		}
+		return catalog.CountCatalogBeers(ctx, deps.Pool)
+	})
 
 	authSvc.RegisterRoutes(mux)
 	screenSvc.RegisterRoutes(mux)

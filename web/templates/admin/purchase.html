@@ -5,12 +5,11 @@
     <p>进货只入库不上电视，完成后回酒单页填号位上架开桶。</p>
   </div>
   <div class="heading-actions">
-    <a class="button button--secondary" href="/admin/beers/catalog"><i class="bi bi-journal-bookmark" aria-hidden="true"></i>历史酒单</a>
     <a class="button button--secondary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
   </div>
 </div>
 
-<form class="admin-form card editor-card" method="post" action="/admin/beers/purchase">
+<form class="admin-form card editor-card" method="post" action="/admin/beers/purchase" enctype="multipart/form-data">
   <div class="card__content">
     <fieldset class="form-section">
       <div class="form-section-head">
@@ -25,12 +24,18 @@
             <div class="poster-placeholder" id="poster-preview-fallback" {{if .Beer.PosterURL}}hidden{{end}}>
               <i class="bi bi-image" aria-hidden="true"></i>
               <span id="poster-placeholder-title">暂无酒标</span>
-              <small id="poster-placeholder-note">搜索酒名自动填充，或粘贴图片地址</small>
+              <small id="poster-placeholder-note">搜索酒名自动填充、上传图片或粘贴图片地址</small>
             </div>
           </div>
           <div class="editor-field">
             <label class="label" for="poster_url">酒标图片地址</label>
             <input class="form-control" type="text" id="poster_url" name="poster_url" value="{{.Beer.PosterURL}}" placeholder="自动填充或粘贴图片地址">
+            <div class="description">外链将在提交时自动下载保存到本地</div>
+          </div>
+          <div class="editor-field">
+            <label class="label" for="poster_file">上传本地酒标</label>
+            <input class="form-control" type="file" id="poster_file" name="poster_file" accept="image/jpeg,image/png,image/webp,image/gif">
+            <div class="description">支持 JPG / PNG / WebP / GIF（≤ 5MB），优先采用本地上传文件</div>
           </div>
         </div>
 

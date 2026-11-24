@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -17,17 +18,35 @@ type SettingsPage struct {
 	EventOptions   []platform.Option
 	HasSecret      bool
 	SelectedEvents map[string]bool
+	CatalogTotal   int
 }
 
-// Service 提供 BOSS 专属门店系统参数与 Webhook 出站通知管理界面。
+// Service 提供 BOSS 专属门店系统参数、历史酒单导出导入入口与 Webhook 出站通知管理界面。
 type Service struct {
-	store    *SettingsStore
-	webhooks *event.WebhookDispatcher
-	renderer *ui.Renderer
+	store          *SettingsStore
+	webhooks       *event.WebhookDispatcher
+	renderer       *ui.Renderer
+	catalogCountFn func(context.Context) (int, error)
 }
 
 func NewService(store *SettingsStore, webhooks *event.WebhookDispatcher, renderer *ui.Renderer) *Service {
 	return &Service{store: store, webhooks: webhooks, renderer: renderer}
+}
+
+func (s *Service) SetCatalogCountFn(fn func(context.Context) (int, error)) {
+	s.catalogCountFn = fn
+}
+
+func (s *Service) catalogTotal(ctx context.Context) int {
+	if s.catalogCountFn == nil {
+		return 0
+	}
+	n, err := s.catalogCountFn(ctx)
+	if err != nil {
+		log.Printf("count catalog beers: %v", err)
+		return 0
+	}
+	return n
 }
 
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
@@ -56,6 +75,7 @@ func (s *Service) Page(w http.ResponseWriter, r *http.Request) {
 		EventOptions:   event.WebhookEventOptions,
 		HasSecret:      cfg.WebhookSecret != "",
 		SelectedEvents: buildSelectedMap(cfg.WebhookEvents),
+		CatalogTotal:   s.catalogTotal(r.Context()),
 	})
 }
 
@@ -97,6 +117,7 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 			EventOptions:   event.WebhookEventOptions,
 			HasSecret:      existing.WebhookSecret != "",
 			SelectedEvents: buildSelectedMap(next.WebhookEvents),
+			CatalogTotal:   s.catalogTotal(r.Context()),
 		})
 	}
 

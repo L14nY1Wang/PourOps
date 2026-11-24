@@ -18,8 +18,6 @@ var DefaultPageFiles = []string{
 	"admin/beers.html",
 	"admin/beer_form.html",
 	"admin/purchase.html",
-	"admin/catalog.html",
-	"admin/catalog_form.html",
 	"admin/kegs.html",
 	"admin/keg.html",
 	"admin/keg_form.html",

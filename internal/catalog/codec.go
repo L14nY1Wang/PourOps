@@ -1,18 +1,27 @@
 package catalog
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"path"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"pourops/internal/platform"
+)
+
+const (
+	maxZipEntries           = 2000
+	maxZipTotalUncompressed = 80 << 20
+	zipCatalogFilename      = "catalog.json"
 )
 
 // Codec 是历史酒单导入导出的编译期扩展接口；新增 CSV/JSON 之外的格式（如收银导出/门店模板）只需实现本接口并注册。
@@ -38,9 +47,15 @@ func NewDefaultCodecRegistry() *CodecRegistry {
 	return NewDefaultCodecRegistryWithCategories(nil)
 }
 
-// NewDefaultCodecRegistryWithCategories 使用动态酒款分类表构建默认 CSV/JSON 编解码注册表。
+// NewDefaultCodecRegistryWithCategories 使用动态酒款分类表构建默认 ZIP/CSV/JSON 编解码注册表。
 func NewDefaultCodecRegistryWithCategories(categoriesFn func() []string) *CodecRegistry {
+	return NewDefaultCodecRegistryWithOptions(categoriesFn, nil)
+}
+
+// NewDefaultCodecRegistryWithOptions 使用动态酒款分类表和本地酒标存储构建默认导入导出编解码注册表。
+func NewDefaultCodecRegistryWithOptions(categoriesFn func() []string, posters *PosterStore) *CodecRegistry {
 	return NewCodecRegistry(
+		ZIPCodec{CategoriesFn: categoriesFn, Posters: posters},
 		CSVCodec{CategoriesFn: categoriesFn},
 		JSONCodec{CategoriesFn: categoriesFn},
 	)
@@ -53,6 +68,11 @@ func resolveCodecCategories(fn func() []string) []string {
 		}
 	}
 	return platform.DefaultBeerCategories
+}
+
+func hasZIPMagic(raw []byte) bool {
+	return len(raw) >= 4 && ((raw[0] == 'P' && raw[1] == 'K' && raw[2] == 3 && raw[3] == 4) ||
+		(raw[0] == 'P' && raw[1] == 'K' && raw[2] == 5 && raw[3] == 6))
 }
 
 func (r *CodecRegistry) Register(c Codec) {
@@ -72,26 +92,296 @@ func (r *CodecRegistry) Find(format string) (Codec, bool) {
 }
 
 func (r *CodecRegistry) Decode(filename string, raw []byte) ([]ImportItem, error) {
-	if !utf8.Valid(raw) {
-		return nil, errors.New("文件必须是 UTF-8 编码的 CSV 或 JSON")
-	}
-	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
+	if len(raw) == 0 {
 		return nil, errors.New("导入文件为空")
 	}
 	lowerName := strings.ToLower(strings.TrimSpace(filename))
 	for _, c := range r.codecs {
 		if ext := strings.ToLower(c.FileExt()); ext != "" && strings.HasSuffix(lowerName, ext) {
-			return c.Decode(trimmed)
+			return c.Decode(raw)
 		}
 	}
 	for _, c := range r.codecs {
-		if c.CanDecode(lowerName, trimmed) {
-			return c.Decode(trimmed)
+		if c.CanDecode(lowerName, raw) {
+			return c.Decode(raw)
 		}
 	}
 	return nil, errors.New("不支持的导入文件格式")
+}
+
+// ---------- ZIPCodec ----------
+
+type ZIPCodec struct {
+	CategoriesFn func() []string
+	Posters      *PosterStore
+}
+
+func (ZIPCodec) Format() string      { return "zip" }
+func (ZIPCodec) ContentType() string { return "application/zip" }
+func (ZIPCodec) FileExt() string     { return ".zip" }
+func (ZIPCodec) CanDecode(filename string, raw []byte) bool {
+	return strings.HasSuffix(filename, ".zip") || hasZIPMagic(raw)
+}
+
+func (c ZIPCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	writtenPosters := make(map[string]bool)
+	exportItems := append([]CatalogBeer(nil), items...)
+	posterFiles := make([]string, len(exportItems))
+
+	for i := range exportItems {
+		pURL := strings.TrimSpace(exportItems[i].PosterURL)
+		if c.Posters != nil && IsLocalPosterURL(pURL) {
+			if name, data, ok := c.Posters.Read(pURL); ok {
+				rel := "posters/" + name
+				if !writtenPosters[rel] {
+					fh := &zip.FileHeader{
+						Name:     rel,
+						Method:   zip.Store,
+						Modified: now,
+					}
+					fw, err := zw.CreateHeader(fh)
+					if err != nil {
+						return nil, err
+					}
+					if _, err := fw.Write(data); err != nil {
+						return nil, err
+					}
+					writtenPosters[rel] = true
+				}
+				posterFiles[i] = rel
+			} else {
+				exportItems[i].PosterURL = ""
+			}
+		}
+	}
+
+	jsonBytes, err := encodeCatalogJSONWithPosterFiles(exportItems, posterFiles, brand, now, resolveCodecCategories(c.CategoriesFn), 2)
+	if err != nil {
+		return nil, err
+	}
+	mfh := &zip.FileHeader{
+		Name:     zipCatalogFilename,
+		Method:   zip.Deflate,
+		Modified: now,
+	}
+	mw, err := zw.CreateHeader(mfh)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := mw.Write(jsonBytes); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func normalizeZipEntryPath(raw string) (string, bool) {
+	if raw == "" || strings.Contains(raw, "\\") || strings.HasPrefix(raw, "/") {
+		return "", false
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return "", false
+		}
+	}
+	parts := strings.Split(raw, "/")
+	for _, p := range parts {
+		if p == "" || p == "." || p == ".." {
+			return "", false
+		}
+	}
+	clean := path.Clean(raw)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", false
+	}
+	return clean, true
+}
+
+func readZipEntryBounded(f *zip.File, maxEntryBytes int64, totalLeft *int64) ([]byte, error) {
+	if f.UncompressedSize64 > uint64(maxEntryBytes) {
+		return nil, fmt.Errorf("压缩包内文件 %s 体积超过上限", f.Name)
+	}
+	limit := maxEntryBytes
+	if *totalLeft < limit {
+		limit = *totalLeft
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, fmt.Errorf("无法读取压缩包内文件 %s: %w", f.Name, err)
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取压缩包内文件 %s 失败: %w", f.Name, err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("压缩包解压体积超过上限（文件 %s）", f.Name)
+	}
+	*totalLeft -= int64(len(data))
+	return data, nil
+}
+
+type zipPosterRef struct {
+	PosterFile string `json:"poster_file"`
+	PosterURL  string `json:"poster_url"`
+	Poster     string `json:"poster"`
+}
+
+func extractZipPosterRefs(trimmedJSON []byte) ([]zipPosterRef, error) {
+	if len(trimmedJSON) == 0 {
+		return nil, nil
+	}
+	if trimmedJSON[0] == '[' {
+		var refs []zipPosterRef
+		if err := json.Unmarshal(trimmedJSON, &refs); err != nil {
+			return nil, err
+		}
+		return refs, nil
+	}
+	var env struct {
+		Items []zipPosterRef `json:"items"`
+	}
+	if err := json.Unmarshal(trimmedJSON, &env); err != nil {
+		return nil, err
+	}
+	return env.Items, nil
+}
+
+func (c ZIPCodec) Decode(raw []byte) ([]ImportItem, error) {
+	if !hasZIPMagic(raw) {
+		return nil, errors.New("请上传本系统导出的 .zip 历史酒单压缩包")
+	}
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		return nil, errors.New("压缩包损坏或格式不支持")
+	}
+	if len(zr.File) == 0 {
+		return nil, errors.New("压缩包为空")
+	}
+	if len(zr.File) > maxZipEntries {
+		return nil, fmt.Errorf("压缩包内文件数量过多（上限 %d）", maxZipEntries)
+	}
+
+	entries := make(map[string]*zip.File, len(zr.File))
+	for _, f := range zr.File {
+		if strings.HasSuffix(f.Name, "/") || f.FileInfo().IsDir() {
+			continue
+		}
+		if strings.HasPrefix(f.Name, "__MACOSX/") || path.Base(f.Name) == ".DS_Store" {
+			continue
+		}
+		norm, ok := normalizeZipEntryPath(f.Name)
+		if !ok {
+			return nil, fmt.Errorf("压缩包包含不安全路径 %q", f.Name)
+		}
+		entries[norm] = f
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("压缩包内没有有效文件")
+	}
+
+	// 支持根目录 catalog.json 或整体多套一层同名目录（如 beer-catalog/catalog.json）。
+	if _, hasRoot := entries[zipCatalogFilename]; !hasRoot {
+		var commonTop string
+		for p := range entries {
+			top, _, hasSlash := strings.Cut(p, "/")
+			if !hasSlash || top == "" {
+				commonTop = ""
+				break
+			}
+			if commonTop == "" {
+				commonTop = top
+			} else if commonTop != top {
+				commonTop = ""
+				break
+			}
+		}
+		if commonTop != "" {
+			prefix := commonTop + "/"
+			if _, ok := entries[prefix+zipCatalogFilename]; ok {
+				stripped := make(map[string]*zip.File, len(entries))
+				for k, v := range entries {
+					stripped[strings.TrimPrefix(k, prefix)] = v
+				}
+				entries = stripped
+			}
+		}
+	}
+
+	catEntry, ok := entries[zipCatalogFilename]
+	if !ok {
+		return nil, errors.New("压缩包缺少 catalog.json 文件")
+	}
+
+	totalLeft := int64(maxZipTotalUncompressed)
+	catRaw, err := readZipEntryBounded(catEntry, ImportMaxBytes, &totalLeft)
+	if err != nil {
+		return nil, err
+	}
+	if !utf8.Valid(catRaw) {
+		return nil, errors.New("catalog.json 必须是 UTF-8 编码")
+	}
+	catTrimmed := bytes.TrimSpace(bytes.TrimPrefix(catRaw, []byte{0xEF, 0xBB, 0xBF}))
+	items, err := ParseCatalogJSONWithCategories(catTrimmed, resolveCodecCategories(c.CategoriesFn))
+	if err != nil {
+		return nil, err
+	}
+	refs, err := extractZipPosterRefs(catTrimmed)
+	if err != nil || len(refs) != len(items) {
+		return nil, errors.New("解析 catalog.json 中的酒标索引失败")
+	}
+
+	posterCache := make(map[string][]byte)
+	for i := range items {
+		rowNo := i + 1
+		refPath := strings.TrimSpace(refs[i].PosterFile)
+		explicitRef := refPath != ""
+		if !explicitRef {
+			pURL := strings.TrimSpace(refs[i].PosterURL)
+			if pURL == "" {
+				pURL = strings.TrimSpace(refs[i].Poster)
+			}
+			if name, ok := ParsePosterFilename(pURL); ok {
+				refPath = "posters/" + name
+			}
+		}
+		if refPath == "" {
+			continue
+		}
+		normPoster, ok := normalizeZipEntryPath(refPath)
+		if !ok {
+			return nil, fmt.Errorf("第 %d 条酒标的压缩包路径 %q 不合法", rowNo, refPath)
+		}
+		imgBytes, cached := posterCache[normPoster]
+		if !cached {
+			pf, exists := entries[normPoster]
+			if !exists {
+				if explicitRef {
+					return nil, fmt.Errorf("第 %d 条引用的酒标文件 %q 在压缩包中不存在", rowNo, normPoster)
+				}
+				continue
+			}
+			imgBytes, err = readZipEntryBounded(pf, MaxPosterBytes, &totalLeft)
+			if err != nil {
+				return nil, fmt.Errorf("第 %d 条酒标：%w", rowNo, err)
+			}
+			if _, _, ok := DetectPosterExt(imgBytes); !ok {
+				return nil, fmt.Errorf("第 %d 条酒标文件 %q 不是合法的 JPG/PNG/WebP/GIF 图片", rowNo, normPoster)
+			}
+			posterCache[normPoster] = imgBytes
+		}
+		items[i].Poster = &PosterPayload{
+			Filename: path.Base(normPoster),
+			Data:     imgBytes,
+		}
+		items[i].Mask.PosterURL = true
+	}
+	return items, nil
 }
 
 // ---------- CSVCodec ----------
@@ -103,10 +393,18 @@ type CSVCodec struct {
 func (CSVCodec) Format() string      { return "csv" }
 func (CSVCodec) ContentType() string { return "text/csv; charset=utf-8" }
 func (CSVCodec) FileExt() string     { return ".csv" }
-func (CSVCodec) CanDecode(filename string, trimmed []byte) bool {
-	return strings.HasSuffix(filename, ".csv") || (trimmed[0] != '{' && trimmed[0] != '[')
+func (CSVCodec) CanDecode(filename string, raw []byte) bool {
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
+	return strings.HasSuffix(filename, ".csv") || (!hasZIPMagic(raw) && len(trimmed) > 0 && trimmed[0] != '{' && trimmed[0] != '[' && utf8.Valid(raw))
 }
-func (c CSVCodec) Decode(trimmed []byte) ([]ImportItem, error) {
+func (c CSVCodec) Decode(raw []byte) ([]ImportItem, error) {
+	if !utf8.Valid(raw) {
+		return nil, errors.New("文件必须是 UTF-8 编码的 CSV")
+	}
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
+	if len(trimmed) == 0 {
+		return nil, errors.New("CSV 文件为空")
+	}
 	return ParseCatalogCSVWithCategories(trimmed, resolveCodecCategories(c.CategoriesFn))
 }
 func (c CSVCodec) Encode(items []CatalogBeer, _ string, _ time.Time) ([]byte, error) {
@@ -126,10 +424,18 @@ type JSONCodec struct {
 func (JSONCodec) Format() string      { return "json" }
 func (JSONCodec) ContentType() string { return "application/json; charset=utf-8" }
 func (JSONCodec) FileExt() string     { return ".json" }
-func (JSONCodec) CanDecode(filename string, trimmed []byte) bool {
-	return strings.HasSuffix(filename, ".json") || trimmed[0] == '{' || trimmed[0] == '['
+func (JSONCodec) CanDecode(filename string, raw []byte) bool {
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
+	return strings.HasSuffix(filename, ".json") || (len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '['))
 }
-func (c JSONCodec) Decode(trimmed []byte) ([]ImportItem, error) {
+func (c JSONCodec) Decode(raw []byte) ([]ImportItem, error) {
+	if !utf8.Valid(raw) {
+		return nil, errors.New("文件必须是 UTF-8 编码的 JSON")
+	}
+	trimmed := bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
+	if len(trimmed) == 0 {
+		return nil, errors.New("JSON 文件为空")
+	}
 	return ParseCatalogJSONWithCategories(trimmed, resolveCodecCategories(c.CategoriesFn))
 }
 func (c JSONCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
@@ -235,6 +541,7 @@ type catalogExportItem struct {
 	Price330   string   `json:"price_330"`
 	Price500   string   `json:"price_500"`
 	PosterURL  string   `json:"poster_url"`
+	PosterFile string   `json:"poster_file,omitempty"`
 }
 
 func EncodeCatalogJSON(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
@@ -242,8 +549,12 @@ func EncodeCatalogJSON(items []CatalogBeer, brand string, now time.Time) ([]byte
 }
 
 func encodeCatalogJSONWithCategories(items []CatalogBeer, brand string, now time.Time, cats []string) ([]byte, error) {
+	return encodeCatalogJSONWithPosterFiles(items, nil, brand, now, cats, 1)
+}
+
+func encodeCatalogJSONWithPosterFiles(items []CatalogBeer, posterFiles []string, brand string, now time.Time, cats []string, version int) ([]byte, error) {
 	out := make([]catalogExportItem, 0, len(items))
-	for _, c := range items {
+	for i, c := range items {
 		tags := c.Tags
 		if tags == nil {
 			tags = []string{}
@@ -255,6 +566,10 @@ func encodeCatalogJSONWithCategories(items []CatalogBeer, brand string, now time
 		capML := c.CapacityML
 		if capML <= 0 {
 			capML = DefaultCapacityML
+		}
+		posterFile := ""
+		if i < len(posterFiles) {
+			posterFile = posterFiles[i]
 		}
 		out = append(out, catalogExportItem{
 			Brewery:    c.Brewery,
@@ -272,10 +587,11 @@ func encodeCatalogJSONWithCategories(items []CatalogBeer, brand string, now time
 			Price330:   c.Price330Input(),
 			Price500:   c.Price500Input(),
 			PosterURL:  c.PosterURL,
+			PosterFile: posterFile,
 		})
 	}
 	doc := catalogExportDoc{
-		Version:    1,
+		Version:    version,
 		Brand:      brand,
 		ExportedAt: now.In(platform.ReportZone).Format(time.RFC3339),
 		Items:      out,
@@ -339,6 +655,7 @@ func ParseCatalogCSV(raw []byte) ([]ImportItem, error) {
 }
 
 func ParseCatalogCSVWithCategories(raw []byte, allowed []string) ([]ImportItem, error) {
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
 	cr := csv.NewReader(bytes.NewReader(raw))
 	cr.TrimLeadingSpace = true
 	cr.FieldsPerRecord = -1
@@ -559,6 +876,10 @@ func ParseCatalogJSON(raw []byte) ([]ImportItem, error) {
 }
 
 func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem, error) {
+	raw = bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF}))
+	if len(raw) == 0 {
+		return nil, errors.New("JSON 文件为空")
+	}
 	var rawItems []json.RawMessage
 	if raw[0] == '[' {
 		if err := json.Unmarshal(raw, &rawItems); err != nil {
