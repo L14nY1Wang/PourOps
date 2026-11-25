@@ -28,12 +28,13 @@
 -->
 <style>
   :root{
-    --bg:#091220; --bg-deep:#0f1c30;
-    --card:#142237; --card-hi:#1b2d49;
-    --ink:#f4f7fc; --ink-2:#b0c0d6; --ink-3:#7f93ae;
-    --cobalt:#2758e6; --cobalt-hi:#93b0ff;
-    --foam:#52dfa9; --alert:#ff9675;
-    --line:rgba(255,255,255,.10); --line-soft:rgba(255,255,255,.07);
+    --bg:#ece6db; --bg-top:#f5f1e8; --bg-deep:#e4dccd;
+    --card:#faf7f1; --card-hi:#fffdf9; --card-low:#f3ede2;
+    --ink:#1f1c18; --ink-2:#544d43; --ink-3:#867d70;
+    --amber:#b86b18; --amber-ink:#8c4d0b; --amber-bg:rgba(184,107,24,.11); --amber-line:rgba(184,107,24,.28);
+    --foam:#138a63; --foam-bg:rgba(244,251,248,.90); --foam-line:rgba(19,138,99,.30);
+    --alert:#c8432b; --alert-bg:rgba(253,245,243,.92); --alert-line:rgba(200,67,43,.30);
+    --line:rgba(46,38,26,.11); --line-soft:rgba(46,38,26,.075);
     --head:clamp(64px,8.4vh,98px);
     --pad-x:clamp(14px,1.6vw,36px);
     --pad-y:clamp(10px,1.4vh,26px);
@@ -46,10 +47,10 @@
     font-family:"PingFang SC","Hiragino Sans GB","Source Han Sans SC","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
     -webkit-font-smoothing:antialiased; user-select:none;
     background:
-      radial-gradient(88vw 58vh at 6% -12%, rgba(39,88,230,.34), transparent 62%),
-      radial-gradient(72vw 52vh at 102% 108%, rgba(82,223,169,.13), transparent 60%),
-      radial-gradient(50vw 40vh at 52% 48%, rgba(164,139,240,.06), transparent 70%),
-      linear-gradient(180deg,var(--bg-deep),var(--bg) 64%,#070f1b);
+      radial-gradient(88vw 58vh at 6% -12%, rgba(217,154,68,.13), transparent 62%),
+      radial-gradient(72vw 52vh at 102% 108%, rgba(82,196,154,.09), transparent 60%),
+      radial-gradient(54vw 42vh at 52% 48%, rgba(255,253,248,.62), transparent 72%),
+      linear-gradient(180deg,var(--bg-top),var(--bg) 64%,var(--bg-deep));
   }
 
   /* ---------- 顶栏：品牌标识 + PourOps + 今日供应 + 时间 ---------- */
@@ -57,12 +58,12 @@
     position:fixed; z-index:3; top:0; left:0; right:0; height:var(--head);
     display:flex; align-items:center; justify-content:space-between;
     padding:0 var(--pad-x);
-    border-bottom:1px solid var(--line-soft);
-    background:linear-gradient(180deg,rgba(14,25,43,.94),rgba(14,25,43,.62) 74%,transparent);
-    backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(248,244,236,.95),rgba(243,238,229,.84));
+    backdrop-filter:blur(12px);
   }
   .brand{display:flex; align-items:center; gap:clamp(10px,1vw,18px); min-width:0;}
-  .whale{height:clamp(32px,5.2vh,58px); width:auto; flex:none; filter:drop-shadow(0 0 22px rgba(82,223,169,.28));}
+  .whale{height:clamp(32px,5.2vh,58px); width:auto; flex:none; filter:drop-shadow(0 2px 8px rgba(31,28,24,.10));}
   .brand-txt{min-width:0;}
   .mark{
     font-size:clamp(15px,1.15vw,26px); font-weight:800; line-height:1.05;
@@ -75,13 +76,13 @@
   }
   .kicker::before{
     content:""; width:6px; height:6px; border-radius:50%; background:var(--foam);
-    box-shadow:0 0 10px var(--foam);
+    box-shadow:0 0 0 3px rgba(19,138,99,.16);
   }
   .head-r{display:flex; align-items:center; gap:clamp(14px,1.6vw,30px); min-width:0;}
   .summary{
-    padding:.32em .8em; border-radius:999px; border:1px solid var(--line-soft);
-    background:rgba(255,255,255,.035);
-    font-size:clamp(10px,.72vw,14px); letter-spacing:.12em; color:var(--ink-3); white-space:nowrap;
+    padding:.32em .8em; border-radius:999px; border:1px solid var(--line);
+    background:rgba(255,253,249,.78);
+    font-size:clamp(10px,.72vw,14px); letter-spacing:.12em; color:var(--ink-2); white-space:nowrap;
   }
   .summary b{font-size:1.12em; color:var(--ink); letter-spacing:.04em; font-variant-numeric:tabular-nums;}
   .clock{
@@ -110,16 +111,16 @@
     padding:calc(var(--u) * .085) calc(var(--u) * .102);
     border-radius:clamp(11px,.78vw,16px);
     background:
-      radial-gradient(120% 72% at 0% 0%, color-mix(in srgb,var(--tone) 14%,transparent), transparent 60%),
-      linear-gradient(160deg,var(--card-hi),var(--card) 56%,#101c2f);
+      radial-gradient(110% 68% at 0% 0%, color-mix(in srgb,var(--tone) 11%,transparent), transparent 58%),
+      linear-gradient(160deg,var(--card-hi),var(--card) 58%,var(--card-low));
     border:1px solid var(--line);
-    box-shadow:0 16px 34px rgba(3,9,18,.44), inset 0 1px 0 rgba(255,255,255,.08);
+    box-shadow:0 10px 26px rgba(44,34,20,.07), 0 2px 6px rgba(44,34,20,.04), inset 0 1px 0 rgba(255,255,255,.88);
     animation:rise .55s cubic-bezier(.2,.7,.3,1) both;
     animation-delay:calc(var(--i,0) * 42ms);
   }
   .card::before{
-    content:""; position:absolute; left:0; right:0; top:0; height:3.5px; opacity:.92;
-    background:linear-gradient(90deg,var(--tone),color-mix(in srgb,var(--tone) 32%,transparent) 60%,transparent 86%);
+    content:""; position:absolute; left:0; right:0; top:0; height:4px; opacity:.95;
+    background:linear-gradient(90deg,var(--tone),color-mix(in srgb,var(--tone) 42%,transparent) 66%,transparent 92%);
   }
   @keyframes rise{ from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:none;} }
   @media (prefers-reduced-motion:reduce){ .card{animation:none;} }
@@ -129,11 +130,11 @@
   .tap b{
     display:inline-grid; place-items:center; min-width:1.58em; padding:.18em .32em;
     border-radius:calc(var(--u) * .055);
-    background:linear-gradient(160deg,#3a6cf5,var(--cobalt)); color:#fff;
+    background:linear-gradient(160deg,#322c26,#1d1915); color:#fffdf8;
     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
     font-size:calc(var(--u) * .185 * var(--fit)); font-weight:800; line-height:1; letter-spacing:.01em;
     font-variant-numeric:tabular-nums;
-    box-shadow:0 6px 16px rgba(39,88,230,.42), inset 0 1px 0 rgba(255,255,255,.28);
+    box-shadow:0 5px 14px rgba(31,25,18,.22), inset 0 1px 0 rgba(255,255,255,.16);
   }
   .tap small{
     font-size:calc(var(--u) * .045 * var(--fit)); font-weight:700;
@@ -142,29 +143,34 @@
   .chips{display:flex; gap:.35em; flex:1; min-width:0; overflow:hidden;}
   .chip{
     flex:none; padding:.18em .58em; border-radius:999px; white-space:nowrap;
-    border:1px solid rgba(147,176,255,.32); background:rgba(39,88,230,.2); color:var(--cobalt-hi);
+    border:1px solid var(--amber-line); background:var(--amber-bg); color:var(--amber-ink);
     font-size:calc(var(--u) * .049 * var(--fit)); font-weight:650; letter-spacing:.04em;
   }
   .status{
     display:inline-flex; align-items:center; gap:.4em;
     flex:none; padding:.34em .72em; border-radius:999px; line-height:1; white-space:nowrap;
     font-size:calc(var(--u) * .053 * var(--fit)); font-weight:700; letter-spacing:.1em;
-    border:1px solid transparent;
+    border:1px solid transparent; backdrop-filter:blur(4px);
   }
   .status::before{content:""; width:.42em; height:.42em; border-radius:50%; background:currentColor;}
-  .status.on{color:var(--foam); border-color:rgba(82,223,169,.42); background:rgba(7,16,29,.72);}
-  .status.on::before{box-shadow:0 0 8px var(--foam);}
-  .status.off{color:var(--alert); border-color:rgba(255,150,117,.48); background:rgba(24,14,18,.78);}
+  .status.on{color:var(--foam); border-color:var(--foam-line); background:var(--foam-bg);}
+  .status.on::before{box-shadow:0 0 0 2px rgba(19,138,99,.18);}
+  .status.off{color:var(--alert); border-color:var(--alert-line); background:var(--alert-bg);}
 
-  /* 酒标仅作水印，不参与排版；无图时卡片照常满排 */
+  /* 酒标保留柔和原色并做右向渐隐水印，不参与排版；无图时卡片照常满排 */
   .art{
-    position:absolute; right:-4%; top:52%; translate:0 -50%; z-index:0;
-    width:44%; height:80%; object-fit:contain; pointer-events:none;
-    opacity:.12; filter:invert(1) grayscale(1) contrast(1.1); mix-blend-mode:screen;
+    position:absolute; right:-2%; top:50%; transform:translateY(-50%); z-index:0;
+    width:56%; height:94%; object-fit:cover; object-position:center; pointer-events:none;
+    opacity:.34; filter:saturate(.88) contrast(.96) brightness(1.04);
+    mix-blend-mode:multiply;
+    -webkit-mask-image:radial-gradient(ellipse 88% 82% at 86% 48%, #000 22%, rgba(0,0,0,.62) 56%, transparent 94%);
+    mask-image:radial-gradient(ellipse 88% 82% at 86% 48%, #000 22%, rgba(0,0,0,.62) 56%, transparent 94%);
   }
   .card::after{
     content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
-    background:linear-gradient(to top,rgba(10,19,33,.94) 0%,rgba(10,19,33,.56) 32%,rgba(10,19,33,.14) 64%,transparent 86%);
+    background:
+      linear-gradient(90deg, rgba(251,248,242,.92) 0%, rgba(251,248,242,.72) 42%, rgba(251,248,242,.18) 72%, rgba(251,248,242,.04) 100%),
+      linear-gradient(to top, rgba(248,243,234,.92) 0%, rgba(248,243,234,.48) 26%, transparent 56%);
   }
 
   .info{position:relative; z-index:2; display:flex; flex-direction:column; flex:1; min-height:0; margin-top:calc(var(--u) * .055);}
@@ -177,7 +183,6 @@
     flex:none; margin:calc(var(--u) * .02) 0 0; color:var(--ink);
     font-size:calc(var(--u) * .158 * var(--fit)); font-weight:800; line-height:1.12;
     letter-spacing:.01em; white-space:nowrap;
-    text-shadow:0 2px 10px rgba(4,10,20,.35);
   }
   .style-line{
     flex:none; margin-top:calc(var(--u) * .026);
@@ -185,7 +190,12 @@
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   .style-line .cat{
-    color:color-mix(in srgb,var(--tone) 78%,#fff); font-weight:750;
+    color:color-mix(in srgb,var(--tone) 56%,#1f1c18); font-weight:750;
+  }
+  .style-line .cat::before{
+    content:""; display:inline-block; width:.48em; height:.48em; border-radius:50%;
+    margin-right:.36em; vertical-align:.08em; background:var(--tone);
+    box-shadow:0 0 0 1px rgba(31,28,24,.12);
   }
 
   .foot{
@@ -211,21 +221,20 @@
     margin-left:auto; flex:none; text-align:right; white-space:nowrap;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
     font-size:calc(var(--u) * .18 * var(--fit)); font-weight:800; line-height:1.15;
-    letter-spacing:-.01em; color:#ffffff; font-variant-numeric:tabular-nums;
-    text-shadow:0 0 22px rgba(147,176,255,.22);
+    letter-spacing:-.01em; color:#1b1713; font-variant-numeric:tabular-nums;
   }
 
   /* 售罄：信息保持可读，降对比 + 状态标红；编号徽章去色 + 轻微斜纹氛围 */
   .card.off{
     background:
-      repeating-linear-gradient(-45deg,rgba(255,255,255,.016) 0 10px,transparent 10px 20px),
-      linear-gradient(160deg,#141e2e,#101926 56%,#0d1521);
-    border-color:rgba(255,255,255,.065);
+      repeating-linear-gradient(-45deg,rgba(44,35,24,.028) 0 10px,transparent 10px 20px),
+      linear-gradient(160deg,#ede7dc,#e7e0d4 58%,#e2dacd);
+    border-color:rgba(46,38,26,.09);
   }
-  .card.off::before{opacity:.28;}
-  .card.off .info{opacity:.58;}
-  .card.off .art{opacity:.05;}
-  .card.off .tap b{background:#2d3a50; box-shadow:none;}
+  .card.off::before{opacity:.32;}
+  .card.off .info{opacity:.60;}
+  .card.off .art{opacity:.10; filter:grayscale(.75) brightness(1.06);}
+  .card.off .tap b{background:#aba193; color:#fffdf9; box-shadow:none;}
   .card.off .price{color:var(--ink-2); text-shadow:none;}
 
   .hint{
@@ -245,7 +254,7 @@
 <body>
   <header class="top">
     <div class="brand">
-      <img class="whale" src="{{asset "/static/brand/pourops-dark.svg"}}" alt="" onerror="this.style.visibility='hidden'">
+      <img class="whale" src="{{asset "/static/brand/pourops-light.svg"}}" alt="" onerror="this.style.visibility='hidden'">
       <div class="brand-txt">
         <div class="mark" id="brand"></div>
         <div class="kicker">TAP LIST · 精酿生啤</div>

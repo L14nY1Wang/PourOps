@@ -202,7 +202,7 @@ func TestAllTemplatesRender(t *testing.T) {
 		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, true},
 		{"screen", "screen/screen.html", "screen", &screen.ScreenPage{
 			Layout: ui.Layout{Brand: "北岸精酿"},
-		}, []string{`<title>酒单 - 北岸精酿</title>`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, true},
+		}, []string{`<title>酒单 - 北岸精酿</title>`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `mix-blend-mode:multiply`, `mask-image:radial-gradient`}, true},
 	}
 
 	covered := make(map[string]bool, len(ui.DefaultPageFiles))
@@ -345,6 +345,10 @@ func TestAllTemplatesRender(t *testing.T) {
 				if strings.Contains(actions, `href="/admin/beers"`) {
 					t.Fatalf("keg_form 右上角不应再包含 href=\"/admin/beers\"")
 				}
+			case "screen":
+				if strings.Contains(body, `invert(1) grayscale(1)`) {
+					t.Fatalf("screen 不应再使用暗黑反相灰度酒标滤镜")
+				}
 			}
 
 			if !tc.notLayout && tc.name != "login" && tc.name != "login-2fa" && tc.name != "security-staff" {
@@ -446,7 +450,7 @@ func TestNewHandlerSmoke(t *testing.T) {
 	recScreen := httptest.NewRecorder()
 	h.ServeHTTP(recScreen, httptest.NewRequest(http.MethodGet, "/screen/", nil))
 	if recScreen.Code != http.StatusOK ||
-		!strings.Contains(recScreen.Body.String(), "/static/brand/pourops-dark.svg?v=") ||
+		!strings.Contains(recScreen.Body.String(), "/static/brand/pourops-light.svg?v=") ||
 		!strings.Contains(recScreen.Body.String(), "<title>酒单 - PourOps</title>") {
 		t.Fatalf("GET /screen/ = %d body=%q", recScreen.Code, recScreen.Body.String()[:min(len(recScreen.Body.String()), 300)])
 	}
