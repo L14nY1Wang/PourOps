@@ -172,3 +172,111 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 		t.Fatalf("ResetCategories len = %d, want %d", len(store.BeerCategories()), len(platform.DefaultBeerCategories))
 	}
 }
+
+func TestSettingsHTTPSaveGeneralAndWebhookIsolated(t *testing.T) {
+	store := NewSettingsStore(nil, "PourOps")
+	webhooks := event.NewWebhookDispatcher(store, nil)
+	defer webhooks.Close(context.Background())
+	svc := NewService(store, webhooks, testRenderer())
+
+	// 先预设自定义分类与 Webhook，验证分模块保存互不覆盖。
+	if _, err := store.AddBeerCategory(context.Background(), "赛松"); err != nil {
+		t.Fatalf("AddBeerCategory: %v", err)
+	}
+	if _, err := store.SaveWebhook(context.Background(), "https://example.com/init", "init-secret", false, []string{string(event.EventOrderPaid)}); err != nil {
+		t.Fatalf("preset SaveWebhook: %v", err)
+	}
+
+	// 1. SaveGeneral 仅更新品牌与默认核算参数，保留 Webhook 与自定义分类
+	genForm := url.Values{
+		"brand":                {"北岸精酿"},
+		"default_sellable_pct": {"86"},
+		"default_margin_pct":   {"58"},
+	}
+	reqGen := httptest.NewRequest(http.MethodPost, "/admin/settings/general", strings.NewReader(genForm.Encode()))
+	reqGen.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recGen := httptest.NewRecorder()
+	svc.SaveGeneral(recGen, reqGen)
+	if recGen.Code != http.StatusSeeOther || strings.Contains(recGen.Header().Get("Location"), "err=") {
+		t.Fatalf("SaveGeneral status=%d loc=%q", recGen.Code, recGen.Header().Get("Location"))
+	}
+	cfg := store.Get()
+	if cfg.Brand != "北岸精酿" || cfg.DefaultSellablePct != 86 || cfg.DefaultMarginPct != 58 {
+		t.Fatalf("SaveGeneral updated fields = %+v", cfg)
+	}
+	if cfg.WebhookURL != "https://example.com/init" || cfg.WebhookSecret != "init-secret" || len(cfg.WebhookEvents) != 1 || cfg.WebhookEvents[0] != string(event.EventOrderPaid) {
+		t.Fatalf("SaveGeneral should preserve webhook settings, got %+v", cfg)
+	}
+	if cfg.BeerCategories[len(cfg.BeerCategories)-1] != "赛松" {
+		t.Fatalf("SaveGeneral should preserve custom categories, got %v", cfg.BeerCategories)
+	}
+
+	// 2. SaveGeneral 非法比例返回 400 且不破坏已有配置
+	badGenForm := url.Values{
+		"brand":                {"误改店名"},
+		"default_sellable_pct": {"25"},
+		"default_margin_pct":   {"50"},
+	}
+	reqBadGen := httptest.NewRequest(http.MethodPost, "/admin/settings/general", strings.NewReader(badGenForm.Encode()))
+	reqBadGen.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recBadGen := httptest.NewRecorder()
+	svc.SaveGeneral(recBadGen, reqBadGen)
+	if recBadGen.Code != http.StatusBadRequest {
+		t.Fatalf("bad SaveGeneral status=%d, want 400", recBadGen.Code)
+	}
+	if got := store.Get(); got.Brand != "北岸精酿" || got.WebhookURL != "https://example.com/init" {
+		t.Fatalf("failed SaveGeneral should not mutate store, got %+v", got)
+	}
+
+	// 3. SaveWebhook 仅更新 Webhook，留空密钥保持不变，且不改门店/核算/分类
+	whForm := url.Values{
+		"webhook_url":    {"https://example.com/v2"},
+		"webhook_events": {string(event.EventKegFinished), string(event.EventRetailLowStock)},
+	}
+	reqWH := httptest.NewRequest(http.MethodPost, "/admin/settings/webhook", strings.NewReader(whForm.Encode()))
+	reqWH.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recWH := httptest.NewRecorder()
+	svc.SaveWebhook(recWH, reqWH)
+	if recWH.Code != http.StatusSeeOther || strings.Contains(recWH.Header().Get("Location"), "err=") {
+		t.Fatalf("SaveWebhook status=%d loc=%q", recWH.Code, recWH.Header().Get("Location"))
+	}
+	cfg = store.Get()
+	if cfg.WebhookURL != "https://example.com/v2" || cfg.WebhookSecret != "init-secret" || len(cfg.WebhookEvents) != 2 {
+		t.Fatalf("SaveWebhook got %+v", cfg)
+	}
+	if cfg.Brand != "北岸精酿" || cfg.DefaultSellablePct != 86 || cfg.DefaultMarginPct != 58 {
+		t.Fatalf("SaveWebhook should preserve brand & pricing, got %+v", cfg)
+	}
+
+	// 4. SaveWebhook 清空密钥生效
+	whClearForm := url.Values{
+		"webhook_url":          {"https://example.com/v2"},
+		"clear_webhook_secret": {"1"},
+		"webhook_events":       {string(event.EventKegFinished)},
+	}
+	reqClear := httptest.NewRequest(http.MethodPost, "/admin/settings/webhook", strings.NewReader(whClearForm.Encode()))
+	reqClear.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recClear := httptest.NewRecorder()
+	svc.SaveWebhook(recClear, reqClear)
+	if recClear.Code != http.StatusSeeOther {
+		t.Fatalf("SaveWebhook clear status=%d", recClear.Code)
+	}
+	if store.Get().WebhookSecret != "" {
+		t.Fatalf("expected cleared webhook secret, got %q", store.Get().WebhookSecret)
+	}
+
+	// 5. SaveWebhook 拦截 SSRF 地址并返回 400，保留原设置
+	whBadForm := url.Values{
+		"webhook_url": {"http://169.254.169.254/latest/meta-data"},
+	}
+	reqBadWH := httptest.NewRequest(http.MethodPost, "/admin/settings/webhook", strings.NewReader(whBadForm.Encode()))
+	reqBadWH.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recBadWH := httptest.NewRecorder()
+	svc.SaveWebhook(recBadWH, reqBadWH)
+	if recBadWH.Code != http.StatusBadRequest {
+		t.Fatalf("bad SaveWebhook status=%d, want 400", recBadWH.Code)
+	}
+	if got := store.Get(); got.WebhookURL != "https://example.com/v2" || got.Brand != "北岸精酿" {
+		t.Fatalf("failed SaveWebhook should preserve existing state, got %+v", got)
+	}
+}

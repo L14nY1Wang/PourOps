@@ -5,7 +5,7 @@
     <p>调整桶号、容量、成本或生命周期时间节点。</p>
   </div>
   <div class="heading-actions">
-    <a class="button button--secondary" href="/admin/beers"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒单</a>
+    {{if .Keg.ID}}<a class="button button--secondary" href="/admin/kegs/{{.Keg.ID}}"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回酒桶详情</a>{{else}}<a class="button button--secondary" href="/admin/kegs"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回桶装盈亏</a>{{end}}
   </div>
 </div>
 
@@ -69,7 +69,7 @@
     </fieldset>
   </div>
   <div class="card__footer editor-actions">
-    <a class="button button--secondary" href="/admin/beers">取消</a>
+    <a class="button button--secondary" href="{{if .Keg.ID}}/admin/kegs/{{.Keg.ID}}{{else}}/admin/kegs{{end}}">取消</a>
     <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存酒桶</button>
   </div>
 </form>

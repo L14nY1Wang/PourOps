@@ -4,9 +4,11 @@
     <h1 class="page-title mb-0">账号安全</h1>
     <p>{{if .Me}}{{.Me.Username}} · {{.Me.RoleName}} · 密码与两步验证管理{{end}}</p>
   </div>
+  {{if and .Me (not .Me.CanBackend)}}
   <div class="heading-actions">
-    {{if .Me}}{{if .Me.CanBackend}}<a class="button button--secondary" href="/admin/"><i class="bi bi-arrow-left" aria-hidden="true"></i>回后台</a>{{else}}<a class="button button--secondary" href="/pos/"><i class="bi bi-arrow-left" aria-hidden="true"></i>回点餐端</a>{{end}}{{end}}
+    <a class="button button--secondary" href="/pos/"><i class="bi bi-arrow-left" aria-hidden="true"></i>回点餐端</a>
   </div>
+  {{end}}
 </div>
 
 {{if .Sec.Recovery}}

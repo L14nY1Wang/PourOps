@@ -32,6 +32,7 @@ func TestAllTemplatesRender(t *testing.T) {
 	abv, ut := 6.8, 4.47
 	ibu := 72
 	me := &ui.UserView{ID: 1, Username: "boss", Role: ui.RoleBoss, Active: true, TwoFactor: true}
+	staff := &ui.UserView{ID: 2, Username: "staff", Role: ui.RoleStaff, Active: true}
 	pricing := settings.PricingConfig{SellablePct: 85, MarginPct: 55}
 
 	beer := catalog.Beer{
@@ -171,6 +172,9 @@ func TestAllTemplatesRender(t *testing.T) {
 		{"security-recovery", "admin/account_security.html", "layout", &auth.SecurityPage{
 			Layout: ui.Layout{Title: "账号安全", Nav: "security", Me: me}, Sec: auth.SecurityView{Recovery: []string{"ABCD-1234", "EFGH-5678"}},
 		}, nil, false},
+		{"security-staff", "admin/account_security.html", "layout", &auth.SecurityPage{
+			Layout: ui.Layout{Title: "账号安全", Nav: "security", Me: staff}, Sec: auth.SecurityView{TwoFactor: false},
+		}, nil, false},
 		{"settings", "admin/settings.html", "layout", &settings.SettingsPage{
 			Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Me: me},
 			Settings:       settings.StoreSettings{Brand: "PourOps", DefaultSellablePct: 80, DefaultMarginPct: 50, BeerCategories: []string{"IPA", "赛松"}, WebhookEvents: []string{string(event.EventOrderPaid)}},
@@ -178,7 +182,7 @@ func TestAllTemplatesRender(t *testing.T) {
 			HasSecret:      true,
 			SelectedEvents: map[string]bool{string(event.EventOrderPaid): true},
 			CatalogTotal:   12,
-		}, []string{`name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`, `历史酒单导入与导出`, `12`, `/admin/settings/catalog/export`, `/admin/settings/catalog/import`, `accept=".zip,application/zip"`}, false},
+		}, []string{`/admin/settings/general`, `/admin/settings/webhook`, `/admin/settings/webhook-test`, `name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`, `历史酒单导入与导出`, `12`, `/admin/settings/catalog/export`, `/admin/settings/catalog/import`, `accept=".zip,application/zip"`}, false},
 		{"pos-spots", "pos/pos.html", "pos", &pos.PosPage{
 			Layout:   ui.Layout{Me: me},
 			Spots:    []pos.Spot{{Key: "bar-1", Kind: "bar", Label: "吧台 1", OrderID: 88, Items: 2, Total: 9600}, {Key: "table-1", Kind: "table", Label: "小桌 1"}},
@@ -253,6 +257,108 @@ func TestAllTemplatesRender(t *testing.T) {
 			if !tc.notLayout && strings.Contains(body, `/admin/beers/catalog`) {
 				t.Fatalf("%s 不应再包含已取消的历史酒单页面链接", tc.file)
 			}
+
+			actions := extractSection(body, `<div class="heading-actions">`, `</div>`)
+			dropdown := extractSection(body, `<ul class="dropdown-menu`, `</ul>`)
+			switch tc.name {
+			case "dashboard":
+				for _, gone := range []string{"/admin/analytics", "/admin/records", "/admin/beers", "/admin/retail/new"} {
+					if strings.Contains(actions, gone) {
+						t.Fatalf("dashboard 右上角不应再包含重复跳转 %q", gone)
+					}
+				}
+			case "analytics":
+				for _, gone := range []string{`href="/admin/"`, "/admin/records"} {
+					if strings.Contains(actions, gone) {
+						t.Fatalf("analytics 右上角不应再包含重复跳转 %q", gone)
+					}
+				}
+			case "beers":
+				if strings.Contains(actions, "/admin/kegs") {
+					t.Fatalf("beers 右上角不应再包含 /admin/kegs")
+				}
+				if !strings.Contains(actions, "/admin/beers/purchase") {
+					t.Fatalf("beers 右上角应保留新增进货入口")
+				}
+			case "kegs":
+				if strings.Contains(actions, `href="/admin/beers"`) {
+					t.Fatalf("kegs 右上角不应再包含 href=\"/admin/beers\"")
+				}
+				if !strings.Contains(actions, "/admin/beers/purchase") {
+					t.Fatalf("kegs 右上角应保留新增进货入口")
+				}
+			case "settings":
+				if strings.Contains(body, `class="heading-actions"`) {
+					t.Fatalf("settings 不应再渲染空 heading-actions")
+				}
+				if strings.Contains(body, "security-card") {
+					t.Fatalf("settings 不应再使用错位的 security-card")
+				}
+				general := extractSection(body, `id="settings-general"`, `</form>`)
+				for _, want := range []string{`action="/admin/settings/general"`, `name="brand"`, `name="default_sellable_pct"`, `name="default_margin_pct"`} {
+					if !strings.Contains(general, want) {
+						t.Fatalf("settings-general 缺少 %q", want)
+					}
+				}
+				for _, gone := range []string{`name="webhook_url"`, `href="/admin/"`} {
+					if strings.Contains(general, gone) {
+						t.Fatalf("settings-general 不应包含 %q", gone)
+					}
+				}
+				webhook := extractSection(body, `id="settings-webhook"`, `</main>`)
+				for _, want := range []string{`action="/admin/settings/webhook"`, `name="webhook_url"`, `action="/admin/settings/webhook-test"`, `连通性测试`} {
+					if !strings.Contains(webhook, want) {
+						t.Fatalf("settings-webhook 缺少 %q", want)
+					}
+				}
+				if strings.Contains(webhook, `name="default_sellable_pct"`) {
+					t.Fatalf("settings-webhook 不应混入核算参数字段")
+				}
+			case "security":
+				if strings.Contains(body, `class="heading-actions"`) || strings.Contains(body, "回后台") {
+					t.Fatalf("后台角色访问账号安全页不应显示回后台入口")
+				}
+			case "security-staff":
+				if !strings.Contains(actions, `href="/pos/"`) || !strings.Contains(actions, "回点餐端") {
+					t.Fatalf("店员访问账号安全页右上角应保留回点餐端")
+				}
+				for _, want := range []string{`href="/pos/"`, `href="/screen/"`, `href="/account/security"`} {
+					if !strings.Contains(dropdown, want) {
+						t.Fatalf("店员账号下拉菜单缺少 %q", want)
+					}
+				}
+			case "keg":
+				for _, want := range []string{`href="/admin/kegs/10/edit"`, `href="/admin/kegs"`, "返回桶装盈亏"} {
+					if !strings.Contains(actions, want) {
+						t.Fatalf("keg 右上角缺少 %q", want)
+					}
+				}
+				for _, gone := range []string{`href="/admin/beers"`, "button--primary"} {
+					if strings.Contains(actions, gone) {
+						t.Fatalf("keg 右上角不应包含 %q", gone)
+					}
+				}
+			case "keg_form":
+				if !strings.Contains(actions, `href="/admin/kegs/10"`) || !strings.Contains(actions, "返回酒桶详情") {
+					t.Fatalf("keg_form 右上角应返回酒桶详情")
+				}
+				if strings.Contains(actions, `href="/admin/beers"`) {
+					t.Fatalf("keg_form 右上角不应再包含 href=\"/admin/beers\"")
+				}
+			}
+
+			if !tc.notLayout && tc.name != "login" && tc.name != "login-2fa" && tc.name != "security-staff" {
+				for _, want := range []string{`href="/account/security"`, "/admin/logout"} {
+					if !strings.Contains(dropdown, want) {
+						t.Fatalf("%s 账号下拉菜单缺少 %q", tc.name, want)
+					}
+				}
+				for _, gone := range []string{`href="/admin/"`, `href="/admin/analytics"`, `href="/pos/"`, `href="/screen/"`} {
+					if strings.Contains(dropdown, gone) {
+						t.Fatalf("%s 后台账号下拉菜单不应再包含左侧菜单已有项 %q", tc.name, gone)
+					}
+				}
+			}
 		})
 	}
 
@@ -261,6 +367,19 @@ func TestAllTemplatesRender(t *testing.T) {
 			t.Fatalf("DefaultPageFiles 中的模板 %s 未被 TestAllTemplatesRender 覆盖", f)
 		}
 	}
+}
+
+func extractSection(body, startMarker, endMarker string) string {
+	start := strings.Index(body, startMarker)
+	if start < 0 {
+		return ""
+	}
+	rest := body[start:]
+	end := strings.Index(rest, endMarker)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end+len(endMarker)]
 }
 
 func TestNewHandlerSmoke(t *testing.T) {
@@ -362,7 +481,7 @@ func TestNewHandlerSmoke(t *testing.T) {
 			t.Fatalf("GET %s 未登录应 303 -> /admin/login，实际 %d loc=%q", path, recAnon.Code, recAnon.Header().Get("Location"))
 		}
 	}
-	for _, postPath := range []string{"/admin/settings/categories/add", "/admin/settings/catalog/import"} {
+	for _, postPath := range []string{"/admin/settings/general", "/admin/settings/webhook", "/admin/settings/categories/add", "/admin/settings/catalog/import"} {
 		recCatAnon := httptest.NewRecorder()
 		h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, postPath, nil))
 		if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {

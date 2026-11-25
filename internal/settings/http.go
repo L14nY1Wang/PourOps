@@ -52,6 +52,8 @@ func (s *Service) catalogTotal(ctx context.Context) int {
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/settings", guards.Boss(s.Page))
 	mux.HandleFunc("POST /admin/settings", guards.Boss(s.Save))
+	mux.HandleFunc("POST /admin/settings/general", guards.Boss(s.SaveGeneral))
+	mux.HandleFunc("POST /admin/settings/webhook", guards.Boss(s.SaveWebhook))
 	mux.HandleFunc("POST /admin/settings/categories/add", guards.Boss(s.AddCategory))
 	mux.HandleFunc("POST /admin/settings/categories/delete", guards.Boss(s.DeleteCategory))
 	mux.HandleFunc("POST /admin/settings/categories/reset", guards.Boss(s.ResetCategories))
@@ -79,6 +81,49 @@ func (s *Service) Page(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Service) renderFormError(w http.ResponseWriter, r *http.Request, cfg StoreSettings, hasSecret bool, errMsg string) {
+	w.WriteHeader(http.StatusBadRequest)
+	s.renderer.Render(w, r, "admin/settings.html", &SettingsPage{
+		Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Err: errMsg},
+		Settings:       cfg,
+		EventOptions:   event.WebhookEventOptions,
+		HasSecret:      hasSecret,
+		SelectedEvents: buildSelectedMap(cfg.WebhookEvents),
+		CatalogTotal:   s.catalogTotal(r.Context()),
+	})
+}
+
+func parsePricingFields(r *http.Request, dst *StoreSettings) string {
+	sellPtr, sellErr := platform.ParseStrictInt(r.FormValue("default_sellable_pct"), "默认可售比例", MinSellablePct, MaxSellablePct)
+	marginPtr, marginErr := platform.ParseStrictInt(r.FormValue("default_margin_pct"), "默认目标毛利率", MinMarginPct, MaxMarginPct)
+	if sellPtr != nil {
+		dst.DefaultSellablePct = *sellPtr
+	}
+	if marginPtr != nil {
+		dst.DefaultMarginPct = *marginPtr
+	}
+	if sellErr != nil {
+		return sellErr.Error()
+	}
+	if sellPtr == nil {
+		return "请填写默认可售比例（50%–100%）"
+	}
+	if marginErr != nil {
+		return marginErr.Error()
+	}
+	if marginPtr == nil {
+		return "请填写默认目标毛利率（10%–85%）"
+	}
+	return ""
+}
+
+func saveErrorMessage(err error, fallback string) string {
+	if msg, ok := platform.UserErrorMessage(err); ok {
+		return msg
+	}
+	return fallback
+}
+
 func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "表单格式不正确", http.StatusBadRequest)
@@ -99,55 +144,57 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 		next.WebhookSecret = sec
 	}
 
-	sellPtr, sellErr := platform.ParseStrictInt(r.FormValue("default_sellable_pct"), "默认可售比例", MinSellablePct, MaxSellablePct)
-	marginPtr, marginErr := platform.ParseStrictInt(r.FormValue("default_margin_pct"), "默认目标毛利率", MinMarginPct, MaxMarginPct)
-
-	if sellPtr != nil {
-		next.DefaultSellablePct = *sellPtr
-	}
-	if marginPtr != nil {
-		next.DefaultMarginPct = *marginPtr
-	}
-
-	renderFail := func(errMsg string) {
-		w.WriteHeader(http.StatusBadRequest)
-		s.renderer.Render(w, r, "admin/settings.html", &SettingsPage{
-			Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Err: errMsg},
-			Settings:       next,
-			EventOptions:   event.WebhookEventOptions,
-			HasSecret:      existing.WebhookSecret != "",
-			SelectedEvents: buildSelectedMap(next.WebhookEvents),
-			CatalogTotal:   s.catalogTotal(r.Context()),
-		})
-	}
-
-	if sellErr != nil {
-		renderFail(sellErr.Error())
-		return
-	}
-	if sellPtr == nil {
-		renderFail("请填写默认可售比例（50%–100%）")
-		return
-	}
-	if marginErr != nil {
-		renderFail(marginErr.Error())
-		return
-	}
-	if marginPtr == nil {
-		renderFail("请填写默认目标毛利率（10%–85%）")
+	if errMsg := parsePricingFields(r, &next); errMsg != "" {
+		s.renderFormError(w, r, next, existing.WebhookSecret != "", errMsg)
 		return
 	}
 
 	if _, err := s.store.Save(r.Context(), next); err != nil {
-		if msg, ok := platform.UserErrorMessage(err); ok {
-			renderFail(msg)
-			return
-		}
-		renderFail("保存系统设置失败，请稍后重试")
+		s.renderFormError(w, r, next, existing.WebhookSecret != "", saveErrorMessage(err, "保存系统设置失败，请稍后重试"))
 		return
 	}
 
 	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("系统设置已保存并实时生效"), http.StatusSeeOther)
+}
+
+func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "表单格式不正确", http.StatusBadRequest)
+		return
+	}
+	draft := s.store.Get()
+	hasSecret := draft.WebhookSecret != ""
+	draft.Brand = strings.TrimSpace(r.FormValue("brand"))
+
+	if errMsg := parsePricingFields(r, &draft); errMsg != "" {
+		s.renderFormError(w, r, draft, hasSecret, errMsg)
+		return
+	}
+
+	if _, err := s.store.SaveGeneral(r.Context(), draft.Brand, draft.DefaultSellablePct, draft.DefaultMarginPct); err != nil {
+		s.renderFormError(w, r, draft, hasSecret, saveErrorMessage(err, "保存门店与核算设置失败，请稍后重试"))
+		return
+	}
+
+	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("门店与核算设置已保存并实时生效"), http.StatusSeeOther)
+}
+
+func (s *Service) SaveWebhook(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "表单格式不正确", http.StatusBadRequest)
+		return
+	}
+	draft := s.store.Get()
+	hasSecret := draft.WebhookSecret != ""
+	draft.WebhookURL = strings.TrimSpace(r.FormValue("webhook_url"))
+	draft.WebhookEvents = r.Form["webhook_events"]
+
+	if _, err := s.store.SaveWebhook(r.Context(), draft.WebhookURL, r.FormValue("webhook_secret"), r.FormValue("clear_webhook_secret") != "", draft.WebhookEvents); err != nil {
+		s.renderFormError(w, r, draft, hasSecret, saveErrorMessage(err, "保存 Webhook 设置失败，请稍后重试"))
+		return
+	}
+
+	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("Webhook 配置已保存"), http.StatusSeeOther)
 }
 
 func (s *Service) AddCategory(w http.ResponseWriter, r *http.Request) {

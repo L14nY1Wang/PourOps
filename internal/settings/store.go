@@ -246,23 +246,62 @@ func (s *SettingsStore) upsertPairs(ctx context.Context, pairs map[string]string
 	return tx.Commit(ctx)
 }
 
+func (s *SettingsStore) normalizeGeneral(rawBrand string, sellablePct, marginPct int) (string, int, int, error) {
+	brand := strings.TrimSpace(rawBrand)
+	if brand == "" {
+		brand = s.defaultBrand
+	}
+	if len([]rune(brand)) > 48 {
+		return "", 0, 0, platform.UserErr("门店名称最多 48 个字符")
+	}
+	if sellablePct < MinSellablePct || sellablePct > MaxSellablePct {
+		return "", 0, 0, platform.UserErrf("默认可售比例需在 %d%% 到 %d%% 之间", MinSellablePct, MaxSellablePct)
+	}
+	if marginPct < MinMarginPct || marginPct > MaxMarginPct {
+		return "", 0, 0, platform.UserErrf("默认目标毛利率需在 %d%% 到 %d%% 之间", MinMarginPct, MaxMarginPct)
+	}
+	return brand, sellablePct, marginPct, nil
+}
+
+func normalizeWebhook(rawURL, rawSecret string, rawEvents []string) (string, string, []string, error) {
+	urlStr := strings.TrimSpace(rawURL)
+	if err := event.ValidateWebhookURL(urlStr); err != nil {
+		return "", "", nil, err
+	}
+	secret := strings.TrimSpace(rawSecret)
+	if len(secret) > 256 {
+		return "", "", nil, platform.UserErr("签名密钥过长（最多 256 字符）")
+	}
+	cleanEvents := make([]string, 0, len(rawEvents))
+	seen := make(map[string]bool)
+	for _, ev := range rawEvents {
+		ev = strings.TrimSpace(ev)
+		if ev == "" {
+			continue
+		}
+		if !event.ValidWebhookEvent(ev) {
+			return "", "", nil, platform.UserErrf("不支持的 Webhook 事件类型：%s", ev)
+		}
+		if !seen[ev] {
+			seen[ev] = true
+			cleanEvents = append(cleanEvents, ev)
+		}
+	}
+	return urlStr, secret, cleanEvents, nil
+}
+
 func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettings, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	in.Brand = strings.TrimSpace(in.Brand)
-	if in.Brand == "" {
-		in.Brand = s.defaultBrand
+	brand, sellable, margin, err := s.normalizeGeneral(in.Brand, in.DefaultSellablePct, in.DefaultMarginPct)
+	if err != nil {
+		return StoreSettings{}, err
 	}
-	if len([]rune(in.Brand)) > 48 {
-		return StoreSettings{}, platform.UserErr("门店名称最多 48 个字符")
-	}
-	if in.DefaultSellablePct < MinSellablePct || in.DefaultSellablePct > MaxSellablePct {
-		return StoreSettings{}, platform.UserErrf("默认可售比例需在 %d%% 到 %d%% 之间", MinSellablePct, MaxSellablePct)
-	}
-	if in.DefaultMarginPct < MinMarginPct || in.DefaultMarginPct > MaxMarginPct {
-		return StoreSettings{}, platform.UserErrf("默认目标毛利率需在 %d%% 到 %d%% 之间", MinMarginPct, MaxMarginPct)
-	}
+	in.Brand = brand
+	in.DefaultSellablePct = sellable
+	in.DefaultMarginPct = margin
+
 	if len(in.BeerCategories) == 0 {
 		in.BeerCategories = s.BeerCategories()
 	} else {
@@ -272,29 +311,13 @@ func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettin
 		}
 		in.BeerCategories = cleanCats
 	}
-	in.WebhookURL = strings.TrimSpace(in.WebhookURL)
-	if err := event.ValidateWebhookURL(in.WebhookURL); err != nil {
+
+	urlStr, secret, cleanEvents, err := normalizeWebhook(in.WebhookURL, in.WebhookSecret, in.WebhookEvents)
+	if err != nil {
 		return StoreSettings{}, err
 	}
-	in.WebhookSecret = strings.TrimSpace(in.WebhookSecret)
-	if len(in.WebhookSecret) > 256 {
-		return StoreSettings{}, platform.UserErr("签名密钥过长（最多 256 字符）")
-	}
-	cleanEvents := make([]string, 0, len(in.WebhookEvents))
-	seen := make(map[string]bool)
-	for _, ev := range in.WebhookEvents {
-		ev = strings.TrimSpace(ev)
-		if ev == "" {
-			continue
-		}
-		if !event.ValidWebhookEvent(ev) {
-			return StoreSettings{}, platform.UserErrf("不支持的 Webhook 事件类型：%s", ev)
-		}
-		if !seen[ev] {
-			seen[ev] = true
-			cleanEvents = append(cleanEvents, ev)
-		}
-	}
+	in.WebhookURL = urlStr
+	in.WebhookSecret = secret
 	in.WebhookEvents = cleanEvents
 
 	catsJSON, err := json.Marshal(in.BeerCategories)
@@ -323,6 +346,65 @@ func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettin
 		WebhookSecret:      in.WebhookSecret,
 		WebhookEvents:      slices.Clone(in.WebhookEvents),
 	}
+	s.mu.Unlock()
+	return s.Get(), nil
+}
+
+// SaveGeneral 仅更新门店名称与桶装默认核算参数，不影响酒款分类和 Webhook 配置。
+func (s *SettingsStore) SaveGeneral(ctx context.Context, rawBrand string, sellablePct, marginPct int) (StoreSettings, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	brand, sellable, margin, err := s.normalizeGeneral(rawBrand, sellablePct, marginPct)
+	if err != nil {
+		return StoreSettings{}, err
+	}
+	if err := s.upsertPairs(ctx, map[string]string{
+		"brand":                brand,
+		"default_sellable_pct": strconv.Itoa(sellable),
+		"default_margin_pct":   strconv.Itoa(margin),
+	}); err != nil {
+		return StoreSettings{}, err
+	}
+
+	s.mu.Lock()
+	s.cur.Brand = brand
+	s.cur.DefaultSellablePct = sellable
+	s.cur.DefaultMarginPct = margin
+	s.mu.Unlock()
+	return s.Get(), nil
+}
+
+// SaveWebhook 仅更新 Webhook 接收地址、签名密钥与订阅事件，不影响门店基础与核算参数。
+func (s *SettingsStore) SaveWebhook(ctx context.Context, rawURL, rawSecret string, clearSecret bool, rawEvents []string) (StoreSettings, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	s.mu.RLock()
+	effectiveSecret := s.cur.WebhookSecret
+	s.mu.RUnlock()
+	if clearSecret {
+		effectiveSecret = ""
+	} else if trimmed := strings.TrimSpace(rawSecret); trimmed != "" {
+		effectiveSecret = trimmed
+	}
+
+	urlStr, secret, cleanEvents, err := normalizeWebhook(rawURL, effectiveSecret, rawEvents)
+	if err != nil {
+		return StoreSettings{}, err
+	}
+	if err := s.upsertPairs(ctx, map[string]string{
+		"webhook_url":    urlStr,
+		"webhook_secret": secret,
+		"webhook_events": strings.Join(cleanEvents, ","),
+	}); err != nil {
+		return StoreSettings{}, err
+	}
+
+	s.mu.Lock()
+	s.cur.WebhookURL = urlStr
+	s.cur.WebhookSecret = secret
+	s.cur.WebhookEvents = slices.Clone(cleanEvents)
 	s.mu.Unlock()
 	return s.Get(), nil
 }

@@ -94,4 +94,22 @@ func TestSettingsStorePersistenceAndValidation(t *testing.T) {
 	if len(reloaded2.BeerCategories()) != len(platform.DefaultBeerCategories) {
 		t.Fatalf("ResetBeerCategories got %v", reloaded2.BeerCategories())
 	}
+
+	// 验证分模块保存（SaveGeneral / SaveWebhook）在数据库持久化层互不覆盖
+	if _, err := reloaded2.SaveGeneral(ctx, "南岸酒馆", 88, 60); err != nil {
+		t.Fatalf("SaveGeneral: %v", err)
+	}
+	if _, err := reloaded2.SaveWebhook(ctx, "https://example.com/v3", "sec-v3", false, []string{string(event.EventBeerTapped)}); err != nil {
+		t.Fatalf("SaveWebhook: %v", err)
+	}
+	reloaded3 := settings.NewSettingsStore(pool, "PourOps")
+	if err := reloaded3.Refresh(ctx); err != nil {
+		t.Fatalf("reloaded3 Refresh: %v", err)
+	}
+	got3 := reloaded3.Get()
+	if got3.Brand != "南岸酒馆" || got3.DefaultSellablePct != 88 || got3.DefaultMarginPct != 60 ||
+		got3.WebhookURL != "https://example.com/v3" || got3.WebhookSecret != "sec-v3" ||
+		len(got3.WebhookEvents) != 1 || got3.WebhookEvents[0] != string(event.EventBeerTapped) {
+		t.Fatalf("isolated module persistence mismatch: %+v", got3)
+	}
 }

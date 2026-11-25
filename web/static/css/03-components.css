@@ -523,7 +523,8 @@
   gap: 0;
 }
 
-.editor-card > .card__content {
+.editor-card > .card__content,
+.editor-card > form > .card__content {
   padding: 20px;
 }
 
@@ -1167,7 +1168,7 @@
   font-size: 12px;
 }
 
-.form-section-head span {
+.form-section-head span:not(.badge) {
   color: var(--muted);
   font-size: 11px;
 }
