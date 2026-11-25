@@ -18,22 +18,29 @@ type ScreenPage struct {
 	ui.Layout
 }
 
+type PlaylistCup struct {
+	ML    int    `json:"ml"`
+	Size  string `json:"size"`
+	Price string `json:"price"`
+}
+
 type PlaylistItem struct {
-	No        string   `json:"no"`
-	Brewery   string   `json:"brewery"`
-	Name      string   `json:"name"`
-	Style     string   `json:"style"`
-	Category  string   `json:"category"`
-	Tags      []string `json:"tags"`
-	SalesTags []string `json:"sales_tags"`
-	ABV       *float64 `json:"abv,omitempty"`
-	IBU       *int     `json:"ibu,omitempty"`
-	Size      string   `json:"size"`
-	Price     string   `json:"price"`
-	UT        *float64 `json:"ut_rating,omitempty"`
-	UTCount   *int     `json:"ut_count,omitempty"`
-	Poster    string   `json:"poster"`
-	Sold      bool     `json:"sold"`
+	No        string        `json:"no"`
+	Brewery   string        `json:"brewery"`
+	Name      string        `json:"name"`
+	Style     string        `json:"style"`
+	Category  string        `json:"category"`
+	Tags      []string      `json:"tags"`
+	SalesTags []string      `json:"sales_tags"`
+	ABV       *float64      `json:"abv,omitempty"`
+	IBU       *int          `json:"ibu,omitempty"`
+	Size      string        `json:"size"`
+	Price     string        `json:"price"`
+	Cups      []PlaylistCup `json:"cups,omitempty"`
+	UT        *float64      `json:"ut_rating,omitempty"`
+	UTCount   *int          `json:"ut_count,omitempty"`
+	Poster    string        `json:"poster"`
+	Sold      bool          `json:"sold"`
 }
 
 // Service 提供电视酒单静态屏与实时 SSE 接口。
@@ -118,10 +125,19 @@ func (s *Service) Playlist(w http.ResponseWriter, r *http.Request) {
 		if cat == "" {
 			cat = platform.InferCategory(b.Style, cats)
 		}
+		beerCups := b.Cups()
+		cups := make([]PlaylistCup, 0, len(beerCups))
+		for _, c := range beerCups {
+			cups = append(cups, PlaylistCup{
+				ML:    c.ML,
+				Size:  c.MLText(),
+				Price: c.Price(),
+			})
+		}
 		items = append(items, PlaylistItem{
 			No: b.No, Brewery: b.Brewery, Name: b.Name, Style: b.Style, Category: cat,
 			Tags: b.Tags, SalesTags: b.SalesTags, ABV: b.ABV, IBU: b.IBU, Size: b.Size,
-			Price: platform.PriceText(b.PriceCents), UT: b.UT, UTCount: b.UTCount, Poster: b.PosterURL,
+			Price: platform.PriceText(b.PriceCents), Cups: cups, UT: b.UT, UTCount: b.UTCount, Poster: b.PosterURL,
 			Sold: b.OnScreen,
 		})
 	}

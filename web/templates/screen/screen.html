@@ -21,6 +21,7 @@
         "abv": 5.2, "ibu": 35, "size": "330ml",
         "sold": true,                      // false = 售罄（仍保留全部信息）
         "price": "¥ 45 / 杯",
+        "cups": [ { "ml": 150, "size": "150ml", "price": "¥ 28" } ], // 可选，多杯型分档价
         "poster": "https://..."            // 可选，作低调水印，无图不影响排版
       } ] }
   实时更新: 默认监听 /api/screen/events 的 SSE（任意 message 即重拉），断则退回 60s 轮询
@@ -223,6 +224,27 @@
     font-size:calc(var(--u) * .18 * var(--fit)); font-weight:800; line-height:1.15;
     letter-spacing:-.01em; color:#1b1713; font-variant-numeric:tabular-nums;
   }
+  .price.price--multi{
+    display:flex; align-items:stretch; gap:calc(var(--u) * .026);
+    font-size:calc(var(--u) * .112 * var(--fit));
+  }
+  .price.price--2{
+    font-size:calc(var(--u) * .13 * var(--fit));
+  }
+  .cup-tier{
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:.16em;
+    padding:.22em .42em; border-radius:.34em;
+    background:rgba(255,253,249,.86); border:1px solid var(--line);
+    box-shadow:0 1px 3px rgba(44,34,20,.05);
+  }
+  .cup-tier b{
+    font-size:1em; font-weight:800; line-height:1.08; letter-spacing:-.01em;
+    color:#1b1713; font-variant-numeric:tabular-nums; white-space:nowrap;
+  }
+  .cup-tier small{
+    font-size:.42em; font-weight:700; line-height:1.15; letter-spacing:.04em;
+    color:var(--ink-3); font-variant-numeric:tabular-nums; white-space:nowrap;
+  }
 
   /* 售罄：信息保持可读，降对比 + 状态标红；编号徽章去色 + 轻微斜纹氛围 */
   .card.off{
@@ -236,6 +258,8 @@
   .card.off .art{opacity:.10; filter:grayscale(.75) brightness(1.06);}
   .card.off .tap b{background:#aba193; color:#fffdf9; box-shadow:none;}
   .card.off .price{color:var(--ink-2); text-shadow:none;}
+  .card.off .cup-tier{background:rgba(235,229,218,.72); border-color:rgba(46,38,26,.08); box-shadow:none;}
+  .card.off .cup-tier b{color:var(--ink-2);}
 
   .hint{
     position:fixed; inset:var(--head) 0 0; z-index:2; display:none; place-items:center;
@@ -359,6 +383,18 @@
     return isFinite(n) ? n : null;
   }
 
+  function normalizeCups(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.map(function (c) {
+      if (!c) return null;
+      var ml = num(c.ml);
+      var size = c.size != null ? String(c.size).trim() : (ml != null ? ml + 'ml' : '');
+      var price = c.price != null ? String(c.price).trim() : '';
+      if (!size && !price) return null;
+      return { ml: ml, size: size, price: price };
+    }).filter(Boolean);
+  }
+
   // 结构不对（不是数组、也不是带 items 数组的对象）返回 null，调用方换下一个源；
   // 合法但 items 为空必须放行，否则删光酒之后屏幕还留着旧的一屏。
   function normalize(raw) {
@@ -369,6 +405,9 @@
       brand: (raw && raw.brand) || '',
       show_clock: !(raw && raw.show_clock === false),
       items: items.map(function (s, i) {
+        var cups = normalizeCups(s.cups);
+        var size = (s.size != null && String(s.size).trim()) || (cups.length === 1 ? cups[0].size : '');
+        var price = (s.price != null && String(s.price).trim()) || (cups.length === 1 ? cups[0].price : '');
         return {
           no: s.no != null ? String(s.no) : ('0' + (i + 1)).slice(-2),
           brewery: s.brewery || '',
@@ -378,8 +417,9 @@
           category: categoryName(s.style, s.category),
           abv: num(s.abv),
           ibu: num(s.ibu),
-          size: s.size || '',
-          price: s.price != null ? String(s.price) : '',
+          size: size,
+          price: price,
+          cups: cups,
           poster: s.poster || '',
           sold: s.sold !== false,
           tags: Array.isArray(s.tags) ? s.tags.filter(function (t) { return t; }) : [],
@@ -463,9 +503,21 @@
       var meta = el('div', 'meta');
       meta.appendChild(spec(s.abv != null ? s.abv + '%' : '—', 'ABV'));
       meta.appendChild(spec(s.ibu != null ? String(s.ibu) : '—', 'IBU'));
-      meta.appendChild(spec(s.size || '—', '杯型'));
-      foot.appendChild(meta);
-      if (s.price) foot.appendChild(el('div', 'price', s.price));
+      if (s.cups.length > 1) {
+        foot.appendChild(meta);
+        var priceWrap = el('div', s.cups.length === 2 ? 'price price--multi price--2' : 'price price--multi');
+        s.cups.forEach(function (cup) {
+          var tier = el('div', 'cup-tier');
+          tier.appendChild(el('b', null, cup.price || '—'));
+          tier.appendChild(el('small', null, cup.size || '—'));
+          priceWrap.appendChild(tier);
+        });
+        foot.appendChild(priceWrap);
+      } else {
+        meta.appendChild(spec(s.size || '—', '杯型'));
+        foot.appendChild(meta);
+        if (s.price) foot.appendChild(el('div', 'price', s.price));
+      }
       info.appendChild(foot);
       card.appendChild(info);
 

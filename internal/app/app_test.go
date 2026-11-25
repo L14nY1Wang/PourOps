@@ -202,7 +202,7 @@ func TestAllTemplatesRender(t *testing.T) {
 		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, true},
 		{"screen", "screen/screen.html", "screen", &screen.ScreenPage{
 			Layout: ui.Layout{Brand: "北岸精酿"},
-		}, []string{`<title>酒单 - 北岸精酿</title>`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `mix-blend-mode:multiply`, `mask-image:radial-gradient`}, true},
+		}, []string{`<title>酒单 - 北岸精酿</title>`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `mix-blend-mode:multiply`, `mask-image:radial-gradient`, `cup-tier`}, true},
 	}
 
 	covered := make(map[string]bool, len(ui.DefaultPageFiles))

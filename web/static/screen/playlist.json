@@ -13,10 +13,15 @@
       "sales_tags": ["新品", "进口"],
       "abv": 5.2,
       "ibu": 35,
-      "size": "330ml",
+      "size": "150/330/500ml",
       "ut_rating": 3.7,
       "ut_count": 579855,
       "price": "¥ 45",
+      "cups": [
+        { "ml": 150, "size": "150ml", "price": "¥ 25" },
+        { "ml": 330, "size": "330ml", "price": "¥ 45" },
+        { "ml": 500, "size": "500ml", "price": "¥ 62" }
+      ],
       "ut_url": "https://untappd.com/b/brewdog-punk-ipa/5702",
       "poster": "https://assets.untappd.com/site/beer_logos_hd/beer-5702_03c14_hd.jpeg"
     },
@@ -31,10 +36,14 @@
       "sales_tags": ["本周最佳", "进口"],
       "abv": 6.8,
       "ibu": 72,
-      "size": "330ml",
+      "size": "150/330ml",
       "ut_rating": 4.47,
       "ut_count": 167020,
       "price": "¥ 168",
+      "cups": [
+        { "ml": 150, "size": "150ml", "price": "¥ 88" },
+        { "ml": 330, "size": "330ml", "price": "¥ 168" }
+      ],
       "ut_url": "https://untappd.com/b/tree-house-brewing-company-julius/237985",
       "poster": "https://assets.untappd.com/site/beer_logos_hd/beer-237985_dab67_hd.jpeg"
     },

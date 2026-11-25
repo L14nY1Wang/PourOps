@@ -304,4 +304,62 @@ const menu = (n, extra = () => ({})) => ({
   assert.equal(new Set(tones).size, allDefaults.length, '9 个默认分类在电视屏上应有 9 种互不重复的色调');
 }
 
-console.log('web/templates/screen/screen.html: 9 组回归通过');
+// 10. 多杯型分档价：同时配置多个杯型时，卡片分别展示每档杯型与价格，单杯保持兼容。
+{
+  const r = boot({
+    routes: {
+      '/api/screen/playlist': {
+        items: [
+          {
+            no: '01', name: '三杯型 IPA', abv: 6.8, ibu: 72,
+            size: '150/330/500ml', price: '¥ 58', sold: true,
+            cups: [
+              { ml: 150, size: '150ml', price: '¥ 28' },
+              { ml: 330, size: '330ml', price: '¥ 58' },
+              { ml: 500, size: '500ml', price: '¥ 78' },
+            ],
+          },
+          {
+            no: '02', name: '双杯型售罄', abv: 5.2, ibu: 35,
+            size: '150/330ml', price: '¥ 48', sold: false,
+            cups: [
+              { ml: 150, size: '150ml', price: '¥ 25' },
+              { ml: 330, size: '330ml', price: '¥ 48' },
+            ],
+          },
+          {
+            no: '03', name: '单杯兼容款', abv: 4.5,
+            cups: [{ ml: 330, size: '330ml', price: '¥ 45' }],
+          },
+        ],
+      },
+    },
+  });
+  await r.flush();
+  const [c1, c2, c3] = r.board.children;
+
+  // 3 杯型：展示 3 个 .cup-tier，且底部规格不再重复展示 150/330/500ml 杯型
+  const price1 = c1.querySelector('.price');
+  assert.ok(price1.className.includes('price--multi'));
+  assert.ok(!price1.className.includes('price--2'));
+  const tiers1 = walk(price1).filter(n => n.className === 'cup-tier');
+  assert.deepEqual(tiers1.map(t => t.textContent), ['¥ 28150ml', '¥ 58330ml', '¥ 78500ml']);
+  const specs1 = walk(c1).filter(n => n.className === 'spec').map(n => n.textContent);
+  assert.deepEqual(specs1, ['6.8%ABV', '72IBU']);
+
+  // 2 杯型售罄：带 price--2 与 card.off
+  assert.ok(c2.className.includes('off'));
+  const price2 = c2.querySelector('.price');
+  assert.ok(price2.className.includes('price--multi') && price2.className.includes('price--2'));
+  const tiers2 = walk(price2).filter(n => n.className === 'cup-tier');
+  assert.deepEqual(tiers2.map(t => t.textContent), ['¥ 25150ml', '¥ 48330ml']);
+
+  // 单杯：保留单主价与规格里的杯型栏
+  const price3 = c3.querySelector('.price');
+  assert.equal(price3.className, 'price');
+  assert.equal(price3.textContent, '¥ 45');
+  const specs3 = walk(c3).filter(n => n.className === 'spec').map(n => n.textContent);
+  assert.ok(specs3.includes('330ml杯型'));
+}
+
+console.log('web/templates/screen/screen.html: 10 组回归通过');
