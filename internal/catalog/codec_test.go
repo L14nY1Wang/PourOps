@@ -134,7 +134,7 @@ func TestCatalogCSVPartialColumnsAndValidation(t *testing.T) {
 		{"第 2 行容量超 int4", "酒名,默认桶容量ml\n尤利乌斯,2147483648\n", "第 2 行"},
 		{"第 3 行负进价", "酒名,每桶进价\nA,1000\nB,-50\n", "第 3 行"},
 		{"第 2 行进价溢出", "酒名,每桶进价\nA,30000000\n", "第 2 行"},
-		{"第 2 行未知酒款分类", "酒名,酒款分类\nA,rainbow\n", "第 2 行"},
+		{"第 2 行非法控制字符分类", "酒名,酒款分类\nA,\"bad\ncat\"\n", "第 2 行"},
 		{"第 2 行危险酒标协议", "酒名,酒标URL\nA,javascript:alert(1)\n", "第 2 行"},
 	}
 	for _, tc := range badCases {
@@ -346,8 +346,9 @@ func TestCodecRegistryLookupAndCustomCodec(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Beer.Category != "赛松" {
 		t.Fatalf("自定义分类 CSV 导入失败: items=%+v err=%v", items, err)
 	}
-	if _, err := csvCodec.Decode([]byte("酒名,酒款分类\n拉格酒,拉格\n")); err == nil {
-		t.Fatal("未出现在自定义分类列表中的分类应导入失败")
+	kept, err := csvCodec.Decode([]byte("酒名,酒款分类\n拉格酒,拉格\n"))
+	if err != nil || len(kept) != 1 || kept[0].Beer.Category != "拉格" {
+		t.Fatalf("P2-17 解码阶段应保留未在当前列表中的历史分类以便备份恢复，实际: items=%+v err=%v", kept, err)
 	}
 }
 
@@ -477,5 +478,114 @@ func TestCatalogZIPArchiveRoundTripAndSecurity(t *testing.T) {
 		if _, err := zipCodec.Decode(tc.raw); err == nil {
 			t.Errorf("%s 应拒绝非法压缩包", tc.name)
 		}
+	}
+}
+
+func TestCatalogZIPWriteFailsWithoutEOCDOnMissingPoster(t *testing.T) {
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	posterURL, err := store.SaveBytes(samplePNGBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	zc := ZIPCodec{Posters: store}
+	prepared, err := zc.PrepareExport([]CatalogBeer{{
+		Brewery:    "厂牌A",
+		Name:       "测试酒",
+		CapacityML: 20000,
+		PosterURL:  posterURL,
+	}}, "PourOps", time.Now())
+	if err != nil {
+		t.Fatalf("PrepareExport: %v", err)
+	}
+	// 删除磁盘酒标文件模拟竞态：WriteTo 必须报错且不能写 EOCD 目录尾部。
+	if err := store.Delete(posterURL); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := prepared.WriteTo(&buf); err == nil {
+		t.Fatal("酒标文件缺失时 WriteTo 应返回错误")
+	}
+	if _, zerr := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len())); zerr == nil {
+		t.Fatal("WriteTo 失败后不应写出合法 EOCD 中央目录")
+	}
+}
+
+func TestCatalogZIPDecodeReaderAtAndMaxEntries(t *testing.T) {
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	posterURL, err := store.SaveBytes(samplePNGBytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	zc := ZIPCodec{Posters: store}
+	raw, err := zc.Encode([]CatalogBeer{{
+		Brewery:    "厂牌A",
+		Name:       "流式测试",
+		CapacityML: 20000,
+		PosterURL:  posterURL,
+	}}, "PourOps", time.Now())
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	tmpPath := filepath.Join(t.TempDir(), "catalog.zip")
+	if err := os.WriteFile(tmpPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := zc.DecodeReaderAt(f, info.Size())
+	if err != nil || len(items) != 1 || items[0].Beer.Name != "流式测试" {
+		t.Fatalf("DecodeReaderAt: err=%v items=%+v", err, items)
+	}
+
+	var bomb bytes.Buffer
+	zw := zip.NewWriter(&bomb)
+	fw, _ := zw.Create("catalog.json")
+	_, _ = fw.Write([]byte(`{"items":[]}`))
+	for i := range maxZipEntries {
+		name := "extra/" + string([]byte{'a' + byte(i/(26*26)%26), 'a' + byte((i/26)%26), 'a' + byte(i%26)}) + ".bin"
+		_, _ = zw.Create(name)
+	}
+	_ = zw.Close()
+	if _, err := zc.Decode(bomb.Bytes()); err == nil || !strings.Contains(err.Error(), "数量过多") {
+		t.Fatalf("超出 maxZipEntries (%d) 的压缩包应被拒绝: %v", maxZipEntries, err)
+	}
+}
+
+func TestCatalogImportRejectsOverlongBeerTexts(t *testing.T) {
+	longName := strings.Repeat("长", 121)
+	csvRaw := []byte("酒名,厂牌\n" + longName + ",厂牌\n")
+	if _, err := ParseCatalogCSVWithCategories(csvRaw, platform.DefaultBeerCategories); err == nil {
+		t.Fatal("CSV 超长酒名应被拒绝")
+	}
+	jsonRaw := []byte(`{"items":[{"name":"` + longName + `","brewery":"厂牌"}]}`)
+	if _, err := ParseCatalogJSONWithCategories(jsonRaw, platform.DefaultBeerCategories); err == nil {
+		t.Fatal("JSON 超长酒名应被拒绝")
+	}
+	tags := make([]string, 21)
+	for i := range tags {
+		tags[i] = "标签"
+	}
+	rawJSON, err := json.Marshal(map[string]any{"items": []map[string]any{{"name": "正常酒名", "tags": tags}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseCatalogJSONWithCategories(rawJSON, platform.DefaultBeerCategories); err == nil {
+		t.Fatal("JSON 标签过多应被拒绝")
+	}
+	if _, err := PrepareCatalogBeerWithCategories(CatalogBeer{Name: longName}, platform.DefaultBeerCategories); err == nil {
+		t.Fatal("PrepareCatalogBeerWithCategories 应强制校验酒名长度")
 	}
 }

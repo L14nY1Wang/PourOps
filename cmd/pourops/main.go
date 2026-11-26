@@ -29,6 +29,9 @@ func main() {
 	brand := platform.Env("BRAND", "PourOps")
 	posterDir := platform.Env("POSTER_DIR", "posters")
 	secret := []byte(platform.Env("SESSION_SECRET", platform.RandomHex(32)))
+	if platform.Env("SESSION_SECRET", "") != "" && len(secret) < 32 {
+		log.Fatalf("SESSION_SECRET 长度至少需要 32 字节")
+	}
 	jiuheBaseURL := platform.Env("JIUHE_API_BASE", lookup.DefaultJiuheBaseURL)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -61,6 +64,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化酒标存储失败: %v", err)
 	}
+	bus.RegisterCloser(posterStore.Close)
 	go func() {
 		locCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
@@ -92,7 +96,10 @@ func main() {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
+	srv.RegisterOnShutdown(screenHub.Close)
 	go func() {
 		log.Printf("监听 %s（后台 /admin，点餐 /pos，电视酒单 /screen/）", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -101,12 +108,16 @@ func main() {
 	}()
 
 	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	stop()
+
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer httpCancel()
+	if err := srv.Shutdown(httpCtx); err != nil {
 		log.Printf("HTTP 服务关闭异常: %v", err)
 	}
-	if err := bus.Close(shutdownCtx); err != nil {
+	busCtx, busCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer busCancel()
+	if err := bus.Close(busCtx); err != nil {
 		log.Printf("事件总线队列排空异常: %v", err)
 	}
 }

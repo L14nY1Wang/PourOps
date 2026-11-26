@@ -48,6 +48,7 @@ type Option struct {
 const (
 	MaxBeerCategories    = 50
 	MaxBeerCategoryRunes = 20
+	MaxBeerIBU           = 1000
 )
 
 // DefaultBeerCategories 定义酒款默认预设风格分类；可在系统设置中增删维护。
@@ -276,19 +277,16 @@ func ToneOf(style string) string {
 	return InferCategory(style, DefaultBeerCategories)
 }
 
-// ValidPosterURL 仅允许空串、http(s):// 或站内相对路径 /...，拦截 javascript: 等危险协议。
-func ValidPosterURL(raw string) bool {
+// ValidRemotePosterURL 仅允许无控制字符与反斜杠的 http(s):// 外链，用于过滤远端检索返回的酒标地址。
+func ValidRemotePosterURL(raw string) bool {
 	s := strings.TrimSpace(raw)
-	if s == "" {
-		return true
+	if s == "" || strings.ContainsRune(s, '\\') {
+		return false
 	}
 	for _, r := range s {
 		if r < 0x20 || r == 0x7f {
 			return false
 		}
-	}
-	if strings.HasPrefix(s, "/") {
-		return !strings.HasPrefix(s, "//")
 	}
 	u, err := url.Parse(s)
 	if err != nil {
@@ -296,6 +294,29 @@ func ValidPosterURL(raw string) bool {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	return (scheme == "http" || scheme == "https") && u.Host != ""
+}
+
+// ValidPosterURL 仅允许空串、/posters/ 与 /static/ 站内路径（拦截 ..、\、//）或 http(s):// 外链。
+func ValidPosterURL(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return true
+	}
+	if strings.ContainsRune(s, '\\') {
+		return false
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	if strings.HasPrefix(s, "/") {
+		if strings.HasPrefix(s, "//") || strings.Contains(s, "..") {
+			return false
+		}
+		return strings.HasPrefix(s, "/posters/") || strings.HasPrefix(s, "/static/")
+	}
+	return ValidRemotePosterURL(s)
 }
 
 // PriceText 把分转成展示价；整数元不带小数。
@@ -357,8 +378,8 @@ func ParseLocalTime(v string) *time.Time {
 	if v == "" {
 		return nil
 	}
-	for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02"} {
-		if t, err := time.ParseInLocation(layout, v, time.Local); err == nil {
+	for _, layout := range []string{"2006-01-02T15:04", "2006-01-02T15:04:05", "2006-01-02 15:04", "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, v, ReportZone); err == nil {
 			return &t
 		}
 	}
@@ -369,14 +390,21 @@ func TimeInput(t *time.Time) string {
 	if t == nil {
 		return ""
 	}
-	return t.Format("2006-01-02T15:04")
+	return t.In(ReportZone).Format("2006-01-02T15:04")
 }
 
 func TimeText(t *time.Time) string {
 	if t == nil {
 		return "—"
 	}
-	return t.Format("01-02 15:04")
+	return t.In(ReportZone).Format("01-02 15:04")
+}
+
+func DateTimeText(t *time.Time) string {
+	if t == nil {
+		return "—"
+	}
+	return t.In(ReportZone).Format("2006-01-02 15:04")
 }
 
 func OptFloat(v string) *float64 {
@@ -410,27 +438,98 @@ func IntValue(v string) int {
 	return 0
 }
 
-// MoneyCents 严格解析金额：空串算 0，支持去千分位逗号与币符，拒绝负数、非数字或超出 int4 上限。
+// MoneyCents 严格解析金额：空串算 0，仅允许规范十进制与合法千分位格式，禁止 12,5 / 科学计数法 / 超两位小数 / 超 int4。
 func MoneyCents(v string) (int, error) {
-	trimmed := strings.TrimSpace(v)
-	v = strings.NewReplacer("¥", "", "￥", "", ",", "", " ", "").Replace(trimmed)
+	v = strings.NewReplacer("¥", "", "￥", "", " ", "").Replace(strings.TrimSpace(v))
 	if v == "" {
-		if trimmed != "" && strings.Contains(trimmed, ",") {
-			return 0, UserErr("金额必须是数字")
-		}
 		return 0, nil
 	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	negative := false
+	if strings.HasPrefix(v, "-") {
+		negative = true
+		v = v[1:]
+	}
+	if v == "" {
 		return 0, UserErr("金额必须是数字")
 	}
-	if f < 0 {
+	intPart, fracPart := v, ""
+	if dot := strings.IndexByte(v, '.'); dot >= 0 {
+		if strings.IndexByte(v[dot+1:], '.') >= 0 {
+			return 0, UserErr("金额必须是数字")
+		}
+		intPart = v[:dot]
+		fracPart = v[dot+1:]
+		if fracPart == "" || strings.ContainsRune(fracPart, ',') {
+			return 0, UserErr("金额必须是数字")
+		}
+	}
+	if strings.ContainsRune(intPart, ',') {
+		groups := strings.Split(intPart, ",")
+		if len(groups[0]) < 1 || len(groups[0]) > 3 {
+			return 0, UserErr("金额必须是数字")
+		}
+		for i := 1; i < len(groups); i++ {
+			if len(groups[i]) != 3 {
+				return 0, UserErr("金额必须是数字")
+			}
+		}
+		intPart = strings.Join(groups, "")
+	}
+	if intPart == "" && fracPart == "" {
+		return 0, UserErr("金额必须是数字")
+	}
+	for i := 0; i < len(intPart); i++ {
+		if intPart[i] < '0' || intPart[i] > '9' {
+			return 0, UserErr("金额必须是数字")
+		}
+	}
+	for i := 0; i < len(fracPart); i++ {
+		if fracPart[i] < '0' || fracPart[i] > '9' {
+			return 0, UserErr("金额必须是数字")
+		}
+	}
+	if len(fracPart) > 2 {
+		return 0, UserErr("金额最多保留两位小数")
+	}
+	if negative {
 		return 0, UserErr("金额不能为负")
 	}
-	if f*100 > float64(math.MaxInt32) {
+	var whole uint64
+	if intPart != "" {
+		parsed, err := strconv.ParseUint(intPart, 10, 64)
+		if err != nil {
+			return 0, UserErr("金额过大")
+		}
+		whole = parsed
+	}
+	var frac uint64
+	switch len(fracPart) {
+	case 1:
+		frac = uint64(fracPart[0]-'0') * 10
+	case 2:
+		frac = uint64(fracPart[0]-'0')*10 + uint64(fracPart[1]-'0')
+	}
+	if whole > uint64(math.MaxInt32)/100 {
 		return 0, UserErr("金额过大")
 	}
-	return int(math.Round(f * 100)), nil
+	total := whole*100 + frac
+	if total > uint64(math.MaxInt32) {
+		return 0, UserErr("金额过大")
+	}
+	return int(total), nil
+}
+
+func MoneyText64(cents int64) string {
+	neg := ""
+	u := uint64(cents)
+	if cents < 0 {
+		neg = "-"
+		u = uint64(-(cents + 1)) + 1
+	}
+	if u%100 == 0 {
+		return fmt.Sprintf("%s¥ %d", neg, u/100)
+	}
+	return fmt.Sprintf("%s¥ %d.%02d", neg, u/100, u%100)
 }
 
 func PriceCents(v string) int {
@@ -506,9 +605,39 @@ func ValidateBeerFields(name, category, posterURL string, abv, ut *float64, ibu,
 }
 
 // ValidateBeerFieldsWithCategories 按指定分类白名单校验酒款与历史酒单共有字段。
+func ValidateBeerTexts(brewery, name, style, category, posterURL string, tags []string) error {
+	if len([]rune(strings.TrimSpace(brewery))) > 100 {
+		return UserErr("厂牌名称过长（最多 100 字）")
+	}
+	if len([]rune(strings.TrimSpace(name))) > 120 {
+		return UserErr("酒款名称过长（最多 120 字）")
+	}
+	if len([]rune(strings.TrimSpace(style))) > 100 {
+		return UserErr("风格过长（最多 100 字）")
+	}
+	if len([]rune(strings.TrimSpace(category))) > 50 {
+		return UserErr("分类名称过长（最多 50 字）")
+	}
+	if len([]rune(strings.TrimSpace(posterURL))) > 1000 {
+		return UserErr("酒标地址过长（最多 1000 字符）")
+	}
+	if len(tags) > 20 {
+		return UserErr("风味标签过多（最多 20 个）")
+	}
+	for _, tag := range tags {
+		if len([]rune(strings.TrimSpace(tag))) > 40 {
+			return UserErr("单个风味标签过长（最多 40 字）")
+		}
+	}
+	return nil
+}
+
 func ValidateBeerFieldsWithCategories(name, category, posterURL string, abv, ut *float64, ibu, utCount *int, p150, p330, p500, sortOrder int, allowed []string, extraAllowed ...string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", UserErr("酒款名称不能为空")
+	}
+	if err := ValidateBeerTexts("", name, "", category, posterURL, nil); err != nil {
+		return "", err
 	}
 	if !ValidPosterURL(posterURL) {
 		return "", UserErr("酒标图片地址需为 http://、https:// 或站内路径 / 开头")
@@ -520,8 +649,8 @@ func ValidateBeerFieldsWithCategories(name, category, posterURL string, abv, ut 
 	if abv != nil && (math.IsNaN(*abv) || math.IsInf(*abv, 0) || *abv < 0 || *abv > 100) {
 		return "", UserErr("ABV 必须是 0 到 100 之间的数字")
 	}
-	if ibu != nil && (*ibu < 0 || *ibu > math.MaxInt32) {
-		return "", UserErr("IBU 必须是 0 到 2147483647 之间的整数")
+	if ibu != nil && (*ibu < 0 || *ibu > MaxBeerIBU) {
+		return "", UserErrf("IBU 必须是 0 到 %d 之间的整数", MaxBeerIBU)
 	}
 	if ut != nil && (math.IsNaN(*ut) || math.IsInf(*ut, 0) || *ut < 0 || *ut > 5) {
 		return "", UserErr("UT 评分必须是 0 到 5 之间的数字")
@@ -572,11 +701,14 @@ func ParseBeerFormWithCategories(r *http.Request, allowed []string, extraAllowed
 		PosterURL: strings.TrimSpace(r.FormValue("poster_url")),
 		Tags:      SplitList(r.FormValue("tags")),
 	}
+	if err := ValidateBeerTexts(in.Brewery, in.Name, in.Style, in.Category, in.PosterURL, in.Tags); err != nil {
+		return BeerFormInput{}, err
+	}
 	abv, abvErr := ParseStrictFloat(r.FormValue("abv"), "ABV", 0, 100, true)
 	if abvErr == nil {
 		in.ABV = abv
 	}
-	ibu, ibuErr := ParseStrictInt(r.FormValue("ibu"), "IBU", 0, math.MaxInt32)
+	ibu, ibuErr := ParseStrictInt(r.FormValue("ibu"), "IBU", 0, MaxBeerIBU)
 	if ibuErr == nil {
 		in.IBU = ibu
 	}
@@ -639,8 +771,4 @@ func SplitList(v string) []string {
 		}
 	}
 	return out
-}
-
-func URLMsg(m string) string {
-	return url.QueryEscape(m)
 }

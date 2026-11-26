@@ -1,6 +1,8 @@
 package inventory
 
 import (
+	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,9 +25,10 @@ type RetailListPage struct {
 
 type RetailFormPage struct {
 	ui.Layout
-	Item       RetailItem
-	RetailCats []string
-	Moves      []StockMove
+	Item          RetailItem
+	ExpectedStock int
+	RetailCats    []string
+	Moves         []StockMove
 }
 
 func (s *Service) publishLowStock(r *http.Request, low *LowStockItem) {
@@ -44,17 +47,20 @@ func (s *Service) RetailList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	items, err := SearchRetail(r.Context(), s.pool, q.Get("q"), q.Get("cat"), q.Get("low") != "", q.Get("active") != "")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("retail list search: %v", err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	stats, err := RetailStatsSummary(r.Context(), s.pool)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("retail list stats: %v", err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	all, err := ListRetail(r.Context(), s.pool)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("retail list all: %v", err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	var value, lowCount int
@@ -70,8 +76,6 @@ func (s *Service) RetailList(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: "零售",
 			Nav:   "retail",
-			Msg:   q.Get("msg"),
-			Err:   q.Get("err"),
 		},
 		Retail:     items,
 		Stats:      stats,
@@ -100,75 +104,138 @@ func (s *Service) RetailEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	moves, err := ListMoves(r.Context(), s.pool, id, 12)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("retail edit moves (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	s.renderer.Render(w, r, "admin/retail_form.html", &RetailFormPage{
-		Layout:     ui.Layout{Title: "编辑零售商品", Nav: "retail"},
-		Item:       it,
-		RetailCats: RetailCategories,
-		Moves:      moves,
+		Layout:        ui.Layout{Title: "编辑零售商品", Nav: "retail"},
+		Item:          it,
+		ExpectedStock: it.Stock,
+		RetailCats:    RetailCategories,
+		Moves:         moves,
 	})
 }
 
 func (s *Service) RetailSave(w http.ResponseWriter, r *http.Request) {
+	priceCents, priceErr := platform.MoneyCents(r.FormValue("price"))
+	costCents, costErr := platform.MoneyCents(r.FormValue("cost"))
+	stockPtr, stockErr := platform.ParseStrictInt(r.FormValue("stock"), "库存", 0, math.MaxInt32)
 	it := RetailItem{
 		Name:       strings.TrimSpace(r.FormValue("name")),
 		Category:   r.FormValue("category"),
 		Spec:       strings.TrimSpace(r.FormValue("spec")),
-		PriceCents: platform.PriceCents(r.FormValue("price")),
-		CostCents:  platform.PriceCents(r.FormValue("cost")),
-		Stock:      platform.IntValue(r.FormValue("stock")),
+		PriceCents: priceCents,
+		CostCents:  costCents,
 		Active:     r.FormValue("active") != "",
+	}
+	if stockPtr != nil {
+		it.Stock = *stockPtr
 	}
 	if id := r.FormValue("id"); id != "" {
 		it.ID, _ = strconv.ParseInt(id, 10, 64)
 	}
-	_, low, err := SaveRetail(r.Context(), s.pool, it)
-	if err != nil {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		s.renderer.Render(w, r, "admin/retail_form.html", &RetailFormPage{
-			Layout:     ui.Layout{Title: "零售商品", Nav: "retail", Err: err.Error()},
-			Item:       it,
-			RetailCats: RetailCategories,
+	var expectedStock *int
+	if rawExp := strings.TrimSpace(r.FormValue("expected_stock")); rawExp != "" {
+		if expVal, err := strconv.Atoi(rawExp); err == nil && expVal >= 0 {
+			expectedStock = &expVal
+		}
+	}
+	renderFail := func(status int, msg string) {
+		title := "新增零售商品"
+		if it.ID > 0 {
+			title = "编辑零售商品"
+		}
+		expStock := it.Stock
+		if expectedStock != nil {
+			expStock = *expectedStock
+		}
+		s.renderer.RenderStatus(w, r, status, "admin/retail_form.html", &RetailFormPage{
+			Layout:        ui.Layout{Title: title, Nav: "retail", Err: msg},
+			Item:          it,
+			ExpectedStock: expStock,
+			RetailCats:    RetailCategories,
 		})
+	}
+	switch {
+	case priceErr != nil:
+		renderFail(http.StatusBadRequest, priceErr.Error())
+		return
+	case costErr != nil:
+		renderFail(http.StatusBadRequest, costErr.Error())
+		return
+	case stockErr != nil:
+		renderFail(http.StatusBadRequest, stockErr.Error())
+		return
+	}
+	_, low, err := SaveRetailWithExpected(r.Context(), s.pool, it, expectedStock)
+	if err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			renderFail(http.StatusBadRequest, msg)
+			return
+		}
+		log.Printf("retail save (%d): %v", it.ID, err)
+		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
 		return
 	}
 	s.publishLowStock(r, low)
-	http.Redirect(w, r, "/admin/retail?msg="+platform.URLMsg("已保存"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/retail", "已保存")
 }
 
 func (s *Service) RetailDelete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err := DeleteRetail(r.Context(), s.pool, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/retail", msg)
+			return
+		}
+		log.Printf("retail delete (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/retail", "删除失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/retail?msg="+platform.URLMsg("已删除"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/retail", "已删除")
 }
 
 func (s *Service) RetailToggle(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err := ToggleRetail(r.Context(), s.pool, id); err != nil {
-		http.Redirect(w, r, "/admin/retail?msg="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/retail", msg)
+			return
+		}
+		log.Printf("retail toggle (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/retail", "操作失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/retail?msg="+platform.URLMsg("已切换上下架"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/retail", "已切换上下架")
 }
 
 func (s *Service) RetailStock(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	delta := platform.IntValue(r.FormValue("delta"))
+	deltaPtr, deltaErr := platform.ParseStrictInt(r.FormValue("delta"), "库存变动数量", -100000, 100000)
+	if deltaErr != nil || deltaPtr == nil || *deltaPtr == 0 {
+		msg := "请填写非零整数变动数量"
+		if deltaErr != nil {
+			msg = deltaErr.Error()
+		}
+		platform.RedirectErr(w, r, "/admin/retail", msg)
+		return
+	}
+	delta := *deltaPtr
 	reason := "调整"
 	if delta > 0 {
 		reason = "入库"
 	}
 	low, err := AddStock(r.Context(), s.pool, id, delta, reason)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/retail", msg)
+			return
+		}
+		log.Printf("retail stock (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/retail", "库存调整失败，请稍后重试")
 		return
 	}
 	s.publishLowStock(r, low)
-	http.Redirect(w, r, "/admin/retail?msg="+platform.URLMsg("库存已更新"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/retail", "库存已更新")
 }

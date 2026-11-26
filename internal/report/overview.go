@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/inventory"
@@ -21,23 +22,39 @@ type Overview struct {
 
 func (o Overview) StockText() string { return platform.PriceText(o.StockValue) }
 
+// LoadOverview 单独开一个只读快照读概览；需要和销售/POS 统计同源时用 LoadOverviewTx。
 func LoadOverview(ctx context.Context, pool *pgxpool.Pool) (Overview, error) {
+	tx, err := beginReadOnlyTimeoutTx(ctx, pool)
+	if err != nil {
+		return Overview{}, err
+	}
+	defer tx.Rollback(ctx)
+	o, err := LoadOverviewTx(ctx, tx)
+	if err != nil {
+		return o, err
+	}
+	return o, tx.Commit(ctx)
+}
+
+// LoadOverviewTx 在调用方事务里读概览快照；手动停用的有库存商品与软删除商品不再挤占库存告警，库存归零自动下架的售罄品仍计入售罄告警。
+func LoadOverviewTx(ctx context.Context, tx pgx.Tx) (Overview, error) {
 	var o Overview
-	err := pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		select (select count(*) from kegs where tapped_at is not null and finished_at is null),
-		       (select count(*) from retail_items where active),
-		       (select count(*) from retail_items where stock between 1 and $1),
-		       (select count(*) from retail_items where stock <= 0),
+		       (select count(*) from retail_items where active and archived_at is null),
+		       (select count(*) from retail_items where active and archived_at is null and stock between 1 and $1),
+		       (select count(*) from retail_items where archived_at is null and stock <= 0),
 		       (select count(*) from kegs where tapped_at is null and finished_at is null),
-		       (select coalesce(sum(stock::bigint * cost_cents),0) from retail_items)
+		       (select coalesce(sum(stock::bigint * cost_cents),0) from retail_items where active and archived_at is null)
 		         + (select coalesce(sum(cost_cents),0) from kegs where tapped_at is null and finished_at is null)`,
 		inventory.LowStockThreshold,
 	).Scan(&o.ActiveKegs, &o.RetailCount, &o.LowCount, &o.OutCount, &o.Untapped, &o.StockValue)
 	if err != nil {
 		return o, err
 	}
-	rows, err := pool.Query(ctx, `select id, name, category, spec, price_cents, cost_cents, stock, active
-		from retail_items where stock <= $1 order by stock, name limit 8`, inventory.LowStockThreshold)
+	rows, err := tx.Query(ctx, `select id, name, category, spec, price_cents, cost_cents, stock, active
+		from retail_items where archived_at is null and ((active and stock between 1 and $1) or stock <= 0)
+		order by stock, name limit 8`, inventory.LowStockThreshold)
 	if err != nil {
 		return o, err
 	}
@@ -53,7 +70,7 @@ func LoadOverview(ctx context.Context, pool *pgxpool.Pool) (Overview, error) {
 		return o, err
 	}
 
-	activeKegs, err := inventory.ListKegs(ctx, pool, true)
+	activeKegs, err := inventory.ListKegs(ctx, tx, true)
 	if err != nil {
 		return o, err
 	}
@@ -89,7 +106,7 @@ func ReportDates(now time.Time, period, from, to string) (string, time.Time, tim
 	if from != "" || to != "" || period == "custom" {
 		startDay, startErr := time.ParseInLocation(time.DateOnly, from, platform.ReportZone)
 		lastDay, endErr := time.ParseInLocation(time.DateOnly, to, platform.ReportZone)
-		if startErr != nil || endErr != nil || startDay.Year() < 1 || lastDay.Year() < 1 || lastDay.Before(startDay) || !lastDay.Before(startDay.AddDate(0, 0, 366)) {
+		if startErr != nil || endErr != nil || startDay.Year() < 2000 || lastDay.Year() < 2000 || lastDay.Before(startDay) || !lastDay.Before(startDay.AddDate(0, 0, 366)) {
 			return "custom", time.Time{}, time.Time{}, "请选择有效的起止日期，区间最多 366 天。"
 		}
 		start := platform.BusinessDayStartOfDate(startDay)

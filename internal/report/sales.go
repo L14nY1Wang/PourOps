@@ -16,7 +16,8 @@ import (
 // 营业额的唯一口径：桶装 keg_pours.amount_cents + 零售 retail_sales.total_cents，
 // payments 只是收款方式，不能重复计。start/end 是北京时间营业日（07:00 至次日 07:00）的
 // [start, end) 边界；成本按桶成本 × 售出毫升摊销，零售取已售成本，按营业日分品类先舍入到分，
-// 保证趋势逐日相加与 KPI 完全对账。
+// 保证趋势逐日相加与 KPI 完全对账。SQL 统一用固定 UTC+8（`at time zone 'UTC' + interval '8 hours'`），
+// 不用 'Asia/Shanghai'：1986–1991 年中国夏令时会让营业日与 Go 的 platform.ReportZone 漂移。
 
 type SalesTotals struct {
 	Revenue int64
@@ -82,12 +83,22 @@ func (i SalesTopItem) RevenueText() string { return platform.PriceText(int(i.Rev
 func (i SalesTopItem) ProfitText() string  { return platform.MoneyText(int(i.Revenue - i.Cost)) }
 
 type SalesInsights struct {
-	Current  SalesTotals
-	Previous SalesTotals
-	Draft    SalesTotals
-	Retail   SalesTotals
-	Trend    []SalesTrendDay
-	Top      []SalesTopItem
+	Current           SalesTotals
+	Previous          SalesTotals
+	Draft             SalesTotals
+	Retail            SalesTotals
+	FinishedWasteCost int64 // 区间内结桶未售余量成本，分
+	UncostedRevenue   int64 // 区间内未填成本的桶装营收，分
+	Trend             []SalesTrendDay
+	Top               []SalesTopItem
+}
+
+func (i SalesInsights) FinishedWasteCostText() string {
+	return platform.PriceText(int(i.FinishedWasteCost))
+}
+
+func (i SalesInsights) UncostedRevenueText() string {
+	return platform.PriceText(int(i.UncostedRevenue))
 }
 
 func (i SalesInsights) RevenueChangeText() string {
@@ -155,10 +166,14 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 	rows, err := tx.Query(ctx, `
 		select to_char(t.day, 'YYYY-MM-DD'), t.kind, t.revenue, t.cost, t.qty
 		from (
-			select ((p.poured_at at time zone 'Asia/Shanghai') - interval '7 hours')::date as day,
+			select (p.poured_at at time zone 'UTC' + interval '1 hour')::date as day,
 			       'draft'::text as kind,
 			       sum(p.amount_cents)::bigint as revenue,
-			       coalesce(round(sum(k.cost_cents::numeric * p.ml / nullif(k.capacity_ml, 0))), 0)::bigint as cost,
+			       coalesce(round(sum(
+			           case when coalesce(p.cost_cents, 0) > 0 then p.cost_cents::numeric
+			                when k.cost_cents > 0 and k.capacity_ml > 0 then k.cost_cents::numeric * p.ml / k.capacity_ml
+			                else 0 end
+			       )), 0)::bigint as cost,
 			       sum(p.cups)::bigint as qty
 			from keg_pours p
 			join kegs k on k.id = p.keg_id
@@ -171,7 +186,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 			       sum(d.cost_cents)::bigint,
 			       sum(d.qty)::bigint
 			from (
-				select ((s.created_at at time zone 'Asia/Shanghai') - interval '7 hours')::date as day,
+				select (s.created_at at time zone 'UTC' + interval '1 hour')::date as day,
 				       s.total_cents, s.cost_cents,
 				       (select coalesce(sum(i.qty), 0) from retail_sale_items i where i.sale_id = s.id) as qty
 				from retail_sales s
@@ -201,10 +216,61 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 		return out, err
 	}
 
+	// P2-24：把在统计期及等长上期内结桶的未售余量成本按结桶营业日归入桶装成本与日趋势，消除与整桶盈亏的口径差。
+	wasteByDay := map[string]int64{}
+	wrows, err := tx.Query(ctx, `
+		select to_char(w.day, 'YYYY-MM-DD'), sum(w.waste)::bigint
+		from (
+			select (k.finished_at at time zone 'UTC' + interval '1 hour')::date as day,
+			       greatest(k.cost_cents::bigint - coalesce(round(sum(
+			           case when coalesce(p.cost_cents, 0) > 0 then p.cost_cents::numeric
+			                when k.capacity_ml > 0 then k.cost_cents::numeric * p.ml / k.capacity_ml
+			                else 0 end
+			       )), 0)::bigint, 0) as waste
+			from kegs k
+			left join keg_pours p on p.keg_id = k.id
+			where k.finished_at is not null
+			  and k.finished_at >= $1 and k.finished_at < $2
+			  and k.cost_cents > 0
+			group by k.id, day
+		) w
+		group by w.day`, prevStart, end)
+	if err != nil {
+		return out, err
+	}
+	for wrows.Next() {
+		var day string
+		var waste int64
+		if err := wrows.Scan(&day, &waste); err != nil {
+			wrows.Close()
+			return out, err
+		}
+		wasteByDay[day] = waste
+	}
+	wrows.Close()
+	if err := wrows.Err(); err != nil {
+		return out, err
+	}
+
+	// P2-25：单独统计未填写桶成本（或无效容量）的售出营收，防止零成本虚高毛利率而不自知。
+	if err := tx.QueryRow(ctx, `
+		select coalesce(sum(p.amount_cents), 0)::bigint
+		from keg_pours p
+		join kegs k on k.id = p.keg_id
+		where p.poured_at >= $1 and p.poured_at < $2
+		  and coalesce(p.cost_cents, 0) <= 0
+		  and (k.cost_cents <= 0 or k.capacity_ml <= 0)`, start, end).
+		Scan(&out.UncostedRevenue); err != nil {
+		return out, err
+	}
+
 	startDay, endDay := start.In(platform.ReportZone), end.In(platform.ReportZone)
 	for d := startDay; d.Before(endDay); d = d.AddDate(0, 0, 1) {
 		key := platform.BusinessDayKey(d)
 		draft, retail := draftByDay[key], retailByDay[key]
+		waste := wasteByDay[key]
+		draft.Cost += waste
+		out.FinishedWasteCost += waste
 		day := SalesTotals{
 			Revenue: draft.Revenue + retail.Revenue,
 			Cost:    draft.Cost + retail.Cost,
@@ -225,7 +291,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 		key := platform.BusinessDayKey(d)
 		draft, retail := draftByDay[key], retailByDay[key]
 		out.Previous.Revenue += draft.Revenue + retail.Revenue
-		out.Previous.Cost += draft.Cost + retail.Cost
+		out.Previous.Cost += draft.Cost + retail.Cost + wasteByDay[key]
 		out.Previous.Qty += draft.Qty + retail.Qty
 	}
 
@@ -236,7 +302,11 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 			       '杯'::text as unit,
 			       sum(p.cups)::bigint as qty,
 			       sum(p.amount_cents)::bigint as revenue,
-			       coalesce(round(sum(k.cost_cents::numeric * p.ml / nullif(k.capacity_ml, 0))), 0)::bigint as cost
+			       coalesce(round(sum(
+			           case when coalesce(p.cost_cents, 0) > 0 then p.cost_cents::numeric
+			                when k.cost_cents > 0 and k.capacity_ml > 0 then k.cost_cents::numeric * p.ml / k.capacity_ml
+			                else 0 end
+			       )), 0)::bigint as cost
 			from keg_pours p
 			join kegs k on k.id = p.keg_id
 			join beers b on b.id = k.beer_id

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -24,6 +25,7 @@ type PosPage struct {
 	PosItems   []inventory.RetailItem
 	Order      *OrderView
 	PosOrderID int64
+	PayToken   string
 }
 
 type PayPage struct {
@@ -58,8 +60,10 @@ func NewService(pool *pgxpool.Pool, renderer *ui.Renderer, bus *event.EventBus, 
 
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /pos/{$}", guards.Any(s.PosSpots))
-	mux.HandleFunc("POST /pos/bar/add", guards.Any(s.PosAddBar))
-	mux.HandleFunc("POST /pos/table/add", guards.Any(s.PosAddTable))
+	mux.HandleFunc("POST /pos/bar/add", guards.Auth(s.PosAddBar))
+	mux.HandleFunc("POST /pos/table/add", guards.Auth(s.PosAddTable))
+	mux.HandleFunc("POST /pos/bar/remove", guards.Auth(s.PosRemoveBar))
+	mux.HandleFunc("POST /pos/table/remove", guards.Auth(s.PosRemoveTable))
 	mux.HandleFunc("POST /pos/open", guards.Any(s.PosOpen))
 	mux.HandleFunc("GET /pos/order/{id}", guards.Any(s.PosOrder))
 	mux.HandleFunc("POST /pos/order/{id}/add", guards.Any(s.PosAddItem))
@@ -79,10 +83,6 @@ func (s *Service) posMenu(r *http.Request) (*PosPage, error) {
 		return nil, err
 	}
 	return &PosPage{
-		Layout: ui.Layout{
-			Err: r.URL.Query().Get("err"),
-			Msg: r.URL.Query().Get("msg"),
-		},
 		PosBeers: beers,
 		PosItems: items,
 	}, nil
@@ -91,12 +91,14 @@ func (s *Service) posMenu(r *http.Request) (*PosPage, error) {
 func (s *Service) PosSpots(w http.ResponseWriter, r *http.Request) {
 	data, err := s.posMenu(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("pos spots menu: %v", err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	spots, err := ListSpots(r.Context(), s.pool)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("pos spots list: %v", err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	data.Title = "点餐"
@@ -110,16 +112,29 @@ func (s *Service) PosSpots(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) PosAddBar(w http.ResponseWriter, r *http.Request) {
-	if err := AddSpot(r.Context(), s.pool, "bar_count"); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	http.Redirect(w, r, "/pos/", http.StatusSeeOther)
+	s.spotMutate(w, r, "bar_count", AddSpot)
 }
 
 func (s *Service) PosAddTable(w http.ResponseWriter, r *http.Request) {
-	if err := AddSpot(r.Context(), s.pool, "table_count"); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	s.spotMutate(w, r, "table_count", AddSpot)
+}
+
+func (s *Service) PosRemoveBar(w http.ResponseWriter, r *http.Request) {
+	s.spotMutate(w, r, "bar_count", RemoveSpot)
+}
+
+func (s *Service) PosRemoveTable(w http.ResponseWriter, r *http.Request) {
+	s.spotMutate(w, r, "table_count", RemoveSpot)
+}
+
+func (s *Service) spotMutate(w http.ResponseWriter, r *http.Request, key string, fn func(context.Context, *pgxpool.Pool, string) error) {
+	if err := fn(r.Context(), s.pool, key); err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/pos/", msg)
+			return
+		}
+		log.Printf("pos spot mutate (%s): %v", key, err)
+		platform.RedirectErr(w, r, "/pos/", "调整台位失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, "/pos/", http.StatusSeeOther)
@@ -128,12 +143,17 @@ func (s *Service) PosAddTable(w http.ResponseWriter, r *http.Request) {
 func (s *Service) PosOpen(w http.ResponseWriter, r *http.Request) {
 	key := r.FormValue("spot")
 	if !strings.HasPrefix(key, "bar-") && !strings.HasPrefix(key, "table-") {
-		http.Redirect(w, r, "/pos/?msg="+platform.URLMsg("没有这个台位"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/pos/", "没有这个台位")
 		return
 	}
 	id, err := EnsureOrder(r.Context(), s.pool, key)
 	if err != nil {
-		http.Redirect(w, r, "/pos/?msg="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/pos/", msg)
+			return
+		}
+		log.Printf("pos open (%s): %v", key, err)
+		platform.RedirectErr(w, r, "/pos/", "开单失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, fmt.Sprintf("/pos/order/%d", id), http.StatusSeeOther)
@@ -148,13 +168,15 @@ func (s *Service) PosOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := s.posMenu(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("pos order menu (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	data.Title = o.Label
 	data.Order = &o
 	if !o.Closed {
 		data.PosOrderID = o.ID
+		data.PayToken = platform.RandomHex(16)
 	}
 	s.renderer.RenderShell(w, r, "pos/pos.html", "pos", data)
 }
@@ -178,21 +200,26 @@ func (s *Service) PosAddItem(w http.ResponseWriter, r *http.Request) {
 			from kegs k join beers b on b.id = k.beer_id
 			where k.id=$1 and b.on_screen and k.tapped_at is not null and k.finished_at is null`, refID, ml).Scan(&name, &price)
 		if err != nil {
-			http.Redirect(w, r, back+"?err="+platform.URLMsg("这桶酒不在售"), http.StatusSeeOther)
+			platform.RedirectErr(w, r, back, "这桶酒不在售")
 			return
 		}
 		if price <= 0 {
-			http.Redirect(w, r, back+"?err="+platform.URLMsg("这桶酒没开这个杯型"), http.StatusSeeOther)
+			platform.RedirectErr(w, r, back, "这桶酒没开这个杯型")
 			return
 		}
 		if err := AddOrderItem(r.Context(), s.pool, orderID, "beer", refID, name, price, ml); err != nil {
-			http.Redirect(w, r, back+"?err="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+			if msg, ok := platform.UserErrorMessage(err); ok {
+				platform.RedirectErr(w, r, back, msg)
+				return
+			}
+			log.Printf("pos add beer (%d): %v", orderID, err)
+			platform.RedirectErr(w, r, back, "加购失败，请稍后重试")
 			return
 		}
 	case "retail":
 		it, err := inventory.GetRetail(r.Context(), s.pool, refID)
 		if err != nil || !it.Active || it.Stock < 1 {
-			http.Redirect(w, r, back+"?err="+platform.URLMsg("这件商品不能卖了"), http.StatusSeeOther)
+			platform.RedirectErr(w, r, back, "这件商品不能卖了")
 			return
 		}
 		name := it.Name
@@ -200,11 +227,16 @@ func (s *Service) PosAddItem(w http.ResponseWriter, r *http.Request) {
 			name += " " + it.Spec
 		}
 		if err := AddOrderItem(r.Context(), s.pool, orderID, "retail", refID, name, it.PriceCents, 0); err != nil {
-			http.Redirect(w, r, back+"?err="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+			if msg, ok := platform.UserErrorMessage(err); ok {
+				platform.RedirectErr(w, r, back, msg)
+				return
+			}
+			log.Printf("pos add retail (%d): %v", orderID, err)
+			platform.RedirectErr(w, r, back, "加购失败，请稍后重试")
 			return
 		}
 	default:
-		http.Redirect(w, r, back+"?err="+platform.URLMsg("不认识的商品"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, back, "不认识的商品")
 		return
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
@@ -222,7 +254,12 @@ func (s *Service) adjustOrderItem(w http.ResponseWriter, r *http.Request, op fun
 	orderID, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	itemID, _ := strconv.ParseInt(r.PathValue("item"), 10, 64)
 	if err := op(r.Context(), s.pool, orderID, itemID); err != nil {
-		http.Redirect(w, r, fmt.Sprintf("/pos/order/%d?err=%s", orderID, platform.URLMsg(err.Error())), http.StatusSeeOther)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, fmt.Sprintf("/pos/order/%d", orderID), msg)
+			return
+		}
+		log.Printf("pos adjust item (%d/%d): %v", orderID, itemID, err)
+		platform.RedirectErr(w, r, fmt.Sprintf("/pos/order/%d", orderID), "修改数量失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, fmt.Sprintf("/pos/order/%d", orderID), http.StatusSeeOther)
@@ -237,51 +274,78 @@ func (s *Service) PosPay(w http.ResponseWriter, r *http.Request) {
 			ids = append(ids, id)
 		}
 	}
-	res, err := PayItemsWithGateway(r.Context(), s.pool, s.gateway, orderID, ids)
+	opts := PayOptions{
+		Method:         r.FormValue("method"),
+		IdempotencyKey: r.FormValue("idempotency_key"),
+	}
+	if rawExp := strings.TrimSpace(r.FormValue("expected_total_cents")); rawExp != "" {
+		if v, err := strconv.Atoi(rawExp); err == nil && v >= 0 {
+			opts.ExpectedTotalCents = &v
+		}
+	}
+	res, err := PayItemsWithOptions(r.Context(), s.pool, s.gateway, orderID, ids, opts)
 	if err != nil {
-		msg := err.Error()
+		msg := "结账失败，请稍后重试"
 		if um, ok := platform.UserErrorMessage(err); ok {
 			msg = um
+		} else {
+			log.Printf("pos pay (%d): %v", orderID, err)
 		}
-		http.Redirect(w, r, fmt.Sprintf("/pos/order/%d?err=%s", orderID, platform.URLMsg(msg)), http.StatusSeeOther)
+		platform.RedirectErr(w, r, fmt.Sprintf("/pos/order/%d", orderID), msg)
 		return
 	}
 
-	if s.printer != nil {
-		receipt := Receipt{
-			PaymentID:   res.PaymentID,
-			OrderID:     res.OrderID,
-			SpotLabel:   res.SpotLabel,
-			AmountCents: res.AmountCents,
-			ItemsCount:  res.ItemsCount,
-			Actor:       platform.OperationActor(r.Context()),
-			Lines:       res.Lines,
+	if !res.Replayed {
+		if s.printer != nil {
+			receipt := Receipt{
+				PaymentID:   res.PaymentID,
+				OrderID:     res.OrderID,
+				SpotLabel:   res.SpotLabel,
+				AmountCents: res.AmountCents,
+				ItemsCount:  res.ItemsCount,
+				Actor:       platform.OperationActor(r.Context()),
+				Lines:       res.Lines,
+			}
+			printCtx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+			if err := s.printer.Print(printCtx, receipt); err != nil {
+				log.Printf("pos receipt print (%s) payment %d failed: %v", s.printer.Name(), res.PaymentID, err)
+			}
+			cancel()
 		}
-		if err := s.printer.Print(r.Context(), receipt); err != nil {
-			log.Printf("pos receipt print (%s) payment %d failed: %v", s.printer.Name(), res.PaymentID, err)
-		}
-	}
-	if s.bus != nil {
-		s.bus.Publish(r.Context(), event.EventOrderPaid, res.SpotLabel, map[string]any{
-			"payment_id":   res.PaymentID,
-			"order_id":     res.OrderID,
-			"spot":         res.Spot,
-			"spot_label":   res.SpotLabel,
-			"amount_cents": res.AmountCents,
-			"items_count":  res.ItemsCount,
-			"closed":       res.Closed,
-			"lines":        res.Lines,
-		})
-		for _, low := range res.LowStock {
-			s.bus.Publish(r.Context(), event.EventRetailLowStock, platform.RetailSubject(low.Name), map[string]any{
-				"item_id": low.ItemID,
-				"name":    low.Name,
-				"stock":   low.Stock,
-				"active":  low.Active,
+		if s.bus != nil {
+			s.bus.Publish(r.Context(), event.EventOrderPaid, res.SpotLabel, map[string]any{
+				"payment_id":   res.PaymentID,
+				"order_id":     res.OrderID,
+				"spot":         res.Spot,
+				"spot_label":   res.SpotLabel,
+				"amount_cents": res.AmountCents,
+				"items_count":  res.ItemsCount,
+				"closed":       res.Closed,
+				"method":       res.Method,
+				"lines":        res.Lines,
 			})
+			for _, low := range res.LowStock {
+				s.bus.Publish(r.Context(), event.EventRetailLowStock, platform.RetailSubject(low.Name), map[string]any{
+					"item_id": low.ItemID,
+					"name":    low.Name,
+					"stock":   low.Stock,
+					"active":  low.Active,
+				})
+			}
 		}
 	}
 
+	var notes []string
+	if res.SkippedCount > 0 {
+		notes = append(notes, fmt.Sprintf("已自动跳过 %d 项已结商品", res.SkippedCount))
+	}
+	if res.OverSoldCount > 0 {
+		notes = append(notes, fmt.Sprintf("提醒：%d 款酒水累计售出已超标称桶容量", res.OverSoldCount))
+	}
+	if len(notes) > 0 {
+		platform.RedirectMsg(w, r, fmt.Sprintf("/pos/pay/%d", res.PaymentID), strings.Join(notes, "；"))
+		return
+	}
 	http.Redirect(w, r, fmt.Sprintf("/pos/pay/%d", res.PaymentID), http.StatusSeeOther)
 }
 

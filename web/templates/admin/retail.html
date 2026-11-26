@@ -88,7 +88,7 @@
                   <input class="form-control" style="width:66px" type="number" name="delta" value="1" title="正数入库，负数调整" aria-label="库存变动数量">
                   <button class="button button--secondary button--sm" type="submit">入库</button>
                 </form>
-                <form class="inline-form" method="post" action="/admin/retail/{{.ID}}/delete" onsubmit="return confirm('删除「{{.Name}}」？库存流水会一起删掉，历史订单保留。')">
+                <form class="inline-form" method="post" action="/admin/retail/{{.ID}}/delete" onsubmit="return confirm('停用归档「{{.Name}}」？历史订单与库存流水会保留。')">
                   <button class="button button--danger-soft button--sm" type="submit">删除</button>
                 </form>
               </div>

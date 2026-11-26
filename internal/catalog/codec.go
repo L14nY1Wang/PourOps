@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	maxZipEntries           = 2000
+	maxZipEntries           = ImportMaxRows + 1
 	maxZipTotalUncompressed = 80 << 20
 	zipCatalogFilename      = "catalog.json"
 )
@@ -123,32 +123,78 @@ func (ZIPCodec) CanDecode(filename string, raw []byte) bool {
 	return strings.HasSuffix(filename, ".zip") || hasZIPMagic(raw)
 }
 
-func (c ZIPCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	writtenPosters := make(map[string]bool)
+type zipPosterAsset struct {
+	rel       string
+	posterURL string
+}
+
+// PreparedZIPArchive 保存已完成边界预检且可直接流式输出的历史酒单压缩包清单。
+type PreparedZIPArchive struct {
+	posters   *PosterStore
+	assets    []zipPosterAsset
+	jsonBytes []byte
+	now       time.Time
+}
+
+func (p *PreparedZIPArchive) WriteTo(w io.Writer) error {
+	zw := zip.NewWriter(w)
+	for _, asset := range p.assets {
+		_, f, _, ok := p.posters.Open(asset.posterURL)
+		if !ok {
+			return fmt.Errorf("导出酒标文件缺失: %s", asset.rel)
+		}
+		fh := &zip.FileHeader{
+			Name:     asset.rel,
+			Method:   zip.Store,
+			Modified: p.now,
+		}
+		fw, err := zw.CreateHeader(fh)
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		_, err = io.Copy(fw, io.LimitReader(f, MaxPosterBytes+1))
+		_ = f.Close()
+		if err != nil {
+			return err
+		}
+	}
+
+	mfh := &zip.FileHeader{
+		Name:     zipCatalogFilename,
+		Method:   zip.Deflate,
+		Modified: p.now,
+	}
+	mw, err := zw.CreateHeader(mfh)
+	if err != nil {
+		return err
+	}
+	if _, err := mw.Write(p.jsonBytes); err != nil {
+		return err
+	}
+	return zw.Close()
+}
+
+// PrepareExport 在写入任何响应字节前校验条数、条目数与压缩包体积上限，确保导出的 ZIP 可再导回。
+func (c ZIPCodec) PrepareExport(items []CatalogBeer, brand string, now time.Time) (*PreparedZIPArchive, error) {
+	if len(items) > ImportMaxRows {
+		return nil, platform.UserErrf("导出酒款超过单包上限（%d 款），请精简后再导出", ImportMaxRows)
+	}
 	exportItems := append([]CatalogBeer(nil), items...)
 	posterFiles := make([]string, len(exportItems))
+	writtenPosters := make(map[string]bool)
+	var assets []zipPosterAsset
+	var totalBytes int64
 
 	for i := range exportItems {
 		pURL := strings.TrimSpace(exportItems[i].PosterURL)
 		if c.Posters != nil && IsLocalPosterURL(pURL) {
-			if name, data, ok := c.Posters.Read(pURL); ok {
+			if name, size, ok := c.Posters.FileInfo(pURL); ok {
 				rel := "posters/" + name
 				if !writtenPosters[rel] {
-					fh := &zip.FileHeader{
-						Name:     rel,
-						Method:   zip.Store,
-						Modified: now,
-					}
-					fw, err := zw.CreateHeader(fh)
-					if err != nil {
-						return nil, err
-					}
-					if _, err := fw.Write(data); err != nil {
-						return nil, err
-					}
 					writtenPosters[rel] = true
+					assets = append(assets, zipPosterAsset{rel: rel, posterURL: pURL})
+					totalBytes += size
 				}
 				posterFiles[i] = rel
 			} else {
@@ -157,23 +203,42 @@ func (c ZIPCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]by
 		}
 	}
 
+	entryCount := 1 + len(assets)
+	if entryCount > maxZipEntries {
+		return nil, platform.UserErrf("导出文件条目数超过上限（%d 个）", maxZipEntries)
+	}
+
 	jsonBytes, err := encodeCatalogJSONWithPosterFiles(exportItems, posterFiles, brand, now, resolveCodecCategories(c.CategoriesFn), 2)
 	if err != nil {
 		return nil, err
 	}
-	mfh := &zip.FileHeader{
-		Name:     zipCatalogFilename,
-		Method:   zip.Deflate,
-		Modified: now,
+	if len(jsonBytes) > ImportMaxBytes {
+		return nil, platform.UserErr("导出清单超出单文件大小上限，请精简后再导出")
 	}
-	mw, err := zw.CreateHeader(mfh)
+	totalBytes += int64(len(jsonBytes))
+	if totalBytes+int64(len(assets)+1)*256+4096 > ImportArchiveMaxBytes {
+		return nil, platform.UserErrf("导出压缩包体积超过导入上限（50MB），请减少单次酒标后重试")
+	}
+
+	return &PreparedZIPArchive{
+		posters:   c.Posters,
+		assets:    assets,
+		jsonBytes: jsonBytes,
+		now:       now,
+	}, nil
+}
+
+func (c ZIPCodec) EncodeTo(w io.Writer, items []CatalogBeer, brand string, now time.Time) error {
+	prepared, err := c.PrepareExport(items, brand, now)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if _, err := mw.Write(jsonBytes); err != nil {
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
+	return prepared.WriteTo(w)
+}
+
+func (c ZIPCodec) Encode(items []CatalogBeer, brand string, now time.Time) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := c.EncodeTo(&buf, items, brand, now); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -256,7 +321,19 @@ func (c ZIPCodec) Decode(raw []byte) ([]ImportItem, error) {
 	if !hasZIPMagic(raw) {
 		return nil, errors.New("请上传本系统导出的 .zip 历史酒单压缩包")
 	}
-	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	return c.DecodeReaderAt(bytes.NewReader(raw), int64(len(raw)))
+}
+
+// DecodeReaderAt 直接从随机读源流式解析 ZIP（如临时上传文件），避免整包读入内存。
+func (c ZIPCodec) DecodeReaderAt(r io.ReaderAt, size int64) ([]ImportItem, error) {
+	if r == nil || size < 4 {
+		return nil, errors.New("请上传本系统导出的 .zip 历史酒单压缩包")
+	}
+	var head [4]byte
+	if n, err := r.ReadAt(head[:], 0); n < 4 || (err != nil && !errors.Is(err, io.EOF)) || !hasZIPMagic(head[:n]) {
+		return nil, errors.New("请上传本系统导出的 .zip 历史酒单压缩包")
+	}
+	zr, err := zip.NewReader(r, size)
 	if err != nil {
 		return nil, errors.New("压缩包损坏或格式不支持")
 	}
@@ -634,6 +711,21 @@ var csvHeaderAliases = map[string]string{
 	"500ml分": "price_500_cents", "price_500_cents": "price_500_cents",
 }
 
+func normalizeDecodeCategory(raw string, allowed []string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(v, "\r\n\x00") || len([]rune(v)) > 50 {
+		return "", platform.UserErr("酒款分类格式不合法")
+	}
+	if matched, err := platform.ParseCategoryWithAllowed(v, allowed); err == nil {
+		return matched, nil
+	}
+	// P2-17：解码阶段仅做兼容转换与格式检查，不因已删自定义分类拒绝导入备份。
+	return platform.CategoryLabel(v), nil
+}
+
 func parseImportFloat(raw, label string, maxVal float64) (*float64, error) {
 	return platform.ParseStrictFloat(raw, label, 0, maxVal, true)
 }
@@ -728,7 +820,7 @@ func ParseCatalogCSVWithCategories(raw []byte, allowed []string) ([]ImportItem, 
 			item.Mask.Style = true
 		}
 		if v, ok := cell("category"); ok {
-			cat, err := platform.ParseCategoryWithAllowed(v, allowed)
+			cat, err := normalizeDecodeCategory(v, allowed)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 行：%w", lineNo, err)
 			}
@@ -841,6 +933,10 @@ func ParseCatalogCSVWithCategories(raw []byte, allowed []string) ([]ImportItem, 
 				*spec.flag = true
 			}
 		}
+		if err := platform.ValidateBeerTexts(item.Beer.Brewery, item.Beer.Name, item.Beer.Style,
+			item.Beer.Category, item.Beer.PosterURL, item.Beer.Tags); err != nil {
+			return nil, fmt.Errorf("第 %d 行：%w", lineNo, err)
+		}
 
 		out = append(out, item)
 	}
@@ -945,7 +1041,7 @@ func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem,
 		if s, _, ok, err := getStr("category"); err != nil {
 			return nil, fmt.Errorf("第 %d 条酒款分类无效", rowNo)
 		} else if ok {
-			cat, err := platform.ParseCategoryWithAllowed(s, allowed)
+			cat, err := normalizeDecodeCategory(s, allowed)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条：%w", rowNo, err)
 			}
@@ -1140,6 +1236,10 @@ func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem,
 					}
 				}
 			}
+		}
+		if err := platform.ValidateBeerTexts(item.Beer.Brewery, item.Beer.Name, item.Beer.Style,
+			item.Beer.Category, item.Beer.PosterURL, item.Beer.Tags); err != nil {
+			return nil, fmt.Errorf("第 %d 条：%w", rowNo, err)
 		}
 
 		out = append(out, item)

@@ -1,6 +1,7 @@
 package report
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
@@ -18,21 +19,23 @@ import (
 
 type DashboardPage struct {
 	ui.Layout
-	Overview     Overview
-	Sales        SalesInsights
-	POS          POSInsights
-	ReportPeriod string
-	ReportStart  string
-	ReportEnd    string
+	Overview      Overview
+	Sales         SalesInsights
+	POS           POSInsights
+	InvalidPeriod bool
+	ReportPeriod  string
+	ReportStart   string
+	ReportEnd     string
 }
 
 type AnalyticsPage struct {
 	ui.Layout
-	Sales        SalesInsights
-	Audience     AudienceInsights
-	ReportPeriod string
-	ReportStart  string
-	ReportEnd    string
+	Sales         SalesInsights
+	Audience      AudienceInsights
+	InvalidPeriod bool
+	ReportPeriod  string
+	ReportStart   string
+	ReportEnd     string
 }
 
 type RecordsViewPage struct {
@@ -92,41 +95,46 @@ func parseReportWindow(r *http.Request) reportWindow {
 
 func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	q := r.URL.Query()
 	down := func(err error) {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		log.Printf("dashboard: %v", err)
 		http.Error(w, "暂时无法读取经营概览", http.StatusInternalServerError)
-	}
-	o, err := LoadOverview(ctx, s.pool)
-	if err != nil {
-		down(err)
-		return
 	}
 	win := parseReportWindow(r)
 	data := &DashboardPage{
 		Layout: ui.Layout{
 			Title: "概览",
 			Nav:   "dashboard",
-			Msg:   q.Get("msg"),
 			Err:   win.problem,
 		},
-		Overview:     o,
-		ReportPeriod: win.period,
-		ReportStart:  win.startText,
-		ReportEnd:    win.endText,
+		InvalidPeriod: win.problem != "",
+		ReportPeriod:  win.period,
+		ReportStart:   win.startText,
+		ReportEnd:     win.endText,
 	}
 	if win.problem != "" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		s.renderer.Render(w, r, "admin/dashboard.html", data)
+		var err error
+		if data.Overview, err = LoadOverview(ctx, s.pool); err != nil {
+			down(err)
+			return
+		}
+		s.renderer.RenderStatus(w, r, http.StatusBadRequest, "admin/dashboard.html", data)
 		return
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	// 概览、销售与 POS 共用一个 RepeatableRead 只读事务：页面上的数字必须同一快照，
+	// 否则并发结账时库存和当日营业额会互相矛盾。
+	tx, err := beginReadOnlyTimeoutTx(ctx, s.pool)
 	if err != nil {
 		down(err)
 		return
 	}
 	defer tx.Rollback(ctx)
+	if data.Overview, err = LoadOverviewTx(ctx, tx); err != nil {
+		down(err)
+		return
+	}
 	if data.Sales, err = LoadSalesInsights(ctx, tx, win.start, win.end); err != nil {
 		down(err)
 		return
@@ -151,8 +159,10 @@ func (s *Service) currentCategories() []string {
 
 func (s *Service) Analytics(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	q := r.URL.Query()
 	down := func(err error) {
+		if errors.Is(err, context.Canceled) {
+			return
+		}
 		log.Printf("analytics: %v", err)
 		http.Error(w, "暂时无法读取数据分析", http.StatusInternalServerError)
 	}
@@ -161,20 +171,18 @@ func (s *Service) Analytics(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: "数据分析",
 			Nav:   "analytics",
-			Msg:   q.Get("msg"),
 			Err:   win.problem,
 		},
-		ReportPeriod: win.period,
-		ReportStart:  win.startText,
-		ReportEnd:    win.endText,
+		InvalidPeriod: win.problem != "",
+		ReportPeriod:  win.period,
+		ReportStart:   win.startText,
+		ReportEnd:     win.endText,
 	}
 	if win.problem != "" {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		s.renderer.Render(w, r, "admin/analytics.html", data)
+		s.renderer.RenderStatus(w, r, http.StatusBadRequest, "admin/analytics.html", data)
 		return
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := beginReadOnlyTimeoutTx(ctx, s.pool)
 	if err != nil {
 		down(err)
 		return
@@ -200,10 +208,13 @@ func (s *Service) RecordsOrders(w http.ResponseWriter, r *http.Request) {
 	if !validOrderStatus(status) {
 		status = ""
 	}
-	page := recordPageParam(r)
-	orders, hasNext, err := ListRecordOrders(r.Context(), s.pool, status, page)
+	beforeID := parseOrderBeforeCursor(r.URL.Query().Get("before"))
+	orders, hasNext, err := ListRecordOrdersCursor(r.Context(), s.pool, status, beforeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("records orders: %v", err)
+			http.Error(w, "暂时无法读取销售订单", http.StatusInternalServerError)
+		}
 		return
 	}
 	q := url.Values{}
@@ -211,13 +222,13 @@ func (s *Service) RecordsOrders(w http.ResponseWriter, r *http.Request) {
 		q.Set("status", status)
 	}
 	rec := &RecordsPage{
-		Mode: "orders", Orders: orders, Status: status, Statuses: RecordOrderStatuses, Page: page,
+		Mode: "orders", Orders: orders, Status: status, Statuses: RecordOrderStatuses,
 	}
-	if page > 1 {
-		rec.PrevURL = recordURL("/admin/records", q, page-1)
+	if beforeID > 0 {
+		rec.PrevURL = recordCursorURL("/admin/records", q, "")
 	}
-	if hasNext {
-		rec.NextURL = recordURL("/admin/records", q, page+1)
+	if hasNext && len(orders) > 0 {
+		rec.NextURL = recordCursorURL("/admin/records", q, strconv.FormatInt(orders[len(orders)-1].ID, 10))
 	}
 	s.renderer.Render(w, r, "admin/records.html", &RecordsViewPage{
 		Layout:  ui.Layout{Title: "销售订单", Nav: "orders"},
@@ -237,7 +248,10 @@ func (s *Service) RecordsOrderDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("records order detail (%d): %v", id, err)
+			http.Error(w, "暂时无法读取订单详情", http.StatusInternalServerError)
+		}
 		return
 	}
 	s.renderer.Render(w, r, "admin/records.html", &RecordsViewPage{
@@ -253,10 +267,13 @@ func (s *Service) RecordsOperations(w http.ResponseWriter, r *http.Request) {
 	if !validOperationKind(kind) {
 		kind = ""
 	}
-	page := recordPageParam(r)
-	events, hasNext, err := ListLedgerEvents(r.Context(), s.pool, kind, page)
+	beforeAt, beforeID := parseEventCursor(r.URL.Query().Get("before"))
+	events, hasNext, err := ListLedgerEventsCursor(r.Context(), s.pool, kind, beforeAt, beforeID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("records operations: %v", err)
+			http.Error(w, "暂时无法读取营运流水", http.StatusInternalServerError)
+		}
 		return
 	}
 	q := url.Values{}
@@ -264,13 +281,14 @@ func (s *Service) RecordsOperations(w http.ResponseWriter, r *http.Request) {
 		q.Set("kind", kind)
 	}
 	rec := &RecordsPage{
-		Mode: "operations", Events: events, Kind: kind, Kinds: RecordKindOptions, Page: page,
+		Mode: "operations", Events: events, Kind: kind, Kinds: RecordKindOptions,
 	}
-	if page > 1 {
-		rec.PrevURL = recordURL("/admin/records/operations", q, page-1)
+	if beforeAt != nil {
+		rec.PrevURL = recordCursorURL("/admin/records/operations", q, "")
 	}
-	if hasNext {
-		rec.NextURL = recordURL("/admin/records/operations", q, page+1)
+	if hasNext && len(events) > 0 {
+		last := events[len(events)-1]
+		rec.NextURL = recordCursorURL("/admin/records/operations", q, formatEventCursor(last.OccurredAt, last.ID))
 	}
 	s.renderer.Render(w, r, "admin/records.html", &RecordsViewPage{
 		Layout:  ui.Layout{Title: "营运流水", Nav: "operations"},

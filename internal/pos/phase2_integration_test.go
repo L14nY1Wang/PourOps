@@ -1,0 +1,245 @@
+package pos
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"pourops/internal/inventory"
+	"pourops/internal/platform"
+	"pourops/migrations"
+)
+
+// TestPreUntapOrderCheckoutAndPostUntapRejected 验证 P1-1：换桶结桶前已加购的挂单仍可核销，结桶后新加购不能核销到旧桶，且记录成本快照。
+func TestPreUntapOrderCheckoutAndPostUntapRejected(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := platform.WithActor(context.Background(), "staff")
+
+	var beerID, kegID int64
+	if err := pool.QueryRow(ctx, `insert into beers (brewery, name, price_330, on_screen)
+		values ('山厂', '山泉拉格', 4000, true) returning id`).Scan(&beerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `insert into kegs (beer_id, capacity_ml, cost_cents, placed_at, tapped_at)
+		values ($1, 20000, 100000, now(), now()) returning id`, beerID).Scan(&kegID); err != nil {
+		t.Fatal(err)
+	}
+
+	orderID, err := EnsureOrder(ctx, pool, "bar-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddOrderItem(ctx, pool, orderID, "beer", kegID, "山厂 · 山泉拉格", 4000, 330); err != nil {
+		t.Fatal(err)
+	}
+
+	// 下架结桶后，旧桶未结账单依然能完成结账并落入该旧桶及成本快照。
+	if err := inventory.UntapBeer(ctx, pool, beerID); err != nil {
+		t.Fatal(err)
+	}
+	payID, err := PayItems(ctx, pool, orderID, unpaidIDs(t, pool, orderID))
+	if err != nil {
+		t.Fatalf("结桶前已点订单应能顺利结账，实际报错: %v", err)
+	}
+	var source string
+	var costSnap int
+	if err := pool.QueryRow(ctx, `select source, cost_cents from keg_pours where payment_id=$1`, payID).Scan(&source, &costSnap); err != nil {
+		t.Fatalf("未记录 POS 售出快照: %v", err)
+	}
+	wantCost := (100000*330 + 10000) / 20000
+	if source != "pos" || costSnap != wantCost {
+		t.Fatalf("source=%q cost_cents=%d, want pos/%d", source, costSnap, wantCost)
+	}
+
+	// 若下单时间晚于结桶时间，则拒绝核销到已结桶。
+	lateOrder, err := EnsureOrder(ctx, pool, "bar-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddOrderItem(ctx, pool, lateOrder, "beer", kegID, "山厂 · 山泉拉格", 4000, 330); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update order_items set added_at = now() + interval '1 minute' where order_id=$1`, lateOrder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PayItems(ctx, pool, lateOrder, unpaidIDs(t, pool, lateOrder)); err == nil || !strings.Contains(err.Error(), "晚于结桶") {
+		t.Fatalf("晚于结桶的条目不应允许继续核销，实际 err=%v", err)
+	}
+}
+
+// TestCrossOrderDeterministicLockingNoDeadlock 验证 P1-2：交叉顺序点相同两桶与两零售 SKU 并发结账绝不死锁。
+func TestCrossOrderDeterministicLockingNoDeadlock(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := context.Background()
+
+	kegA := seedKeg(t, pool, 4000)
+	kegB := seedKeg(t, pool, 4500)
+	ret1 := seedRetail(t, pool, 3000, 1000, 10)
+	ret2 := seedRetail(t, pool, 2000, 800, 10)
+
+	order1, _ := EnsureOrder(ctx, pool, "table-1")
+	order2, _ := EnsureOrder(ctx, pool, "table-2")
+
+	// 相反添加顺序：order1 = [A, B, r1, r2]; order2 = [B, A, r2, r1]
+	for _, fn := range []error{
+		AddOrderItem(ctx, pool, order1, "beer", kegA, "A", 4000, 330),
+		AddOrderItem(ctx, pool, order1, "beer", kegB, "B", 4500, 330),
+		AddOrderItem(ctx, pool, order1, "retail", ret1, "R1", 3000, 0),
+		AddOrderItem(ctx, pool, order1, "retail", ret2, "R2", 2000, 0),
+		AddOrderItem(ctx, pool, order2, "beer", kegB, "B", 4500, 330),
+		AddOrderItem(ctx, pool, order2, "beer", kegA, "A", 4000, 330),
+		AddOrderItem(ctx, pool, order2, "retail", ret2, "R2", 2000, 0),
+		AddOrderItem(ctx, pool, order2, "retail", ret1, "R1", 3000, 0),
+	} {
+		if fn != nil {
+			t.Fatal(fn)
+		}
+	}
+
+	ids1 := unpaidIDs(t, pool, order1)
+	ids2 := unpaidIDs(t, pool, order2)
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := PayItems(ctx, pool, order1, ids1)
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := PayItems(ctx, pool, order2, ids2)
+		errs <- err
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("交叉并发结账不应失败/死锁: %v", err)
+		}
+	}
+}
+
+// TestPayIdempotencyExpectedTotalAndSpotBounds 验证 P2-7, P2-9, P2-20, P3-15, P3-22 与超卖提醒。
+func TestPayIdempotencyExpectedTotalAndSpotBounds(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := platform.WithActor(context.Background(), "boss")
+
+	var beerID, kegID int64
+	if err := pool.QueryRow(ctx, `insert into beers (brewery, name, price_330, on_screen)
+		values ('测试', '小桶', 4000, true) returning id`).Scan(&beerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `insert into kegs (beer_id, capacity_ml, cost_cents, placed_at, tapped_at)
+		values ($1, 500, 10000, now(), now()) returning id`, beerID).Scan(&kegID); err != nil {
+		t.Fatal(err)
+	}
+
+	orderID, err := EnsureOrder(ctx, pool, "bar-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AddOrderItem(ctx, pool, orderID, "beer", kegID, "小桶", 4000, 330); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddOrderItem(ctx, pool, orderID, "beer", kegID, "小桶", 4000, 330); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddOrderItem(ctx, pool, orderID, "retail", seedRetail(t, pool, 3000, 1000, 5), "小吃", 3000, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	o, err := LoadOrder(ctx, pool, orderID)
+	if err != nil || len(o.Unpaid) != 2 {
+		t.Fatal(err)
+	}
+	// 期待金额不符必须拒绝（P2-9）
+	wrongExp := 9999
+	if _, err := PayItemsWithOptions(ctx, pool, ManualGateway{}, orderID, []int64{o.Unpaid[0].ID}, PayOptions{
+		ExpectedTotalCents: &wrongExp,
+	}); err == nil || !strings.Contains(err.Error(), "金额已变动") {
+		t.Fatalf("应拒绝总额不符的结账: %v", err)
+	}
+
+	// 结部分（啤酒 2 杯 660ml > 500ml 容量 -> 触发 OverSoldCount，幂等键重放不二次收费）
+	beerLine := o.Unpaid[0]
+	retailLine := o.Unpaid[1]
+	expBeer := 8000
+	res1, err := PayItemsWithOptions(ctx, pool, ManualGateway{}, orderID, []int64{beerLine.ID}, PayOptions{
+		Method:             "cash",
+		IdempotencyKey:     "idem-keg-1",
+		ExpectedTotalCents: &expBeer,
+	})
+	if err != nil {
+		t.Fatalf("结账失败: %v", err)
+	}
+	if res1.Replayed || res1.OverSoldCount != 1 || res1.Method != "cash" {
+		t.Fatalf("res1 = %+v", res1)
+	}
+	resReplay, err := PayItemsWithOptions(ctx, pool, ManualGateway{}, orderID, []int64{beerLine.ID}, PayOptions{
+		Method:         "cash",
+		IdempotencyKey: "idem-keg-1",
+	})
+	if err != nil || !resReplay.Replayed || resReplay.PaymentID != res1.PaymentID {
+		t.Fatalf("幂等重放不对: %+v err=%v", resReplay, err)
+	}
+
+	// P3-22：部分结账后，删掉最后一条未付明细应自动关单！
+	if err := LessOrderItem(ctx, pool, orderID, retailLine.ID); err != nil {
+		t.Fatal(err)
+	}
+	oAfter, err := LoadOrder(ctx, pool, orderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oAfter.Closed || len(oAfter.Unpaid) != 0 {
+		t.Fatalf("部分结单删掉最后未付项后应自动关单: closed=%v unpaid=%d", oAfter.Closed, len(oAfter.Unpaid))
+	}
+
+	// P3-15：台位增删与 50 上限
+	for range 47 { // default bar_count=3 -> up to 50
+		if err := AddSpot(ctx, pool, "bar_count"); err != nil {
+			t.Fatalf("AddSpot failed: %v", err)
+		}
+	}
+	if err := AddSpot(ctx, pool, "bar_count"); err == nil {
+		t.Fatal("台位应限制最多 50 个")
+	}
+	if err := RemoveSpot(ctx, pool, "bar_count"); err != nil {
+		t.Fatalf("RemoveSpot failed: %v", err)
+	}
+
+	// P3-16: slow printer timeout bound doesn't crash HTTP handler
+	svc := NewService(pool, nil, nil, ManualGateway{}, slowPrinter{})
+	orderSlow, _ := EnsureOrder(ctx, pool, "table-1")
+	retSlow := seedRetail(t, pool, 1000, 500, 3)
+	_ = AddOrderItem(ctx, pool, orderSlow, "retail", retSlow, "慢打印", 1000, 0)
+	slowIDs := unpaidIDs(t, pool, orderSlow)
+	form := url.Values{"items": {strconv.FormatInt(slowIDs[0], 10)}}
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetPathValue("id", strconv.FormatInt(orderSlow, 10))
+	rec := httptest.NewRecorder()
+	svc.PosPay(rec, req)
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(rec.Header().Get("Location"), "/pos/pay/") {
+		t.Fatalf("PosPay redirect = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+type slowPrinter struct{}
+
+func (slowPrinter) Name() string { return "slow" }
+func (slowPrinter) Print(ctx context.Context, _ Receipt) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(100 * time.Millisecond):
+		return nil
+	}
+}

@@ -3,6 +3,7 @@ package screen
 import (
 	"encoding/json"
 	"io/fs"
+	"log"
 	"net/http"
 	"time"
 
@@ -109,7 +110,8 @@ func (s *Service) PlaylistJSON(w http.ResponseWriter, r *http.Request) {
 func (s *Service) Playlist(w http.ResponseWriter, r *http.Request) {
 	beers, err := catalog.ListBeers(r.Context(), s.pool, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("screen playlist: %v", err)
+		http.Error(w, "暂时无法读取酒单", http.StatusInternalServerError)
 		return
 	}
 	items := make([]PlaylistItem, 0, len(beers))
@@ -134,10 +136,14 @@ func (s *Service) Playlist(w http.ResponseWriter, r *http.Request) {
 				Price: c.Price(),
 			})
 		}
+		price := ""
+		if b.PriceCents > 0 {
+			price = platform.PriceText(b.PriceCents)
+		}
 		items = append(items, PlaylistItem{
 			No: b.No, Brewery: b.Brewery, Name: b.Name, Style: b.Style, Category: cat,
 			Tags: b.Tags, SalesTags: b.SalesTags, ABV: b.ABV, IBU: b.IBU, Size: b.Size,
-			Price: platform.PriceText(b.PriceCents), Cups: cups, UT: b.UT, UTCount: b.UTCount, Poster: b.PosterURL,
+			Price: price, Cups: cups, UT: b.UT, UTCount: b.UTCount, Poster: b.PosterURL,
 			Sold: b.OnScreen,
 		})
 	}
@@ -156,14 +162,33 @@ func (s *Service) Events(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	ch := s.hub.Subscribe()
+	if s.hub == nil {
+		http.Error(w, "screen hub unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	ch, hubDone, ok := s.hub.SubscribeChecked()
+	if !ok {
+		http.Error(w, "屏幕订阅连接数已达上限", http.StatusServiceUnavailable)
+		return
+	}
 	defer s.hub.Unsubscribe(ch)
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
+
+	rc := http.NewResponseController(w)
+	writeSSE := func(msg []byte) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if _, err := w.Write(msg); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
 
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
@@ -171,12 +196,16 @@ func (s *Service) Events(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-hubDone:
+			return
 		case <-ch:
-			_, _ = w.Write([]byte("data: changed\n\n"))
-			flusher.Flush()
+			if !writeSSE([]byte("data: changed\n\n")) {
+				return
+			}
 		case <-ping.C:
-			_, _ = w.Write([]byte(": ping\n\n"))
-			flusher.Flush()
+			if !writeSSE([]byte(": ping\n\n")) {
+				return
+			}
 		}
 	}
 }

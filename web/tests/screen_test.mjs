@@ -57,7 +57,7 @@ function walk(root) {
 
 const byTag = (root, tag) => walk(root).filter(n => n.tagName === tag.toUpperCase());
 
-function boot({ routes = {}, cache = null, breakCache = false, search = '', width = 1920, height = 1080, events = false } = {}) {
+function boot({ routes = {}, cache = null, breakCache = false, search = '', width = 1920, height = 1080, events = false, fakeTimers = false } = {}) {
   const ids = new Map();
   const mk = id => { const n = new Node('div'); n.id = id; ids.set(id, n); return n; };
   const board = mk('board');
@@ -95,12 +95,31 @@ function boot({ routes = {}, cache = null, breakCache = false, search = '', widt
   };
 
   const calls = [];
+  const images = [];
   const fetch = url => {
     calls.push(url);
+    const route = routes[url];
+    if (typeof route === 'function') return route();
     if (!(url in routes)) {
       return Promise.resolve({ ok: false, status: 404, json: () => Promise.reject(new Error('404')) });
     }
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(routes[url]) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(route) });
+  };
+
+  const timers = [];
+  let timerSeq = 0;
+  const fakeSetTimeout = (fn, ms) => {
+    const t = { id: ++timerSeq, fn, ms, canceled: false };
+    timers.push(t);
+    return t.id;
+  };
+  const fakeClearTimeout = id => {
+    const t = timers.find(x => x.id === id);
+    if (t) t.canceled = true;
+  };
+  const runTimers = () => {
+    const due = timers.splice(0);
+    due.forEach(t => { if (!t.canceled) t.fn(); });
   };
 
   const store = new Map(cache ? [['screen:menu:v3', JSON.stringify(cache)]] : []);
@@ -113,9 +132,10 @@ function boot({ routes = {}, cache = null, breakCache = false, search = '', widt
   };
 
   const esUrls = [];
+  const esInstances = [];
   class EventSource {
-    constructor(url) { esUrls.push(url); }
-    close() {}
+    constructor(url) { esUrls.push(url); this.url = url; esInstances.push(this); }
+    close() { this.closed = true; }
   }
 
   const sandbox = {
@@ -125,10 +145,14 @@ function boot({ routes = {}, cache = null, breakCache = false, search = '', widt
     URLSearchParams,
     fetch,
     localStorage,
-    Image: class { set src(v) { this._src = v; } decode() { return Promise.resolve(); } },
+    Image: class {
+      constructor() { images.push(this); }
+      set src(v) { this._src = v; }
+      decode() { return Promise.resolve(); }
+    },
     setInterval: () => 0,
-    setTimeout,
-    clearTimeout,
+    setTimeout: fakeTimers ? fakeSetTimeout : setTimeout,
+    clearTimeout: fakeTimers ? fakeClearTimeout : clearTimeout,
     getComputedStyle: () => ({ fontSize: '16px', rowGap: '0px' }),
   };
   if (events) { sandbox.EventSource = EventSource; sandbox.window.EventSource = EventSource; }
@@ -137,7 +161,7 @@ function boot({ routes = {}, cache = null, breakCache = false, search = '', widt
   new vm.Script(code, { filename: 'screen/index.html' }).runInContext(sandbox);
 
   const flush = () => new Promise(r => setTimeout(r, 20));
-  return { board, brand, clock, count, body, hint, calls, esUrls, flush, store };
+  return { board, brand, clock, count, body, hint, calls, esUrls, esInstances, timers, runTimers, images, flush, store };
 }
 
 const EMPTY = { brand: 'NEW PIER', show_clock: true, items: [] };
@@ -161,9 +185,10 @@ const menu = (n, extra = () => ({})) => ({
   assert.ok(r.body.classList.contains('empty'));
 }
 
-// 2. 结构错误（{}）：换下一个源；酒标、价格等字段保留。
+// 2. P1-10: 默认不回退到演示 playlist.json，失败保留既有真酒单与缓存；显式 ?demo=1 才回退且不写缓存。
 {
   const r = boot({
+    cache: { brand: '真实门店', items: [{ name: '门店真酒', abv: 6, size: '330ml', price: '¥ 48' }] },
     routes: {
       '/api/screen/playlist': {},
       'playlist.json': {
@@ -172,13 +197,26 @@ const menu = (n, extra = () => ({})) => ({
     },
   });
   await r.flush();
-  assert.deepEqual(r.calls, ['/api/screen/playlist', 'playlist.json']);
+  assert.deepEqual(r.calls, ['/api/screen/playlist'], '默认失败绝不能悄悄切到演示 playlist.json');
   assert.equal(r.board.children.length, 1);
-  const [card] = r.board.children;
-  assert.equal(byTag(card, 'h2')[0].textContent, '朋克 IPA');
-  assert.equal(byTag(card, 'img')[0].src, 'posters/punk.svg');
-  assert.equal(card.querySelector('.price').textContent, '¥ 45 / 杯');
-  assert.ok(!r.body.classList.contains('empty'));
+  assert.equal(byTag(r.board.children[0], 'h2')[0].textContent, '门店真酒');
+  assert.equal(JSON.parse(r.store.get('screen:menu:v3')).items[0].name, '门店真酒', '失败不能污染本地缓存');
+
+  const demo = boot({
+    search: '?demo=1',
+    cache: { brand: '真实门店', items: [{ name: '门店真酒', abv: 6 }] },
+    routes: {
+      '/api/screen/playlist': {},
+      'playlist.json': {
+        items: [{ name: '朋克 IPA', poster: 'posters/punk.svg', abv: 5.2, size: '330ml', price: '¥ 45 / 杯' }],
+      },
+    },
+  });
+  await demo.flush();
+  assert.deepEqual(demo.calls, ['/api/screen/playlist', 'playlist.json']);
+  assert.equal(byTag(demo.board.children[0], 'h2')[0].textContent, '朋克 IPA');
+  assert.equal(byTag(demo.board.children[0], 'img')[0].src, 'posters/punk.svg');
+  assert.equal(JSON.parse(demo.store.get('screen:menu:v3')).items[0].name, '门店真酒', '演示数据不能覆盖本地缓存');
 }
 
 // 3. 缓存写失败不能丢掉已经拿到的有效响应，也不能多打一次源。
@@ -362,4 +400,128 @@ const menu = (n, extra = () => ({})) => ({
   assert.ok(specs3.includes('330ml杯型'));
 }
 
-console.log('web/templates/screen/screen.html: 10 组回归通过');
+// 11. P2-27：¥ 0 不占价格位；多杯型缺价显示「时价」，单杯缺主价回退杯型价。
+{
+  const r = boot({
+    routes: {
+      '/api/screen/playlist': {
+        items: [
+          { no: '01', name: '零价单杯', price: '¥ 0', size: '330ml' },
+          {
+            no: '02', name: '零价多杯',
+            cups: [
+              { ml: 150, size: '150ml', price: '¥ 0' },
+              { ml: 330, size: '330ml', price: '¥ 58' },
+            ],
+          },
+          { no: '03', name: '零价回退单杯', price: '¥ 0', cups: [{ ml: 330, size: '330ml', price: '¥ 45' }] },
+        ],
+      },
+    },
+  });
+  await r.flush();
+  const [a, b, c] = r.board.children;
+  assert.equal(a.querySelector('.price'), null, '¥ 0 不能显示为价格');
+  assert.ok(walk(a).some(n => n.className === 'spec' && n.textContent === '330ml杯型'), '杯型仍要显示');
+  const tiers = walk(b).filter(n => n.className === 'cup-tier');
+  assert.deepEqual(tiers.map(t => t.textContent), ['时价150ml', '¥ 58330ml']);
+  assert.equal(c.querySelector('.price').textContent, '¥ 45', '单杯缺主价时回退杯型价');
+}
+
+// 12. P2-30：SSE 250ms 防抖合并，慢的旧响应不能覆盖新的酒单。
+{
+  let call = 0;
+  const pending = [];
+  const respond = body => ({ ok: true, status: 200, json: () => Promise.resolve(body) });
+  const r = boot({
+    events: true,
+    fakeTimers: true,
+    routes: {
+      '/api/screen/playlist': () => {
+        call++;
+        if (call === 1) return Promise.resolve(respond({ items: [{ name: '初始酒', abv: 5 }] }));
+        return new Promise(resolve => pending.push(body => resolve(respond(body))));
+      },
+    },
+  });
+  await r.flush();
+  assert.equal(r.board.children.length, 1, '初始酒单先上屏');
+  const es = r.esInstances[0];
+
+  es.onmessage();
+  es.onmessage();
+  r.runTimers();
+  assert.equal(r.calls.length, 2, '250ms 防抖窗口内只应重载一次');
+
+  es.onmessage();
+  r.runTimers();
+  assert.equal(r.calls.length, 3);
+  assert.equal(pending.length, 2);
+
+  pending[1]({ items: [{ name: '新酒', abv: 6 }] });
+  await r.flush();
+  assert.equal(byTag(r.board.children[0], 'h2')[0].textContent, '新酒');
+
+  pending[0]({ items: [{ name: '迟到酒', abv: 4 }] });
+  await r.flush();
+  assert.equal(byTag(r.board.children[0], 'h2')[0].textContent, '新酒', '迟到的慢响应必须丢弃');
+}
+
+// 13. P3-33：SSE 断开按 5s→15s→60s 退避重连，连上后重置；内容没变不重复预载海报。
+{
+  let call = 0;
+  const r = boot({
+    events: true,
+    fakeTimers: true,
+    routes: {
+      '/api/screen/playlist': () => {
+        call++;
+        const item = call <= 2
+          ? { name: '同款', poster: '/a.jpg' }
+          : { name: '换款', poster: '/b.jpg' };
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ items: [item] }) });
+      },
+    },
+  });
+  await r.flush();
+  assert.equal(r.images.length, 1, '首次上屏应预载海报');
+  const first = r.esInstances[0];
+
+  first.onmessage();
+  r.runTimers();
+  await r.flush();
+  assert.equal(r.images.length, 1, '内容未变的刷新不应重复预载');
+
+  first.onmessage();
+  r.runTimers();
+  await r.flush();
+  assert.equal(r.images.length, 2, '内容变化后应预载新海报');
+
+  first.onerror();
+  assert.equal(r.esInstances.length, 1, '断线后不立刻重连');
+  assert.equal(r.timers[r.timers.length - 1].ms, 5000);
+  r.runTimers();
+  assert.equal(r.esInstances.length, 2);
+  const second = r.esInstances[1];
+
+  second.onerror();
+  assert.equal(r.timers[r.timers.length - 1].ms, 15000);
+  r.runTimers();
+  const third = r.esInstances[2];
+
+  third.onerror();
+  assert.equal(r.timers[r.timers.length - 1].ms, 60000);
+  r.runTimers();
+  const fourth = r.esInstances[3];
+
+  fourth.onerror();
+  assert.equal(r.timers[r.timers.length - 1].ms, 60000, '退避封顶 60s');
+  r.runTimers();
+  const fifth = r.esInstances[4];
+
+  fifth.onopen();
+  fifth.onerror();
+  assert.equal(r.timers[r.timers.length - 1].ms, 5000, '连接成功后重置退避');
+}
+
+console.log('web/templates/screen/screen.html: 13 组回归通过');

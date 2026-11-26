@@ -19,7 +19,7 @@
         <a class="filter-pill{{if eq .Value $.Records.Status}} active{{end}}" href="/admin/records{{if .Value}}?status={{.Value}}{{end}}">{{.Label}}</a>
         {{end}}
       </nav>
-      <span class="text-muted small spacer">每页 50 条 · 当前第 {{.Page}} 页</span>
+      <span class="text-muted small spacer">每页 50 条 · 按单号倒序</span>
     </div>
 
     {{if .Orders}}
@@ -55,10 +55,10 @@
 
     {{if or .PrevURL .NextURL}}
     <div class="bar mt-3 mb-0">
-      <span class="text-muted small">第 {{.Page}} 页 · 每页 50 条</span>
+      <span class="text-muted small">每页 50 条</span>
       <div class="d-flex gap-2 align-items-center spacer">
-        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>上一页</a>{{end}}
-        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">下一页<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
+        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>返回最新</a>{{end}}
+        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">更早记录<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
       </div>
     </div>
     {{end}}
@@ -238,10 +238,10 @@
 
     {{if or .PrevURL .NextURL}}
     <div class="bar mt-3 mb-0">
-      <span class="text-muted small">第 {{.Page}} 页 · 每页 50 条</span>
+      <span class="text-muted small">每页 50 条</span>
       <div class="d-flex gap-2 align-items-center spacer">
-        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>上一页</a>{{end}}
-        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">下一页<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
+        {{if .PrevURL}}<a class="button button--secondary button--sm" href="{{.PrevURL}}"><i class="bi bi-chevron-left" aria-hidden="true"></i>返回最新</a>{{end}}
+        {{if .NextURL}}<a class="button button--secondary button--sm" href="{{.NextURL}}">更早记录<i class="bi bi-chevron-right" aria-hidden="true"></i></a>{{end}}
       </div>
     </div>
     {{end}}

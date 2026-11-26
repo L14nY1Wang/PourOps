@@ -118,22 +118,26 @@ func (p PurchasePage) PricingCfg() settings.PricingConfig {
 func (s *Service) BeerList(w http.ResponseWriter, r *http.Request) {
 	beers, err := catalog.ListBeers(r.Context(), s.pool, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("beer list: %v", err)
+		http.Error(w, "加载酒单失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	active, err := ListKegs(r.Context(), s.pool, true)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("beer list active kegs: %v", err)
+		http.Error(w, "加载酒单失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	stock, err := StockCounts(r.Context(), s.pool)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("beer list stock counts: %v", err)
+		http.Error(w, "加载酒单失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	lastFinished, err := LatestFinishedKegs(r.Context(), s.pool)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("beer list last finished: %v", err)
+		http.Error(w, "加载酒单失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	byBeer := make(map[int64]*Keg, len(active))
@@ -156,8 +160,6 @@ func (s *Service) BeerList(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: "酒单 · 桶装",
 			Nav:   "beers",
-			Msg:   r.URL.Query().Get("msg"),
-			Err:   r.URL.Query().Get("err"),
 		},
 		Rows:    rows,
 		NextNo:  next,
@@ -170,8 +172,6 @@ func (s *Service) PurchasePage(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: "新增酒款",
 			Nav:   "beers",
-			Msg:   r.URL.Query().Get("msg"),
-			Err:   r.URL.Query().Get("err"),
 		},
 		Keg:      Keg{CapacityML: catalog.DefaultCapacityML},
 		KegCount: 1,
@@ -221,9 +221,7 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 
 	pricing := s.currentPricing()
 	fail := func(status int, msg string) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(status)
-		s.renderer.Render(w, r, "admin/purchase.html", &PurchasePage{
+		s.renderer.RenderStatus(w, r, status, "admin/purchase.html", &PurchasePage{
 			Layout: ui.Layout{
 				Title: "新增酒款",
 				Nav:   "beers",
@@ -300,15 +298,35 @@ func (s *Service) PurchaseBeer(w http.ResponseWriter, r *http.Request) {
 		"capacity_ml": capacity,
 		"cost_cents":  costCents,
 	})
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已入库，去列表里上架"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/beers", "已入库，去列表里上架")
 }
 
 func (s *Service) TapBeerHandler(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	res, err := TapBeerResult(r.Context(), s.pool, id, r.FormValue("no"),
-		platform.IntValue(r.FormValue("capacity_ml")), platform.PriceCents(r.FormValue("cost")))
+	capacityML := 0
+	if rawCap := strings.TrimSpace(r.FormValue("capacity_ml")); rawCap != "" {
+		capPtr, capErr := platform.ParseStrictInt(rawCap, "每桶容量", 1, math.MaxInt32)
+		if capErr != nil {
+			platform.RedirectErr(w, r, "/admin/beers", capErr.Error())
+			return
+		}
+		if capPtr != nil {
+			capacityML = *capPtr
+		}
+	}
+	costCents, costErr := platform.MoneyCents(r.FormValue("cost"))
+	if costErr != nil {
+		platform.RedirectErr(w, r, "/admin/beers", costErr.Error())
+		return
+	}
+	res, err := TapBeerResult(r.Context(), s.pool, id, r.FormValue("no"), capacityML, costCents)
 	if err != nil {
-		http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/beers", msg)
+			return
+		}
+		log.Printf("tap beer (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/beers", "上架失败，请稍后重试")
 		return
 	}
 	subject := platform.BeerSubject(res.Brewery, res.Name)
@@ -318,20 +336,27 @@ func (s *Service) TapBeerHandler(w http.ResponseWriter, r *http.Request) {
 		"keg_id":  res.KegID,
 		"no":      res.No,
 	})
-	s.publish(r, event.EventBeerTapped, subject, map[string]any{
-		"beer_id":    res.BeerID,
-		"keg_id":     res.KegID,
-		"no":         res.No,
-		"opened_new": res.OpenedNew,
-	})
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已上架"), http.StatusSeeOther)
+	if res.OpenedNew {
+		s.publish(r, event.EventBeerTapped, subject, map[string]any{
+			"beer_id":    res.BeerID,
+			"keg_id":     res.KegID,
+			"no":         res.No,
+			"opened_new": true,
+		})
+	}
+	platform.RedirectMsg(w, r, "/admin/beers", "已上架")
 }
 
 func (s *Service) UntapBeerHandler(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	kegID, err := UntapBeerResult(r.Context(), s.pool, id)
 	if err != nil {
-		http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/beers", msg)
+			return
+		}
+		log.Printf("untap beer (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/beers", "下架失败，请稍后重试")
 		return
 	}
 	pricing := s.currentPricing()
@@ -362,7 +387,7 @@ func (s *Service) UntapBeerHandler(w http.ResponseWriter, r *http.Request) {
 	if finishedPayload != nil {
 		s.publish(r, event.EventKegFinished, subject, finishedPayload)
 	}
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg(msg), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/beers", msg)
 }
 
 func (s *Service) EditBeer(w http.ResponseWriter, r *http.Request) {
@@ -437,9 +462,7 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 	pricing := s.currentPricing()
 	renderFail := func(status int, msg string) {
 		keg, costInput := LatestBeerKegSpec(ctx, s.pool, b)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(status)
-		s.renderer.Render(w, r, "admin/beer_form.html", &BeerFormPage{
+		s.renderer.RenderStatus(w, r, status, "admin/beer_form.html", &BeerFormPage{
 			Layout: ui.Layout{
 				Title: "编辑酒款",
 				Nav:   "beers",
@@ -526,14 +549,19 @@ func (s *Service) SaveBeer(w http.ResponseWriter, r *http.Request) {
 		"action":  "beer.saved",
 		"beer_id": savedID,
 	})
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已保存"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/beers", "已保存")
 }
 
 func (s *Service) ToggleBeerHandler(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	on, err := catalog.ToggleBeer(r.Context(), s.pool, id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/beers", msg)
+			return
+		}
+		log.Printf("toggle beer (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/beers", "操作失败，请稍后重试")
 		return
 	}
 	s.publish(r, event.EventScreenChanged, "", map[string]any{
@@ -541,7 +569,7 @@ func (s *Service) ToggleBeerHandler(w http.ResponseWriter, r *http.Request) {
 		"beer_id":   id,
 		"on_screen": on,
 	})
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已更新上屏状态"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/beers", "已更新上屏状态")
 }
 
 func (s *Service) DeleteBeerHandler(w http.ResponseWriter, r *http.Request) {
@@ -554,11 +582,11 @@ func (s *Service) DeleteBeerHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := catalog.DeleteBeer(r.Context(), s.pool, id); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
-			http.Redirect(w, r, "/admin/beers?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			platform.RedirectErr(w, r, "/admin/beers", msg)
 			return
 		}
 		log.Printf("delete beer (%d): %v", id, err)
-		http.Redirect(w, r, "/admin/beers?err="+platform.URLMsg("删除失败，请稍后重试"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/beers", "删除失败，请稍后重试")
 		return
 	}
 	catalog.CleanupUnusedPosters(r.Context(), s.pool, s.posters, oldPoster)
@@ -566,5 +594,5 @@ func (s *Service) DeleteBeerHandler(w http.ResponseWriter, r *http.Request) {
 		"action":  "beer.deleted",
 		"beer_id": id,
 	})
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已删除"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/beers", "已删除")
 }

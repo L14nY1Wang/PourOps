@@ -107,5 +107,11 @@ func NewHandler(deps Deps) http.Handler {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 	})
 
-	return platform.CrossOriginProtect(mux)
+	bodyLimits := platform.LimitRequestBody(2<<20, map[string]int64{
+		"/admin/login":                   64 << 10,
+		"/admin/beers/purchase":          8 << 20,
+		"/admin/beers":                   8 << 20,
+		"/admin/settings/catalog/import": 52 << 20,
+	})
+	return platform.CrossOriginProtect(bodyLimits(mux))
 }

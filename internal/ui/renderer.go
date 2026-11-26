@@ -97,14 +97,19 @@ func (re *Renderer) SetCategoriesFn(fn func() []platform.Option) {
 }
 
 func (re *Renderer) Render(w http.ResponseWriter, req *http.Request, page string, data Page) {
-	re.exec(w, req, page, "layout", data)
+	re.exec(w, req, http.StatusOK, page, "layout", data)
+}
+
+// RenderStatus 在写状态码前统一注入 Content-Type 与 PopFlash 清理 Cookie，避免头锁定导致清 Cookie 失效。
+func (re *Renderer) RenderStatus(w http.ResponseWriter, req *http.Request, status int, page string, data Page) {
+	re.exec(w, req, status, page, "layout", data)
 }
 
 func (re *Renderer) RenderShell(w http.ResponseWriter, req *http.Request, page, tmplName string, data Page) {
-	re.exec(w, req, page, tmplName, data)
+	re.exec(w, req, http.StatusOK, page, tmplName, data)
 }
 
-func (re *Renderer) exec(w http.ResponseWriter, req *http.Request, page, tmplName string, data Page) {
+func (re *Renderer) exec(w http.ResponseWriter, req *http.Request, status int, page, tmplName string, data Page) {
 	t, ok := re.pages[page]
 	if !ok {
 		log.Printf("template %s not found", page)
@@ -124,6 +129,15 @@ func (re *Renderer) exec(w http.ResponseWriter, req *http.Request, page, tmplNam
 				l.Categories = platform.Categories
 			}
 		}
+		if req != nil && w != nil {
+			fMsg, fErr := platform.PopFlash(w, req)
+			if l.Msg == "" {
+				l.Msg = fMsg
+			}
+			if l.Err == "" {
+				l.Err = fErr
+			}
+		}
 		if l.Me == nil && re.currentUser != nil && req != nil {
 			l.Me = re.currentUser(req)
 		}
@@ -132,6 +146,9 @@ func (re *Renderer) exec(w http.ResponseWriter, req *http.Request, page, tmplNam
 		}
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if status > 0 && status != http.StatusOK {
+		w.WriteHeader(status)
+	}
 	if err := t.ExecuteTemplate(w, tmplName, data); err != nil {
 		log.Printf("render %s: %v", page, err)
 	}

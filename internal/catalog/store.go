@@ -129,15 +129,21 @@ func GetCatalogBeer(ctx context.Context, pool *pgxpool.Pool, id int64) (CatalogB
 	return scanCatalogBeer(pool.QueryRow(ctx, `select `+catalogCols+` from beer_catalog where id=$1`, id))
 }
 
+// PrepareCatalogBeer 使用默认分类表校验并规范化历史酒款。
 func PrepareCatalogBeer(c CatalogBeer) (CatalogBeer, error) {
 	return PrepareCatalogBeerWithCategories(c, platform.DefaultBeerCategories)
 }
 
+// PrepareCatalogBeerWithCategories 统一裁剪文本、校验文字长度与数值字段、补全分类与容量；
+// 是 CSV/JSON/ZIP 导入与后台保存历史酒款的共同入口，任何路径都不能绕过这里的校验。
 func PrepareCatalogBeerWithCategories(c CatalogBeer, allowed []string, extraAllowed ...string) (CatalogBeer, error) {
 	c.Brewery = strings.TrimSpace(c.Brewery)
 	c.Name = strings.TrimSpace(c.Name)
 	c.Style = strings.TrimSpace(c.Style)
 	c.PosterURL = strings.TrimSpace(c.PosterURL)
+	if err := platform.ValidateBeerTexts(c.Brewery, c.Name, c.Style, c.Category, c.PosterURL, c.Tags); err != nil {
+		return c, err
+	}
 	cat, err := platform.ValidateBeerFieldsWithCategories(c.Name, c.Category, c.PosterURL, c.ABV, c.UT, c.IBU, c.UTCount, c.Price150, c.Price330, c.Price500, 0, allowed, extraAllowed...)
 	if err != nil {
 		return c, err
@@ -175,17 +181,31 @@ func SaveCatalogBeerWithCategories(ctx context.Context, pool *pgxpool.Pool, c Ca
 	if err != nil {
 		return 0, err
 	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	if err := LockPosterURLTx(ctx, tx, c.PosterURL); err != nil {
+		return 0, err
+	}
 	if c.ID == 0 {
-		err := pool.QueryRow(ctx, `insert into beer_catalog
+		err := tx.QueryRow(ctx, `insert into beer_catalog
 			(brewery, name, style, category, abv, ibu, ut_rating, ut_count,
 			 tags, poster_url, capacity_ml, cost_cents, price_150, price_330, price_500)
 			values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning id`,
 			c.Brewery, c.Name, c.Style, c.Category, c.ABV, c.IBU, c.UT, c.UTCount,
 			c.Tags, c.PosterURL, c.CapacityML, c.CostCents, c.Price150, c.Price330, c.Price500,
 		).Scan(&c.ID)
-		return c.ID, mapCatalogSaveErr(err)
+		if err != nil {
+			return 0, mapCatalogSaveErr(err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return 0, err
+		}
+		return c.ID, nil
 	}
-	tag, err := pool.Exec(ctx, `update beer_catalog set
+	tag, err := tx.Exec(ctx, `update beer_catalog set
 		brewery=$2, name=$3, style=$4, category=$5, abv=$6, ibu=$7, ut_rating=$8, ut_count=$9,
 		tags=$10, poster_url=$11, capacity_ml=$12, cost_cents=$13,
 		price_150=$14, price_330=$15, price_500=$16, updated_at=now()
@@ -198,12 +218,10 @@ func SaveCatalogBeerWithCategories(ctx context.Context, pool *pgxpool.Pool, c Ca
 	if tag.RowsAffected() == 0 {
 		return 0, platform.UserErr("历史酒款不存在")
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
 	return c.ID, nil
-}
-
-func DeleteCatalogBeer(ctx context.Context, pool *pgxpool.Pool, id int64) error {
-	_, err := pool.Exec(ctx, `delete from beer_catalog where id=$1`, id)
-	return err
 }
 
 // UpsertCatalogFromBeer 在进货入库或保存酒款时把最新资料沉淀到历史酒单。
@@ -391,13 +409,34 @@ func ImportCatalogBeersWithCategories(ctx context.Context, pool *pgxpool.Pool, i
 	return ImportCatalogBeersWithPosters(ctx, pool, nil, items, mode, allowed)
 }
 
+func resolveImportCategory(rawCat, style string, allowed []string, existingCat string) string {
+	cat := strings.TrimSpace(rawCat)
+	if cat != "" {
+		if matched, err := platform.ParseCategoryWithAllowed(cat, allowed, existingCat); err == nil && matched != "" {
+			return matched
+		}
+		if existingCat != "" {
+			return existingCat
+		}
+		return platform.InferCategory(style, allowed)
+	}
+	if existingCat != "" {
+		return existingCat
+	}
+	return platform.InferCategory(style, allowed)
+}
+
 // ImportCatalogBeersWithPosters 在单事务导入历史酒单的同时落盘压缩包内酒标并在失败/跳过/替换时自动回收孤儿图片。
+// 远程酒标不在 HTTP 请求内同步阻塞下载，而是在事务提交后异步本地化。
 func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, store *PosterStore, items []ImportItem, mode string, allowed []string) (ImportResult, error) {
 	if mode == "" {
 		mode = "merge"
 	}
 	if mode != "merge" && mode != "skip" {
 		return ImportResult{}, platform.UserErr("不支持的导入模式")
+	}
+	if len(allowed) == 0 {
+		allowed = platform.DefaultBeerCategories
 	}
 
 	work := slices.Clone(items)
@@ -411,10 +450,8 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 	createdSet := make(map[string]bool)
 	committed := false
 	defer func() {
-		if !committed && store != nil {
-			for _, u := range createdFiles {
-				_ = store.Delete(u)
-			}
+		if !committed && store != nil && len(createdFiles) > 0 {
+			CleanupUnusedPosters(context.WithoutCancel(ctx), pool, store, createdFiles...)
 		}
 	}()
 
@@ -423,21 +460,17 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 			it := &work[i]
 			switch {
 			case it.Poster != nil && len(it.Poster.Data) > 0:
-				savedURL, err := store.SaveBytes(it.Poster.Data)
+				savedURL, created, err := store.saveBytesDedup(it.Poster.Data)
 				if err != nil {
 					return ImportResult{}, err
 				}
-				createdFiles = append(createdFiles, savedURL)
-				createdSet[savedURL] = true
-				it.Beer.PosterURL = savedURL
-				it.Mask.PosterURL = true
-			case strings.HasPrefix(strings.ToLower(strings.TrimSpace(it.Beer.PosterURL)), "http"):
-				if savedURL, err := store.SaveFromURL(ctx, it.Beer.PosterURL); err == nil && savedURL != "" {
+				// 只有本次真正写入的新文件才计入回滚删除清单，避免误删已存在的去重文件。
+				if created {
 					createdFiles = append(createdFiles, savedURL)
 					createdSet[savedURL] = true
-					it.Beer.PosterURL = savedURL
-					it.Mask.PosterURL = true
 				}
+				it.Beer.PosterURL = savedURL
+				it.Mask.PosterURL = true
 			case IsLocalPosterURL(it.Beer.PosterURL) && !store.Exists(it.Beer.PosterURL):
 				it.Beer.PosterURL = ""
 			}
@@ -452,13 +485,18 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 
 	var res ImportResult
 	var cleanupCandidates []string
+	var remotePosterURLs []string
 	for _, it := range work {
-		if strings.TrimSpace(it.Beer.Name) == "" {
-			return ImportResult{}, platform.UserErr("酒款名称不能为空")
-		}
 		if mode == "skip" {
-			c, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it, allowed), allowed)
+			resolvedIt := it
+			if resolvedIt.Mask.Category {
+				resolvedIt.Beer.Category = resolveImportCategory(resolvedIt.Beer.Category, resolvedIt.Beer.Style, allowed, "")
+			}
+			c, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, resolvedIt, allowed), allowed)
 			if err != nil {
+				return ImportResult{}, err
+			}
+			if err := LockPosterURLTx(ctx, tx, c.PosterURL); err != nil {
 				return ImportResult{}, err
 			}
 			tag, err := insertCatalogDoNothingTx(ctx, tx, c)
@@ -471,6 +509,9 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 				}
 				res.Skipped++
 			} else {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.PosterURL)), "http") {
+					remotePosterURLs = append(remotePosterURLs, c.PosterURL)
+				}
 				res.Inserted++
 			}
 			continue
@@ -478,15 +519,25 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 
 		existing, err := findCatalogForUpdateTx(ctx, tx, it.Beer.Brewery, it.Beer.Name)
 		if errors.Is(err, pgx.ErrNoRows) {
-			c, perr := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, it, allowed), allowed)
+			resolvedIt := it
+			if resolvedIt.Mask.Category {
+				resolvedIt.Beer.Category = resolveImportCategory(resolvedIt.Beer.Category, resolvedIt.Beer.Style, allowed, "")
+			}
+			c, perr := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, resolvedIt, allowed), allowed)
 			if perr != nil {
 				return ImportResult{}, perr
+			}
+			if err := LockPosterURLTx(ctx, tx, c.PosterURL); err != nil {
+				return ImportResult{}, err
 			}
 			tag, ierr := insertCatalogDoNothingTx(ctx, tx, c)
 			if ierr != nil {
 				return ImportResult{}, ierr
 			}
 			if tag.RowsAffected() > 0 {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c.PosterURL)), "http") {
+					remotePosterURLs = append(remotePosterURLs, c.PosterURL)
+				}
 				res.Inserted++
 				continue
 			}
@@ -495,8 +546,19 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 		if err != nil {
 			return ImportResult{}, err
 		}
-		merged, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(existing, it, allowed), allowed, existing.Category)
+		resolvedIt := it
+		if resolvedIt.Mask.Category {
+			nextStyle := existing.Style
+			if resolvedIt.Mask.Style {
+				nextStyle = resolvedIt.Beer.Style
+			}
+			resolvedIt.Beer.Category = resolveImportCategory(resolvedIt.Beer.Category, nextStyle, allowed, existing.Category)
+		}
+		merged, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(existing, resolvedIt, allowed), allowed, existing.Category)
 		if err != nil {
+			return ImportResult{}, err
+		}
+		if err := LockPosterURLTx(ctx, tx, merged.PosterURL); err != nil {
 			return ImportResult{}, err
 		}
 		if _, err := tx.Exec(ctx, `update beer_catalog set
@@ -513,6 +575,9 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 		if existing.PosterURL != merged.PosterURL && IsLocalPosterURL(existing.PosterURL) {
 			cleanupCandidates = append(cleanupCandidates, existing.PosterURL)
 		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(merged.PosterURL)), "http") {
+			remotePosterURLs = append(remotePosterURLs, merged.PosterURL)
+		}
 		res.Updated++
 	}
 
@@ -521,5 +586,6 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 	}
 	committed = true
 	CleanupUnusedPosters(ctx, pool, store, cleanupCandidates...)
+	TriggerAsyncLocalize(pool, store, remotePosterURLs)
 	return res, nil
 }

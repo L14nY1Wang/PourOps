@@ -76,6 +76,13 @@ func TestWebhookDispatcherSignatureFilterRetryAndDrain(t *testing.T) {
 			if got := SignWebhookBody("sec-123", body); got != r.Header.Get("X-Bar-Signature") {
 				t.Errorf("signature mismatch: got %q want %q", r.Header.Get("X-Bar-Signature"), got)
 			}
+			ts := r.Header.Get("X-Bar-Timestamp")
+			if ts == "" {
+				t.Errorf("missing X-Bar-Timestamp header")
+			}
+			if gotV2 := SignWebhookBodyWithTimestamp("sec-123", ts, body); gotV2 != r.Header.Get("X-Bar-Signature-V2") {
+				t.Errorf("signature v2 mismatch: got %q want %q", r.Header.Get("X-Bar-Signature-V2"), gotV2)
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader("ok")),
@@ -120,11 +127,20 @@ func TestWebhookDispatcherSignatureFilterRetryAndDrain(t *testing.T) {
 }
 
 func TestValidateWebhookURLBlocksSSRF(t *testing.T) {
-	for _, okURL := range []string{"", "https://example.com/hook", "http://127.0.0.1:9000/hook"} {
+	for _, okURL := range []string{"", "https://example.com/hook"} {
 		if err := ValidateWebhookURL(okURL); err != nil {
 			t.Errorf("ValidateWebhookURL(%q) = %v, want nil", okURL, err)
 		}
 	}
+	if err := ValidateWebhookURL("http://127.0.0.1:9000/hook"); err == nil {
+		t.Errorf("ValidateWebhookURL loopback without WEBHOOK_ALLOW_PRIVATE = nil, want error")
+	}
+	t.Run("allow private when explicitly enabled", func(t *testing.T) {
+		t.Setenv("WEBHOOK_ALLOW_PRIVATE", "1")
+		if err := ValidateWebhookURL("http://127.0.0.1:9000/hook"); err != nil {
+			t.Errorf("ValidateWebhookURL loopback with WEBHOOK_ALLOW_PRIVATE=1 = %v, want nil", err)
+		}
+	})
 	for _, badURL := range []string{
 		"ftp://example.com/hook",
 		"http://169.254.169.254/latest/meta-data",

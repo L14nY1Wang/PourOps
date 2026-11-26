@@ -1,11 +1,14 @@
 package lookup
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"pourops/internal/platform"
 	"pourops/internal/ui"
@@ -31,26 +34,60 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/beers/lookup/detail", guards.Auth(s.LookupBeerDetail))
 }
 
+// remoteLookupTimeout 是远程源（酒核等）的单次检索上限；本地 catalog 不受此限制，
+// 保证慢/挂的上游最多拖慢响应 2.5s，而不是等满客户端超时。
+const remoteLookupTimeout = 2500 * time.Millisecond
+
+type providerResult struct {
+	provider Provider
+	items    []Candidate
+	err      error
+}
+
+// searchConcurrent 并发调用所有已启用 provider，结果按注册顺序回填以保持合并顺序稳定。
+// 非 catalog 远程源使用独立的超时 context；provider 需自行响应 ctx 取消。
+func (s *Service) searchConcurrent(ctx context.Context, q string, catalogLimit, remoteLimit int) []providerResult {
+	targets := make([]Provider, 0, len(s.providers))
+	for _, p := range s.providers {
+		if !p.Enabled() || (q == "" && !p.SupportsEmptyQuery()) {
+			continue
+		}
+		targets = append(targets, p)
+	}
+
+	results := make([]providerResult, len(targets))
+	var wg sync.WaitGroup
+	for i, p := range targets {
+		results[i].provider = p
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p.Name() == "catalog" {
+				results[i].items, results[i].err = p.Search(ctx, q, catalogLimit)
+				return
+			}
+			pctx, cancel := context.WithTimeout(ctx, remoteLookupTimeout)
+			defer cancel()
+			results[i].items, results[i].err = p.Search(pctx, q, remoteLimit)
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
 func (s *Service) LookupBeers(w http.ResponseWriter, r *http.Request) {
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	ctx := r.Context()
 
 	if q == "" {
-		var items []Candidate
-		for _, p := range s.providers {
-			if !p.Enabled() || !p.SupportsEmptyQuery() {
-				continue
-			}
-			got, err := p.Search(ctx, "", 12)
-			if err != nil {
-				log.Printf("beer lookup empty (%s): %v", p.Name(), err)
+		items := make([]Candidate, 0, 16)
+		for _, res := range s.searchConcurrent(ctx, "", 12, 12) {
+			if res.err != nil {
+				log.Printf("beer lookup empty (%s): %v", res.provider.Name(), res.err)
 				http.Error(w, "查询历史酒单失败", http.StatusInternalServerError)
 				return
 			}
-			items = append(items, got...)
-		}
-		if items == nil {
-			items = []Candidate{}
+			items = append(items, res.items...)
 		}
 		writeJSON(w, http.StatusOK, Response{Items: items})
 		return
@@ -58,23 +95,15 @@ func (s *Service) LookupBeers(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]Candidate, 0, 16)
 	var warnings []string
-	for _, p := range s.providers {
-		if !p.Enabled() {
-			continue
-		}
-		limit := 10
-		if p.Name() == "catalog" {
-			limit = 6
-		}
-		got, err := p.Search(ctx, q, limit)
-		if err != nil {
-			log.Printf("beer lookup %s (%q): %v", p.Name(), q, err)
-			if p.Name() != "catalog" {
-				warnings = append(warnings, p.Name())
+	for _, res := range s.searchConcurrent(ctx, q, 6, 10) {
+		if res.err != nil {
+			log.Printf("beer lookup %s (%q): %v", res.provider.Name(), q, res.err)
+			if res.provider.Name() != "catalog" {
+				warnings = append(warnings, res.provider.Name())
 			}
 			continue
 		}
-		items = append(items, got...)
+		items = append(items, res.items...)
 	}
 
 	var warning string

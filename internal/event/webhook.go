@@ -12,7 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	webhookQueueSize    = 256
-	webhookHTTPTimeout  = 5 * time.Second
-	webhookRetryBackoff = 200 * time.Millisecond
+	webhookQueueSize        = 256
+	webhookHTTPTimeout      = 5 * time.Second
+	webhookRetryBackoff     = 200 * time.Millisecond
+	webhookBreakerThreshold = 5
+	webhookBreakerCooldown  = 30 * time.Second
 )
 
 // WebhookEventOptions 是系统设置页与 Webhook 订阅器共享的领域事件选项。
@@ -70,65 +72,59 @@ type WebhookConfigProvider interface {
 	WebhookConfig() WebhookConfig
 }
 
-// ValidateWebhookURL 仅允许 http(s)://，拦截控制字符与云厂商元数据/链路本地地址（SSRF 基本防护）。
+// ValidateWebhookURL 仅允许 http(s)://，拦截控制字符、云元数据、内网与特殊保留地址（除非设置 WEBHOOK_ALLOW_PRIVATE=1）。
 func ValidateWebhookURL(raw string) error {
-	s := strings.TrimSpace(raw)
-	if s == "" {
+	if strings.TrimSpace(raw) == "" {
 		return nil
 	}
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return platform.UserErr("Webhook 地址包含非法控制字符")
-		}
-	}
-	u, err := url.Parse(s)
-	if err != nil || u.Host == "" || u.Hostname() == "" {
-		return platform.UserErr("Webhook 地址格式不正确")
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme != "http" && scheme != "https" {
-		return platform.UserErr("Webhook 地址必须以 http:// 或 https:// 开头")
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "metadata.google.internal" || strings.HasSuffix(host, ".metadata.google.internal") || host == "169.254.169.254" {
-		return platform.UserErr("Webhook 地址不能指向云元数据服务")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-			return platform.UserErr("Webhook 地址不能指向链路本地或无效网络地址")
-		}
-	}
-	return nil
+	return platform.ValidateOutboundURL(raw, "Webhook 地址", platform.EnvBool("WEBHOOK_ALLOW_PRIVATE"))
 }
 
 // WebhookDispatcher 把领域事件异步投递到门店配置的签名 HTTP Webhook，失败不影响主交易链路。
 type WebhookDispatcher struct {
-	cfg    WebhookConfigProvider
-	client *http.Client
+	cfg          WebhookConfigProvider
+	client       *http.Client
+	retryBackoff time.Duration
 
 	queue chan Event
 	stop  chan struct{}
 	done  chan struct{}
 
-	mu     sync.Mutex
-	closed bool
+	mu         sync.Mutex
+	closed     bool
+	consecFail int
+	openUntil  time.Time
+}
+
+func newSafeWebhookHTTPClient() *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   webhookHTTPTimeout,
+		KeepAlive: 30 * time.Second,
+	}
+	tr := &http.Transport{
+		Proxy:       nil,
+		DialContext: platform.NewSafeDialContext(dialer, func() bool { return platform.EnvBool("WEBHOOK_ALLOW_PRIVATE") }),
+	}
+	return &http.Client{
+		Timeout:   webhookHTTPTimeout,
+		Transport: tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 func NewWebhookDispatcher(cfg WebhookConfigProvider, client *http.Client) *WebhookDispatcher {
 	if client == nil {
-		client = &http.Client{
-			Timeout: webhookHTTPTimeout,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		}
+		client = newSafeWebhookHTTPClient()
 	}
 	d := &WebhookDispatcher{
-		cfg:    cfg,
-		client: client,
-		queue:  make(chan Event, webhookQueueSize),
-		stop:   make(chan struct{}),
-		done:   make(chan struct{}),
+		cfg:          cfg,
+		client:       client,
+		retryBackoff: webhookRetryBackoff,
+		queue:        make(chan Event, webhookQueueSize),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 	go d.worker()
 	return d
@@ -173,11 +169,36 @@ func (d *WebhookDispatcher) Enqueue(ev Event) {
 func (d *WebhookDispatcher) worker() {
 	defer close(d.done)
 	for ev := range d.queue {
+		d.mu.Lock()
+		circuitOpen := !d.openUntil.IsZero() && time.Now().Before(d.openUntil)
+		d.mu.Unlock()
+		if circuitOpen {
+			log.Printf("webhook breaker open: skipped %s (%s)", ev.Type, ev.ID)
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), webhookHTTPTimeout*2)
 		if err := d.deliverWithRetry(ctx, ev); err != nil {
 			log.Printf("webhook deliver %s (%s): %v", ev.Type, ev.ID, err)
+			d.recordOutcome(false)
+		} else {
+			d.recordOutcome(true)
 		}
 		cancel()
+	}
+}
+
+func (d *WebhookDispatcher) recordOutcome(ok bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if ok {
+		d.consecFail = 0
+		d.openUntil = time.Time{}
+		return
+	}
+	d.consecFail++
+	if d.consecFail >= webhookBreakerThreshold {
+		d.openUntil = time.Now().Add(webhookBreakerCooldown)
+		log.Printf("webhook circuit breaker opened for %v after %d consecutive failures", webhookBreakerCooldown, d.consecFail)
 	}
 }
 
@@ -225,7 +246,11 @@ func (d *WebhookDispatcher) SendTest(ctx context.Context, actor string) error {
 			"message": "Webhook test event from " + brand,
 		},
 	}
-	return d.deliverOnce(ctx, cfg, ev)
+	err := d.deliverOnce(ctx, cfg, ev)
+	if err == nil {
+		d.recordOutcome(true)
+	}
+	return err
 }
 
 func (d *WebhookDispatcher) deliverWithRetry(ctx context.Context, ev Event) error {
@@ -237,10 +262,14 @@ func (d *WebhookDispatcher) deliverWithRetry(ctx context.Context, ev Event) erro
 	if err == nil {
 		return nil
 	}
+	backoff := d.retryBackoff
+	if backoff <= 0 {
+		backoff = webhookRetryBackoff
+	}
 	select {
 	case <-ctx.Done():
 		return err
-	case <-time.After(webhookRetryBackoff):
+	case <-time.After(backoff):
 	}
 	return d.deliverOnce(ctx, cfg, ev)
 }
@@ -257,17 +286,24 @@ func (d *WebhookDispatcher) deliverOnce(ctx context.Context, cfg WebhookConfig, 
 	if err != nil {
 		return platform.UserErr("创建 Webhook 请求失败")
 	}
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
 	req.Header.Set("User-Agent", "PourOps-Webhook/1.0")
 	req.Header.Set("X-Bar-Event", string(ev.Type))
 	req.Header.Set("X-Bar-Delivery", ev.ID)
+	req.Header.Set("X-Bar-Timestamp", ts)
 	if cfg.Secret != "" {
 		req.Header.Set("X-Bar-Signature", SignWebhookBody(cfg.Secret, body))
+		req.Header.Set("X-Bar-Signature-V2", SignWebhookBodyWithTimestamp(cfg.Secret, ts, body))
 	}
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		return platform.UserErrf("请求 Webhook 失败：%v", err)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			return platform.UserErr(msg)
+		}
+		log.Printf("webhook request (%s): %v", cfg.URL, err)
+		return platform.UserErr("无法连接到 Webhook 地址，请检查网络或目标地址")
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
@@ -280,6 +316,15 @@ func (d *WebhookDispatcher) deliverOnce(ctx context.Context, cfg WebhookConfig, 
 // SignWebhookBody 计算标准 HMAC-SHA256 请求头值（sha256=<hex>）。
 func SignWebhookBody(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+// SignWebhookBodyWithTimestamp 计算带时间戳防重放的 HMAC-SHA256 签名（HMAC(secret, ts + "." + body)）。
+func SignWebhookBodyWithTimestamp(secret, timestamp string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(timestamp))
+	mac.Write([]byte{'.'})
 	mac.Write(body)
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }

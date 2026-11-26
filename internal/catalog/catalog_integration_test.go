@@ -4,13 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -227,29 +228,72 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	}
 
 	// 导入前替换新图片并校验导入后旧酒标已从磁盘移除，仅保留最新一张。
-	var mpBody bytes.Buffer
-	mw := multipart.NewWriter(&mpBody)
-	fw, err := mw.CreateFormFile("file", "roundtrip.zip")
-	if err != nil {
-		t.Fatal(err)
+	postZip := func(body []byte) *httptest.ResponseRecorder {
+		var mp bytes.Buffer
+		mw := multipart.NewWriter(&mp)
+		fw, err := mw.CreateFormFile("file", "roundtrip.zip")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+		_ = mw.WriteField("mode", "merge")
+		if err := mw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/admin/settings/catalog/import", &mp)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		rec := httptest.NewRecorder()
+		svc.CatalogImport(rec, req)
+		return rec
 	}
-	_, _ = fw.Write(recExp.Body.Bytes())
-	_ = mw.WriteField("mode", "merge")
-	_ = mw.Close()
+	assertImportFlash := func(rec *httptest.ResponseRecorder, wantMsg string) {
+		if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/settings" {
+			t.Fatalf("导入应 303 跳转到 /admin/settings，实际 code=%d loc=%q", rec.Code, rec.Header().Get("Location"))
+		}
+		msg, errMsg := platform.ReadFlashCookies(rec.Result().Cookies())
+		if msg != wantMsg || errMsg != "" {
+			t.Fatalf("导入提示不对: msg=%q errMsg=%q", msg, errMsg)
+		}
+	}
+	catalogPoster := func() string {
+		rows, err := ListCatalogBeers(ctx, pool, "尤利乌斯", "")
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("查询酒标引用失败: rows=%d err=%v", len(rows), err)
+		}
+		return rows[0].PosterURL
+	}
 
-	reqImp := httptest.NewRequest(http.MethodPost, "/admin/settings/catalog/import", &mpBody)
-	reqImp.Header.Set("Content-Type", mw.FormDataContentType())
-	recImp := httptest.NewRecorder()
-	svc.CatalogImport(recImp, reqImp)
-	if recImp.Code != http.StatusSeeOther {
-		t.Fatalf("导入应 303 重定向，实际 %d: %s", recImp.Code, recImp.Body.String())
-	}
-	loc, _ := url.QueryUnescape(recImp.Header().Get("Location"))
-	if !strings.HasPrefix(loc, "/admin/settings?msg=") || !strings.Contains(loc, "新增 0 款，更新 2 款，跳过 0 款") {
-		t.Fatalf("导入提示不对: %s", loc)
-	}
+	assertImportFlash(postZip(recExp.Body.Bytes()), "导入完成：新增 0 款，更新 2 款，跳过 0 款")
 	if store.Exists(oldLocalPoster) {
 		t.Fatalf("覆盖导入后旧本地酒标 %s 应被清理，仅保留最新版本", oldLocalPoster)
+	}
+	sum := sha256.Sum256(samplePNGBytes())
+	wantDedup := PosterURLPrefix + hex.EncodeToString(sum[:16]) + ".png"
+	if dedupPoster := catalogPoster(); dedupPoster != wantDedup || !store.Exists(dedupPoster) {
+		t.Fatalf("酒标应按内容哈希去重落盘: got=%q want=%q exists=%v", dedupPoster, wantDedup, store.Exists(dedupPoster))
+	}
+
+	// 相同字节的 ZIP 再次导入：dedup 复用同一文件名，绝不能把文件删掉。
+	assertImportFlash(postZip(recExp.Body.Bytes()), "导入完成：新增 0 款，更新 2 款，跳过 0 款")
+	if again := catalogPoster(); again != wantDedup || !store.Exists(wantDedup) {
+		t.Fatalf("相同字节重导入应复用去重酒标: url=%q exists=%v", again, store.Exists(wantDedup))
+	}
+
+	// 换成不同字节：生成新文件名，旧去重文件无引用后被清理。
+	if _, err := ImportCatalogBeersWithPosters(ctx, pool, store, []ImportItem{{
+		Beer:   CatalogBeer{Brewery: "树屋", Name: "尤利乌斯", Style: "IPA - Hazy", Category: "IPA", CapacityML: 20000},
+		Poster: &PosterPayload{Filename: "julius.jpg", Data: sampleJPEGBytes()},
+	}}, "merge", platform.DefaultBeerCategories); err != nil {
+		t.Fatalf("更换酒标导入失败: %v", err)
+	}
+	newPoster := catalogPoster()
+	if newPoster == wantDedup || !store.Exists(newPoster) {
+		t.Fatalf("不同字节应写入新的去重文件: url=%q", newPoster)
+	}
+	if store.Exists(wantDedup) {
+		t.Fatalf("旧去重酒标 %s 已无引用，应被清理", wantDedup)
 	}
 
 	// 非 zip 上传（如直接传 CSV）应返回明确提示。
@@ -262,9 +306,11 @@ func TestCatalogImportModesAndHTTPExportImport(t *testing.T) {
 	reqCSV.Header.Set("Content-Type", cw.FormDataContentType())
 	recCSV := httptest.NewRecorder()
 	svc.CatalogImport(recCSV, reqCSV)
-	locCSV, _ := url.QueryUnescape(recCSV.Header().Get("Location"))
-	if recCSV.Code != http.StatusSeeOther || !strings.Contains(locCSV, ".zip") {
-		t.Fatalf("非 zip 文件导入应跳转到 /admin/settings 提示 .zip，实际 code=%d loc=%q", recCSV.Code, locCSV)
+	if recCSV.Code != http.StatusSeeOther || recCSV.Header().Get("Location") != "/admin/settings" {
+		t.Fatalf("非 zip 文件导入应 303 跳转到 /admin/settings，实际 code=%d loc=%q", recCSV.Code, recCSV.Header().Get("Location"))
+	}
+	if msg, errMsg := platform.ReadFlashCookies(recCSV.Result().Cookies()); msg != "" || !strings.Contains(errMsg, ".zip") {
+		t.Fatalf("非 zip 文件导入应提示 .zip，实际 msg=%q errMsg=%q", msg, errMsg)
 	}
 
 	badBatch := []ImportItem{
@@ -423,9 +469,12 @@ func TestCatalogDBErrorSanitization(t *testing.T) {
 	reqImp.Header.Set("Content-Type", mw.FormDataContentType())
 	wImp := httptest.NewRecorder()
 	badSvc.CatalogImport(wImp, reqImp)
-	locImp, _ := url.QueryUnescape(wImp.Header().Get("Location"))
-	if wImp.Code != http.StatusSeeOther || !strings.Contains(locImp, "导入失败，请稍后重试") || strings.Contains(locImp, "closed pool") {
-		t.Fatalf("CatalogImport DB 错误未脱敏: code=%d loc=%q", wImp.Code, locImp)
+	if wImp.Code != http.StatusSeeOther || wImp.Header().Get("Location") != "/admin/settings" {
+		t.Fatalf("CatalogImport DB 错误应 303 跳转到 /admin/settings: code=%d loc=%q", wImp.Code, wImp.Header().Get("Location"))
+	}
+	msgImp, errImp := platform.ReadFlashCookies(wImp.Result().Cookies())
+	if msgImp != "" || !strings.Contains(errImp, "导入失败，请稍后重试") || strings.Contains(errImp, "closed pool") {
+		t.Fatalf("CatalogImport DB 错误未脱敏: msg=%q errMsg=%q", msgImp, errImp)
 	}
 }
 

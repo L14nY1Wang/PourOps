@@ -1,11 +1,14 @@
 package inventory
 
 import (
+	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"pourops/internal/catalog"
+	"pourops/internal/event"
 	"pourops/internal/platform"
 	"pourops/internal/settings"
 	"pourops/internal/ui"
@@ -58,7 +61,8 @@ func (s *Service) KegList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	allKegs, err := ListKegs(ctx, s.pool, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("keg list: %v", err)
+		http.Error(w, "加载酒桶列表失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 
@@ -103,8 +107,6 @@ func (s *Service) KegList(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: "桶装盈亏",
 			Nav:   "kegs",
-			Msg:   q.Get("msg"),
-			Err:   q.Get("err"),
 		},
 		Kegs:       filtered,
 		KegSummary: SummarizeKegsWithConfig(filtered, cfg),
@@ -123,7 +125,8 @@ func (s *Service) KegEdit(w http.ResponseWriter, r *http.Request) {
 	}
 	beers, err := catalog.ListBeers(r.Context(), s.pool, false)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("keg edit list beers (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	s.renderer.Render(w, r, "admin/keg_form.html", &KegFormPage{
@@ -134,32 +137,68 @@ func (s *Service) KegEdit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) KegSave(w http.ResponseWriter, r *http.Request) {
+	capPtr, capErr := platform.ParseStrictInt(r.FormValue("capacity_ml"), "桶容量", 1, math.MaxInt32)
+	costCents, costErr := platform.MoneyCents(r.FormValue("cost"))
 	k := Keg{
 		BeerID:     int64(platform.IntValue(r.FormValue("beer_id"))),
 		KegNo:      strings.TrimSpace(r.FormValue("keg_no")),
-		CapacityML: platform.IntValue(r.FormValue("capacity_ml")),
-		CostCents:  platform.PriceCents(r.FormValue("cost")),
+		CapacityML: 0,
+		CostCents:  costCents,
 		PlacedAt:   platform.ParseLocalTime(r.FormValue("placed_at")),
 		TappedAt:   platform.ParseLocalTime(r.FormValue("tapped_at")),
 		FinishedAt: platform.ParseLocalTime(r.FormValue("finished_at")),
 		Note:       strings.TrimSpace(r.FormValue("note")),
 	}
+	if capPtr != nil {
+		k.CapacityML = *capPtr
+	}
 	if id := r.FormValue("id"); id != "" {
 		k.ID, _ = strconv.ParseInt(id, 10, 64)
 	}
-	id, err := SaveKeg(r.Context(), s.pool, k)
-	if err != nil {
+	renderFail := func(status int, msg string) {
 		beers, _ := catalog.ListBeers(r.Context(), s.pool, false)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusBadRequest)
-		s.renderer.Render(w, r, "admin/keg_form.html", &KegFormPage{
-			Layout: ui.Layout{Title: "新建酒桶", Nav: "kegs", Err: err.Error()},
+		title := "新建酒桶"
+		if k.ID > 0 {
+			title = "编辑酒桶"
+		}
+		s.renderer.RenderStatus(w, r, status, "admin/keg_form.html", &KegFormPage{
+			Layout: ui.Layout{Title: title, Nav: "kegs", Err: msg},
 			Keg:    k,
 			Beers:  beers,
 		})
+	}
+	if capErr != nil {
+		renderFail(http.StatusBadRequest, capErr.Error())
 		return
 	}
-	http.Redirect(w, r, "/admin/kegs/"+strconv.FormatInt(id, 10)+"?msg="+platform.URLMsg("已保存"), http.StatusSeeOther)
+	if k.CapacityML <= 0 {
+		renderFail(http.StatusBadRequest, "桶容量要大于 0")
+		return
+	}
+	if costErr != nil {
+		renderFail(http.StatusBadRequest, costErr.Error())
+		return
+	}
+	res, err := SaveKegResultFn(r.Context(), s.pool, k)
+	if err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			renderFail(http.StatusBadRequest, msg)
+			return
+		}
+		log.Printf("keg save (%d): %v", k.ID, err)
+		renderFail(http.StatusInternalServerError, "保存失败，请稍后重试")
+		return
+	}
+	subject := platform.BeerSubject(res.Brewery, res.BeerName)
+	switch res.OpKind {
+	case platform.OpTap:
+		s.publish(r, event.EventScreenChanged, subject, map[string]any{"action": "keg.tapped", "beer_id": res.BeerID, "keg_id": res.KegID})
+		s.publish(r, event.EventBeerTapped, subject, map[string]any{"beer_id": res.BeerID, "keg_id": res.KegID, "opened_new": true})
+	case platform.OpUntap:
+		s.publish(r, event.EventScreenChanged, subject, map[string]any{"action": "keg.untapped", "beer_id": res.BeerID, "keg_id": res.KegID})
+		s.publish(r, event.EventKegFinished, subject, map[string]any{"beer_id": res.BeerID, "keg_id": res.KegID})
+	}
+	platform.RedirectMsg(w, r, "/admin/kegs/"+strconv.FormatInt(res.KegID, 10), "已保存")
 }
 
 func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +210,8 @@ func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	pours, err := ListPours(r.Context(), s.pool, id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("keg detail list pours (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	beer, _ := catalog.GetBeer(r.Context(), s.pool, k.BeerID)
@@ -180,7 +220,6 @@ func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
 		Layout: ui.Layout{
 			Title: k.Title(),
 			Nav:   "kegs",
-			Msg:   r.URL.Query().Get("msg"),
 		},
 		Keg:        k,
 		Beer:       beer,
@@ -192,30 +231,71 @@ func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) PourAdd(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	err := AddPour(r.Context(), s.pool, id,
-		platform.IntValue(r.FormValue("cups")), platform.IntValue(r.FormValue("ml")), platform.PriceCents(r.FormValue("amount")))
-	if err != nil {
-		http.Redirect(w, r, "/admin/kegs/"+strconv.FormatInt(id, 10)+"?msg="+platform.URLMsg(err.Error()), http.StatusSeeOther)
+	back := "/admin/kegs/" + strconv.FormatInt(id, 10)
+	cupsPtr, cupsErr := platform.ParseStrictInt(r.FormValue("cups"), "杯数", 1, 1000)
+	mlPtr, mlErr := platform.ParseStrictInt(r.FormValue("ml"), "毫升", 0, 1000000)
+	amountCents, amtErr := platform.MoneyCents(r.FormValue("amount"))
+	switch {
+	case cupsErr != nil || cupsPtr == nil:
+		msg := "杯数格式不正确"
+		if cupsErr != nil {
+			msg = cupsErr.Error()
+		}
+		platform.RedirectErr(w, r, back, msg)
+		return
+	case mlErr != nil:
+		platform.RedirectErr(w, r, back, mlErr.Error())
+		return
+	case amtErr != nil:
+		platform.RedirectErr(w, r, back, amtErr.Error())
 		return
 	}
-	http.Redirect(w, r, "/admin/kegs/"+strconv.FormatInt(id, 10)+"?msg="+platform.URLMsg("已记一笔"), http.StatusSeeOther)
+	ml := 0
+	if mlPtr != nil {
+		ml = *mlPtr
+	}
+	if err := AddPour(r.Context(), s.pool, id, *cupsPtr, ml, amountCents); err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, back, msg)
+			return
+		}
+		log.Printf("pour add (%d): %v", id, err)
+		platform.RedirectErr(w, r, back, "记售出失败，请稍后重试")
+		return
+	}
+	platform.RedirectMsg(w, r, back, "已记一笔")
 }
 
 func (s *Service) PourDelete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	kegID := int64(platform.IntValue(r.FormValue("keg_id")))
+	back := "/admin/kegs"
+	if kegID > 0 {
+		back = "/admin/kegs/" + strconv.FormatInt(kegID, 10)
+	}
 	if err := DeletePour(r.Context(), s.pool, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, back, msg)
+			return
+		}
+		log.Printf("pour delete (%d): %v", id, err)
+		platform.RedirectErr(w, r, back, "删除失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/kegs/"+strconv.FormatInt(kegID, 10)+"?msg="+platform.URLMsg("已删除该笔"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, back, "已删除该笔")
 }
 
 func (s *Service) KegDelete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err := DeleteKeg(r.Context(), s.pool, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, "/admin/kegs/"+strconv.FormatInt(id, 10), msg)
+			return
+		}
+		log.Printf("keg delete (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/kegs/"+strconv.FormatInt(id, 10), "删除失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/beers?msg="+platform.URLMsg("已删除酒桶记录"), http.StatusSeeOther)
+	s.publish(r, event.EventScreenChanged, "", map[string]any{"action": "keg.deleted", "keg_id": id})
+	platform.RedirectMsg(w, r, "/admin/beers", "已删除酒桶记录")
 }

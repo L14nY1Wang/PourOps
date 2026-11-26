@@ -354,12 +354,15 @@ func (s CategorySegment) BarStyle() template.CSS {
 }
 
 type CupSizePreference struct {
-	SmallCups  int64 // ≤200ml
-	MediumCups int64 // 201–400ml
-	LargeCups  int64 // >400ml
+	SmallCups   int64 // ≤200ml
+	MediumCups  int64 // 201–400ml
+	LargeCups   int64 // >400ml
+	UnknownCups int64 // 没记毫升或没记杯数的记录，只有这些能让 Total() 对齐 TotalCups
 }
 
-func (c CupSizePreference) Total() int64 { return c.SmallCups + c.MediumCups + c.LargeCups }
+func (c CupSizePreference) Total() int64 {
+	return c.SmallCups + c.MediumCups + c.LargeCups + c.UnknownCups
+}
 
 func (c CupSizePreference) SmallShareText() string {
 	return ratioPercentText(c.SmallCups, c.Total())
@@ -371,6 +374,11 @@ func (c CupSizePreference) MediumShareText() string {
 
 func (c CupSizePreference) LargeShareText() string {
 	return ratioPercentText(c.LargeCups, c.Total())
+}
+
+// UnknownShareText 展示杯型缺失的占比，避免把「没记杯型」误读成小杯。
+func (c CupSizePreference) UnknownShareText() string {
+	return ratioPercentText(c.UnknownCups, c.Total())
 }
 
 func (c CupSizePreference) DominantLabel() string {
@@ -390,6 +398,9 @@ func (c CupSizePreference) DominantLabel() string {
 		if alt.cups > best.cups {
 			best = alt
 		}
+	}
+	if best.cups <= 0 {
+		return "未记录杯型"
 	}
 	return fmt.Sprintf("%s（%s）", best.label, ratioPercentText(best.cups, total))
 }
@@ -533,7 +544,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 		prevCups    int64
 		volumeML    int64
 		revenue     int64
-		costExact   float64
+		costCents   int64
 		abvWeighted float64
 		abvWeight   int64
 	}
@@ -547,29 +558,44 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 		return a
 	}
 
+	// 成本与 sales.go 同口径：按「营业日 × 分类」把合计金额舍入到分再累加。
+	// 逐笔舍入会和整日口径差出几百分；日/分类粒度舍入后，与 SalesInsights.Draft.Cost 的差
+	// 最多是每多一个分类每天 1 分（sales.go 的日总成本只舍入一次）。
 	rows, err := tx.Query(ctx, `
 		select case when p.poured_at >= $2 then 'cur' else 'prev' end as period,
+		       (p.poured_at at time zone 'UTC' + interval '1 hour')::date as day,
 		       b.category,
 		       b.style,
 		       b.abv,
 		       coalesce(sum(p.cups), 0)::bigint as cups,
 		       coalesce(sum(p.ml), 0)::bigint as ml,
 		       coalesce(sum(p.amount_cents), 0)::bigint as revenue,
-		       coalesce(sum(k.cost_cents::numeric * p.ml / nullif(k.capacity_ml, 0)), 0)::double precision as cost_exact
+		       coalesce(sum(
+		           case when coalesce(p.cost_cents, 0) > 0 then p.cost_cents::numeric
+		                when k.cost_cents > 0 and k.capacity_ml > 0 then k.cost_cents::numeric * p.ml / k.capacity_ml
+		                else 0 end
+		       ), 0)::double precision as cost_exact
 		from keg_pours p
 		join kegs k on k.id = p.keg_id
 		join beers b on b.id = k.beer_id
 		where p.poured_at >= $1 and p.poured_at < $3
-		group by 1, 2, 3, 4`, prevStart, start, end)
+		group by 1, 2, 3, 4, 5`, prevStart, start, end)
 	if err != nil {
 		return out, err
 	}
+	// 同一营业日同一分类可能命中多款酒，必须先按 (day, cat) 合计再舍入，否则逐行舍入与 sales.go 对不上。
+	type dayCatKey struct {
+		day string
+		cat string
+	}
+	costByDayCat := make(map[dayCatKey]float64)
 	for rows.Next() {
 		var period, rawCat, style string
+		var day time.Time
 		var abv *float64
 		var cups, ml, revenue int64
 		var costExact float64
-		if err := rows.Scan(&period, &rawCat, &style, &abv, &cups, &ml, &revenue, &costExact); err != nil {
+		if err := rows.Scan(&period, &day, &rawCat, &style, &abv, &cups, &ml, &revenue, &costExact); err != nil {
 			rows.Close()
 			return out, err
 		}
@@ -582,7 +608,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 		a.cups += cups
 		a.volumeML += ml
 		a.revenue += revenue
-		a.costExact += costExact
+		costByDayCat[dayCatKey{day: day.Format(time.DateOnly), cat: cat}] += costExact
 		if abv != nil && *abv >= 0 && cups > 0 {
 			a.abvWeighted += *abv * float64(cups)
 			a.abvWeight += cups
@@ -594,6 +620,9 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return out, err
+	}
+	for k, v := range costByDayCat {
+		accByCat[k.cat].costCents += int64(math.Round(v))
 	}
 
 	var posProfitTotal int64
@@ -608,7 +637,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 			PrevCups: a.prevCups,
 			VolumeML: a.volumeML,
 			Revenue:  a.revenue,
-			Cost:     int64(math.Round(a.costExact)),
+			Cost:     a.costCents,
 		}
 		out.TotalCost += seg.Cost
 		if p := seg.Profit(); p > 0 {
@@ -644,14 +673,15 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	})
 	assignDistinctSegmentColors(out.Segments)
 
+	// 杯型按毫升/杯分档；没记毫升或杯数的记录归入 UnknownCups，保证 Total() 与 TotalCups 对得上。
 	if err := tx.QueryRow(ctx, `
-		select coalesce(sum(case when p.ml::numeric / p.cups <= 200 then p.cups else 0 end), 0)::bigint,
-		       coalesce(sum(case when p.ml::numeric / p.cups > 200 and p.ml::numeric / p.cups <= 400 then p.cups else 0 end), 0)::bigint,
-		       coalesce(sum(case when p.ml::numeric / p.cups > 400 then p.cups else 0 end), 0)::bigint
+		select coalesce(sum(case when p.ml > 0 and p.cups > 0 and p.ml::numeric / p.cups <= 200 then p.cups else 0 end), 0)::bigint,
+		       coalesce(sum(case when p.ml > 0 and p.cups > 0 and p.ml::numeric / p.cups > 200 and p.ml::numeric / p.cups <= 400 then p.cups else 0 end), 0)::bigint,
+		       coalesce(sum(case when p.ml > 0 and p.cups > 0 and p.ml::numeric / p.cups > 400 then p.cups else 0 end), 0)::bigint,
+		       coalesce(sum(case when p.ml <= 0 or p.cups <= 0 then p.cups else 0 end), 0)::bigint
 		from keg_pours p
-		where p.poured_at >= $1 and p.poured_at < $2
-		  and p.cups > 0 and p.ml > 0`, start, end).
-		Scan(&out.CupSizes.SmallCups, &out.CupSizes.MediumCups, &out.CupSizes.LargeCups); err != nil {
+		where p.poured_at >= $1 and p.poured_at < $2`, start, end).
+		Scan(&out.CupSizes.SmallCups, &out.CupSizes.MediumCups, &out.CupSizes.LargeCups, &out.CupSizes.UnknownCups); err != nil {
 		return out, err
 	}
 

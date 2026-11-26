@@ -139,11 +139,11 @@ func TestAllTemplatesRender(t *testing.T) {
 			Stats: inventory.RetailStats{TodayRev: 68000, TodayCost: 32000, MonthRev: 540000, MonthCost: 250000, StockValue: 340000, LowCount: 1, SKUs: 8},
 		}, nil, false},
 		{"retail_form", "admin/retail_form.html", "layout", &inventory.RetailFormPage{
-			Layout: ui.Layout{Title: "编辑零售商品", Nav: "retail", Me: me}, Item: item, RetailCats: inventory.RetailCategories, Moves: []inventory.StockMove{{Delta: 12, Reason: "入库", CreatedAt: now}},
+			Layout: ui.Layout{Title: "编辑零售商品", Nav: "retail", Me: me}, Item: item, ExpectedStock: item.Stock, RetailCats: inventory.RetailCategories, Moves: []inventory.StockMove{{Delta: 12, Reason: "入库", CreatedAt: now}},
 		}, nil, false},
 		{"records-orders", "admin/records.html", "layout", &report.RecordsViewPage{
 			Layout:  ui.Layout{Title: "销售订单", Nav: "orders", Me: me},
-			Records: &report.RecordsPage{Mode: "orders", Statuses: report.RecordOrderStatuses, Orders: []report.RecordOrder{ord}, Page: 1},
+			Records: &report.RecordsPage{Mode: "orders", Statuses: report.RecordOrderStatuses, Orders: []report.RecordOrder{ord}},
 		}, nil, false},
 		{"records-order", "admin/records.html", "layout", &report.RecordsViewPage{
 			Layout: ui.Layout{Title: "订单 #88", Nav: "orders", Me: me},
@@ -156,7 +156,7 @@ func TestAllTemplatesRender(t *testing.T) {
 		{"records-ops", "admin/records.html", "layout", &report.RecordsViewPage{
 			Layout: ui.Layout{Title: "营运流水", Nav: "operations", Me: me},
 			Records: &report.RecordsPage{
-				Mode: "operations", Kinds: report.RecordKindOptions, Page: 1,
+				Mode: "operations", Kinds: report.RecordKindOptions,
 				Events: []report.LedgerEvent{{ID: 1, OccurredAt: now, Kind: platform.OpTap, Subject: "树屋 · 尤利乌斯", Detail: "上架 01", Actor: "boss"}},
 			},
 		}, nil, false},

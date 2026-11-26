@@ -10,7 +10,10 @@ import (
 func TestHubSubscribesToScreenChangedEvent(t *testing.T) {
 	bus := event.NewEventBus()
 	hub := NewHub(bus)
-	ch := hub.Subscribe()
+	ch, _, ok := hub.SubscribeChecked()
+	if !ok {
+		t.Fatal("SubscribeChecked failed unexpectedly")
+	}
 	defer hub.Unsubscribe(ch)
 
 	// 其他领域事件不会误触发电视酒单刷新

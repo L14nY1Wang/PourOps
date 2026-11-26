@@ -4,11 +4,13 @@ import "context"
 
 // PaymentRequest 传给收银渠道扩展点的结账上下文快照。
 type PaymentRequest struct {
-	OrderID     int64
-	SpotLabel   string
-	AmountCents int
-	ItemsCount  int
-	Actor       string
+	OrderID        int64
+	SpotLabel      string
+	AmountCents    int
+	ItemsCount     int
+	Actor          string
+	Method         string
+	IdempotencyKey string
 }
 
 // PaymentResult 是收银渠道扩展点确认记账后的返回信息。

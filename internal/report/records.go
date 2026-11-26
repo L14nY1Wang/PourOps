@@ -2,9 +2,10 @@ package report
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,10 +15,7 @@ import (
 	"pourops/internal/pos"
 )
 
-const (
-	recordPageSize = 50
-	recordMaxPage  = 1000
-)
+const recordPageSize = 50
 
 type RecordOption struct{ Value, Label string }
 
@@ -37,7 +35,6 @@ type RecordsPage struct {
 	Kinds  []RecordOption
 	Events []LedgerEvent
 
-	Page    int
 	PrevURL string
 	NextURL string
 }
@@ -47,26 +44,28 @@ type RecordOrder struct {
 	Spot     string
 	OpenedAt time.Time
 	ClosedAt *time.Time
-	Total    int
-	Paid     int
-	Pending  int
+	Total    int64
+	Paid     int64
+	Pending  int64
 	Status   string
 }
 
-func (o RecordOrder) Label() string       { return pos.SpotLabel(o.Spot) }
-func (o RecordOrder) TotalText() string   { return platform.PriceText(o.Total) }
-func (o RecordOrder) PaidText() string    { return platform.PriceText(o.Paid) }
-func (o RecordOrder) PendingText() string { return platform.PriceText(o.Pending) }
+func (o RecordOrder) Label() string { return pos.SpotLabel(o.Spot) }
+
+// 金额用 int64 版本；MoneyText64 保留原来模板上的「¥」前缀，PriceText64 只有裸数字。
+func (o RecordOrder) TotalText() string   { return platform.MoneyText64(o.Total) }
+func (o RecordOrder) PaidText() string    { return platform.MoneyText64(o.Paid) }
+func (o RecordOrder) PendingText() string { return platform.MoneyText64(o.Pending) }
 
 func (o RecordOrder) OpenedText() string {
-	return o.OpenedAt.Format("2006-01-02 15:04")
+	return platform.DateTimeText(&o.OpenedAt)
 }
 
 func (o RecordOrder) ClosedText() string {
 	if o.ClosedAt == nil {
 		return "未结"
 	}
-	return o.ClosedAt.Format("2006-01-02 15:04")
+	return platform.DateTimeText(o.ClosedAt)
 }
 
 func (o RecordOrder) StatusText() string {
@@ -122,7 +121,7 @@ type RecordPayment struct {
 
 func (p RecordPayment) AmountText() string { return platform.PriceText(p.Amount) }
 func (p RecordPayment) CreatedText() string {
-	return p.CreatedAt.Format("2006-01-02 15:04")
+	return platform.DateTimeText(&p.CreatedAt)
 }
 
 func (p RecordPayment) ActorText() string {
@@ -147,7 +146,7 @@ type LedgerEvent struct {
 }
 
 func (e LedgerEvent) OccurredText() string {
-	return e.OccurredAt.Format("2006-01-02 15:04")
+	return platform.DateTimeText(&e.OccurredAt)
 }
 
 func (e LedgerEvent) ActorText() string {
@@ -210,19 +209,20 @@ func validOperationKind(v string) bool {
 	return false
 }
 
+// 单价 × 数量按 bigint 相乘后再聚合，避免 int32 溢出把大额订单算成负数。
 const recordItemsAgg = `
-	select (sum(unit_cents * qty))::int as total,
-	       (sum(unit_cents * qty) filter (where paid_at is null))::int as pending
+	select (sum(unit_cents::bigint * qty))::bigint as total,
+	       (sum(unit_cents::bigint * qty) filter (where paid_at is null))::bigint as pending
 	from order_items where order_id = o.id`
 
 const recordPaysAgg = `
-	select (sum(amount_cents))::int as paid, count(*)::int as pays
+	select (sum(amount_cents))::bigint as paid, count(*)::int as pays
 	from payments where order_id = o.id`
 
 const recordOrderCols = `
-	coalesce(s.total, 0)::int as total,
-	coalesce(s.pending, 0)::int as pending,
-	coalesce(p.paid, 0)::int as paid,
+	coalesce(s.total, 0)::bigint as total,
+	coalesce(s.pending, 0)::bigint as pending,
+	coalesce(p.paid, 0)::bigint as paid,
 	case when o.closed_at is not null then 'settled'
 	     when coalesce(p.pays, 0) > 0 then 'partial'
 	     else 'unsettled' end as status`
@@ -234,18 +234,63 @@ const recordDetailSelect = `
 	left join lateral (` + recordPaysAgg + `) p on true
 	where o.id = $1`
 
-const recordListSelect = `
+func scanRecordOrder(row pgx.Row) (RecordOrder, error) {
+	var o RecordOrder
+	err := row.Scan(&o.ID, &o.Spot, &o.OpenedAt, &o.ClosedAt, &o.Total, &o.Pending, &o.Paid, &o.Status)
+	return o, err
+}
+
+func parseOrderBeforeCursor(raw string) int64 {
+	id, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	if err != nil || id <= 0 {
+		return 0
+	}
+	return id
+}
+
+func parseEventCursor(raw string) (*time.Time, int64) {
+	tsStr, idStr, ok := strings.Cut(strings.TrimSpace(raw), "_")
+	if !ok {
+		return nil, 0
+	}
+	nanos, err1 := strconv.ParseInt(tsStr, 10, 64)
+	id, err2 := strconv.ParseInt(idStr, 10, 64)
+	if err1 != nil || err2 != nil || id <= 0 {
+		return nil, 0
+	}
+	t := time.Unix(0, nanos).UTC()
+	return &t, id
+}
+
+func formatEventCursor(at time.Time, id int64) string {
+	return fmt.Sprintf("%d_%d", at.UTC().UnixNano(), id)
+}
+
+func beginReadOnlyTimeoutTx(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = '5s'`); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	return tx, nil
+}
+
+const recordCursorListSelect = `
 	with page as (
 		select o.id, o.spot, o.opened_at, o.closed_at
 		from orders o
-		where case $1
+		where ($2::bigint = 0 or o.id < $2)
+		  and case $1
 			when '' then true
 			when 'settled' then o.closed_at is not null
 			when 'partial' then o.closed_at is null and exists (select 1 from payments p where p.order_id = o.id)
 			else o.closed_at is null and not exists (select 1 from payments p where p.order_id = o.id)
 		end
 		order by o.id desc
-		limit $2 offset $3
+		limit $3
 	)
 	select o.id, o.spot, o.opened_at, o.closed_at,` + recordOrderCols + `
 	from page o
@@ -253,35 +298,13 @@ const recordListSelect = `
 	left join lateral (` + recordPaysAgg + `) p on true
 	order by o.id desc`
 
-func scanRecordOrder(row pgx.Row) (RecordOrder, error) {
-	var o RecordOrder
-	err := row.Scan(&o.ID, &o.Spot, &o.OpenedAt, &o.ClosedAt, &o.Total, &o.Pending, &o.Paid, &o.Status)
-	return o, err
-}
-
-func recordPageParam(r *http.Request) int {
-	n, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if n < 1 {
-		return 1
+func ListRecordOrdersCursor(ctx context.Context, pool *pgxpool.Pool, status string, beforeID int64) ([]RecordOrder, bool, error) {
+	tx, err := beginReadOnlyTimeoutTx(ctx, pool)
+	if err != nil {
+		return nil, false, err
 	}
-	if n > recordMaxPage {
-		return recordMaxPage
-	}
-	return n
-}
-
-func recordPageOffset(page int) int {
-	if page < 1 {
-		page = 1
-	}
-	if page > recordMaxPage {
-		page = recordMaxPage
-	}
-	return (page - 1) * recordPageSize
-}
-
-func ListRecordOrders(ctx context.Context, pool *pgxpool.Pool, status string, page int) ([]RecordOrder, bool, error) {
-	rows, err := pool.Query(ctx, recordListSelect, status, recordPageSize+1, recordPageOffset(page))
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, recordCursorListSelect, status, beforeID, recordPageSize+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -305,7 +328,7 @@ func ListRecordOrders(ctx context.Context, pool *pgxpool.Pool, status string, pa
 }
 
 func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (RecordOrder, []RecordCheckout, []RecordItem, []RecordItem, error) {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	tx, err := beginReadOnlyTimeoutTx(ctx, pool)
 	if err != nil {
 		return RecordOrder{}, nil, nil, nil, err
 	}
@@ -366,12 +389,18 @@ func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (Record
 	return o, checkouts, unpaid, unlinked, nil
 }
 
-func ListLedgerEvents(ctx context.Context, pool *pgxpool.Pool, kind string, page int) ([]LedgerEvent, bool, error) {
-	rows, err := pool.Query(ctx, `select id, occurred_at, kind, subject, detail, actor
+func ListLedgerEventsCursor(ctx context.Context, pool *pgxpool.Pool, kind string, beforeAt *time.Time, beforeID int64) ([]LedgerEvent, bool, error) {
+	tx, err := beginReadOnlyTimeoutTx(ctx, pool)
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `select id, occurred_at, kind, subject, detail, actor
 		from operation_events
 		where ($1 = '' or kind = $1)
+		  and ($2::timestamptz is null or (occurred_at, id) < ($2, $3))
 		order by occurred_at desc, id desc
-		limit $2 offset $3`, kind, recordPageSize+1, recordPageOffset(page))
+		limit $4`, kind, beforeAt, beforeID, recordPageSize+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -394,12 +423,16 @@ func ListLedgerEvents(ctx context.Context, pool *pgxpool.Pool, kind string, page
 	return out, hasNext, nil
 }
 
-func recordURL(base string, q url.Values, page int) string {
-	if page > 1 {
-		q.Set("page", strconv.Itoa(page))
+func recordCursorURL(base string, q url.Values, before string) string {
+	cloned := make(url.Values, len(q)+1)
+	for k, v := range q {
+		cloned[k] = v
 	}
-	if len(q) == 0 {
+	if before != "" {
+		cloned.Set("before", before)
+	}
+	if len(cloned) == 0 {
 		return base
 	}
-	return base + "?" + q.Encode()
+	return base + "?" + cloned.Encode()
 }

@@ -142,19 +142,24 @@
     {{if .Pours}}
     <div class="table-responsive">
       <table class="table table-hover align-middle mb-0">
-        <thead class="table-light"><tr><th>时间</th><th class="num">杯数</th><th class="num">毫升</th><th class="num">金额</th><th class="num">操作</th></tr></thead>
+        <thead class="table-light"><tr><th>时间</th><th>来源</th><th class="num">杯数</th><th class="num">毫升</th><th class="num">金额</th><th class="num">操作</th></tr></thead>
         <tbody>
         {{range .Pours}}
           <tr>
             <td class="text-muted">{{.PouredText}}</td>
+            <td><span class="badge {{if .CanVoid}}bg-secondary{{else}}bg-primary{{end}}">{{.SourceLabel}}</span></td>
             <td class="num">{{.Cups}}</td>
             <td class="num">{{.ML}}ml</td>
             <td class="num"><strong>{{.Amount}}</strong></td>
             <td class="num">
-              <form class="inline-form" method="post" action="/admin/pours/{{.ID}}/delete">
+              {{if and .CanVoid (not $.Keg.FinishedAt)}}
+              <form class="inline-form" method="post" action="/admin/pours/{{.ID}}/delete" onsubmit="return confirm('确定撤销这笔手工售出记录吗？');">
                 <input type="hidden" name="keg_id" value="{{.KegID}}">
                 <button class="button button--danger-soft button--sm" type="submit">撤销</button>
               </form>
+              {{else}}
+              <span class="text-muted small">{{if not .CanVoid}}POS 关联{{else}}已结桶{{end}}</span>
+              {{end}}
             </td>
           </tr>
         {{end}}
@@ -191,7 +196,7 @@
         </div>
         <div class="editor-field editor-wide">
           <label class="label" for="amount">金额（元）</label>
-          <input class="form-control" type="text" id="amount" name="amount" placeholder="45">
+          <input class="form-control" type="text" id="amount" name="amount" inputmode="decimal" pattern="^\d+(\.\d{1,2})?$" placeholder="45">
         </div>
       </div>
       <div class="mt-3">

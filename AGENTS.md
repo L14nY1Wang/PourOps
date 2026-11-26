@@ -21,21 +21,22 @@ platform (zero internal deps)
                     └── cmd/pourops/main.go
 ```
 
-- **启动链路**：`platform.Env` → `pgxpool` → `platform.Migrate`（`pg_advisory_lock(0x6e6f727468706965)` 逐文件事务，读取 `migrations.FS`）→ `auth.SeedBoss`（`users` 为空才需要 `BOSS_PASSWORD`）→ `settings.SettingsStore.Refresh` → `event.NewEventBus()` + `WebhookDispatcher.Attach` + `screen.NewHub(bus)` → `catalog.NewPosterStore(POSTER_DIR)`（+ 后台异步本地化历史远程酒标）→ `app.NewAssets()` + `app.NewRenderer(...)` + `app.NewHandler(...)` → `platform.CrossOriginProtect` → 5s 优雅关停（先关 HTTP 再排空异步事件队列）。
+- **启动链路**：`platform.Env` → `pgxpool` → `platform.Migrate`（`pg_advisory_lock(0x6e6f727468706965)` 逐文件事务，读取 `migrations.FS`）→ `auth.SeedBoss`（`users` 为空才需要 `BOSS_PASSWORD`）→ `settings.SettingsStore.Refresh` → `event.NewEventBus()` + `WebhookDispatcher.Attach` + `screen.NewHub(bus)` → `catalog.NewPosterStore(POSTER_DIR)`（+ 后台异步本地化历史远程酒标）→ `app.NewAssets()` + `app.NewRenderer(...)` + `app.NewHandler(...)` → `platform.CrossOriginProtect` → HTTP `ReadHeaderTimeout: 10s` / `IdleTimeout: 60s` → 5s 优雅关停（先关 HTTP 再排空异步事件队列）。
 - **前端与迁移单二进制内嵌**：`web/embed.go` 统一导出 `TemplatesFS`（`web/templates/{layouts,admin,pos,screen}`）与 `StaticFS`（`web/static/{brand,css,js,screen,vendor}`），`migrations/embed.go` 导出 `migrations.FS`。修改模板、静态资源或迁移脚本后直接 `go build ./cmd/pourops` 即可单二进制部署，无需保留源码目录。
 - **电视大屏平等归口**：电视页与后台/POS 平等作为页面模块，`web/templates/screen/screen.html` 由 `ui.Renderer.RenderShell(w, r, "screen/screen.html", "screen", &ScreenPage{})` 统一渲染（自动注入 `Brand` 与 `{{asset}}` 指纹）；本地兜底数据 `web/static/screen/playlist.json` 由 `screen.Service.PlaylistJSON` 从根 `web.StaticFS` 挂载提供（`/screen/playlist.json`）；Node 测试脚本位于 `web/tests/`（不被 `go:embed` 打进二进制）。
 - **编译期接口扩展点**（不引入运行时插件）：
   - `catalog.Codec` + `CodecRegistry`：历史酒单导入导出格式（系统设置中默认使用含 `catalog.json` + 本地酒标图片的 `.zip` 压缩包 `ZIPCodec`，内部保留 CSV / JSON 编解码器）。
   - `lookup.Provider` + `lookup.Service`：酒款自动检索与详情补充（默认按序聚合 `LocalCatalogProvider` 与 `JiuheProvider`，单源超时或失败降级为 warning）。
   - `pos.PaymentGateway`（默认 `ManualGateway`）与 `pos.ReceiptPrinter`（默认 `NoopPrinter`）：POS 结账渠道确认与提交后热敏小票打印扩展点。
-- **轻量进程内事件总线与异步 Webhook**：`event.EventBus` + `event.WebhookDispatcher`（HMAC-SHA256 `X-Bar-Signature` 签名、`settings.SettingsStore` 提供 URL/密钥/订阅事件、SSRF 基本校验、8s 超时 + 1 次重试）。领域事件（`screen.changed`、`beer.purchased`、`beer.tapped`、`keg.finished`、`order.paid`、`retail.low_stock`、`webhook.test`）**一律在数据库事务 `Commit` 之后发布**，绝不在未提交事务内发事件或做外网 I/O。
+- **轻量进程内事件总线与异步 Webhook**：`event.EventBus` + `event.WebhookDispatcher`（HMAC-SHA256 `X-Bar-Signature` 与带时间戳的 `X-Bar-Signature-V2` 签名、`settings.SettingsStore` 提供 URL/密钥/订阅事件、SSRF 网段封禁、5s 超时 + 1 次退避重试 + 连续失败熔断 5 次 / 30s）。领域事件（`screen.changed`、`beer.purchased`、`beer.tapped`、`keg.finished`、`order.paid`、`retail.low_stock`、`webhook.test`）**一律在数据库事务 `Commit` 之后发布**，绝不在未提交事务内发事件或做外网 I/O。
 - **销售只在结账时记账**：`order_items` 是暂存，`pos.PayItemsWithGateway`（`internal/pos/store.go`）单事务里锁订单行 → 锁未付明细行 → 落 `keg_pours` / `retail_sales` → 调用 `PaymentGateway.Settle` → 写 `payments` → 标 `paid_at` → 结清则 `closed_at`。概览盈亏口径因此无需回补。
 - **行锁顺序固定**：酒款行 → 桶行；订单行 → 明细行。加购/改量/结账共用 `lockOpenOrder` 串行。
 - **营运流水与业务同事务**：`platform.LogOperation`（`internal/platform/oplog.go`）写 `operation_events`，业务回滚流水一起没；操作人经 `platform.WithActor(ctx, username)` 透传，守卫层已塞好。
 - **会话失效靠 `auth_version`**：cookie 票据 `uid.ver.exp.mac` 绑版本号，改密码/启停 2FA/停用都 `auth_version+1` 一次性踢掉所有旧会话与登录挑战。
+- **Flash 提示走一次性 Cookie**：`platform.SetFlash` / `RedirectMsg` / `RedirectErr` 把提示写入 `bar_flash`（HttpOnly、SameSite=Lax、60s），`ui.Renderer` 渲染时 `PopFlash` 注入 `Layout.Msg/Err` 并删除 Cookie；跳转不再拼接 `?msg=`/`?err=`，避免日志泄漏与提示重放。
 - **`ConsumeSecondFactor` 锁约定**（`internal/auth/security.go`）：调用方必须先 `for update` 锁 `users` 行；它不开事务不提交；缺 `TWO_FACTOR_KEY` 或解密失败返回 error **绝不降级成单密码放行**。
 - **SSE 广播**：`screen.NewHub(bus)` 订阅 `event.EventScreenChanged` → `/api/screen/events` 推 `changed` → 电视页重拉 `/api/screen/playlist`；慢消费者丢信号，靠 60s 轮询兜底。
-- **成本核算口径与系统参数**：经营概览与数据分析（`internal/report/{overview,sales,pos_insights}.go`）统一按酒吧**营业日**（北京时间当日 `07:00` 至次日 `07:00`，`platform.BusinessDayCutoff`）统计，桶装按实际售出毫升占整桶 **100% 容量**摊销单杯成本（`cost_cents * ml / capacity_ml`）；桶装盈亏与定价测算（`internal/inventory/economics.go`）按 `store_settings` 可配置的 **默认可售比例**（默认 80%，预留损耗）与 **目标毛利率**（默认 50%）计算单杯有效成本、回本线与推荐价（`/admin/settings` BOSS 可调，`web/static/js/keg-pricing.js` 通过 `data-default-sellable` / `data-default-margin` 联动）。
+- **成本核算口径与系统参数**：经营概览与数据分析（`internal/report/{overview,sales,audience,pos_insights}.go`）统一按酒吧**营业日**（固定 UTC+8 的当日 `07:00` 至次日 `07:00`，`platform.BusinessDayCutoff`，SQL 不用 `Asia/Shanghai` 以免历史 DST 漂移）统计，桶装按实际售出毫升占整桶 **100% 容量**摊销单杯成本（`cost_cents * ml / capacity_ml`）；桶装盈亏与定价测算（`internal/inventory/economics.go`）按 `store_settings` 可配置的 **默认可售比例**（默认 80%，预留损耗）与 **目标毛利率**（默认 50%）计算单杯有效成本、回本线与推荐价（`/admin/settings` BOSS 可调，`web/static/js/keg-pricing.js` 通过 `data-default-sellable` / `data-default-margin` 联动）。
 - 记录页（`internal/report/records.go`）用 `RepeatableRead + ReadOnly` 单快照读同一批表做审计聚合。
 
 数据链：`beers 1—n kegs 1—n keg_pours`；`beer_catalog` 独立沉淀历史酒款资料（按 `lower(btrim(brewery)), lower(btrim(name))` 唯一去重）；`orders 1—n order_items / payments`；`order_items.kind` 多态指向 beer/retail（无外键）；`retail_sale_items` 故意不设 FK 存名称价格快照；`operation_events` 无外键纯台账；`store_settings` 保存品牌名/默认出酒率与毛利率/Webhook 配置；台位唯一性靠 partial index `orders_open_spot where closed_at is null`。
@@ -57,7 +58,7 @@ platform (zero internal deps)
 |`internal/inventory/`|酒桶进销存、开/结桶状态机、可配置桶装盈亏测算、零售 SKU 与出入库、业务事件发布|
 |`internal/pos/`|POS 台位/加减单品/拆单结账、`PaymentGateway` 与 `ReceiptPrinter` 扩展点|
 |`internal/report/`|经营概览、销售趋势、POS 分时段实收、销售订单与营运流水只读审计|
-|`migrations/`|`0001`–`0012` 启动时自跑，`schema_migrations` 记账（`embed.go` 导出 `migrations.FS`）|
+|`migrations/`|`0001`–`0013` 启动时自跑，`schema_migrations` 记账（`embed.go` 导出 `migrations.FS`）|
 |`web/`|全站前端唯一归口：`embed.go`（导出 `TemplatesFS`、`StaticFS`）、`templates/{layouts,admin,pos,screen}/`、`static/{brand,css,js,screen,vendor}/`、`tests/`（不进 embed）|
 
 ## Development Commands
@@ -77,6 +78,7 @@ TEST_DATABASE_URL='postgres://localhost:5432/bar_review_test?sslmode=disable' go
 # 前端 JS 回归（零依赖原生 Node）
 node web/tests/screen_test.mjs
 node web/tests/keg_pricing_test.mjs
+node web/tests/beer_lookup_test.mjs
 ```
 
 无 Makefile、无 CI、无 lint 配置；格式工具就是 `gofmt`，提交前 `gofmt -l .` 应为空。Go 版本钉在 1.24（`http.NewCrossOriginProtection` 不可用，CSRF 是手写中间件 `platform.CrossOriginProtect`，见 `internal/platform/middleware.go`），**不要随手升 `go` 指令**。
@@ -133,5 +135,5 @@ node web/tests/keg_pricing_test.mjs
 - **`t.Fatal` 禁止在子 goroutine 里调**（会 panic）：并发用例先在主 goroutine 算好参数，错误走 `chan error` 汇总——`internal/pos/checkout_integration_test.go` 是模板。
 - 各领域测试位于对应 `internal/<domain>/` 包内，`internal/app/app_test.go` 负责全 19 个模板（`ui.DefaultPageFiles`）的真实渲染（含 `{{asset}}` 指纹）与全路由冒烟测试。
 - 覆盖重点：结账原子性/幂等/并发/网关失败回滚、库存不足整单回滚、外单行 id 混入被忽略、开桶幂等、流水快照、2FA 重放/恢复码/封锁、迁移回滚幂等、`EventBus` + Webhook 签名与 SSRF 防护、可配置核算参数联动。
-- JS 与电视页回归：`node web/tests/keg_pricing_test.mjs`（6 组滑块与自定义默认值回归）与 `node web/tests/screen_test.mjs`（8 组电视酒单回归）。
+- JS 与电视页回归：`node web/tests/keg_pricing_test.mjs`（滑块与自定义默认值）、`node web/tests/screen_test.mjs`（电视酒单、金额/时价、请求时序与 SSE 退避）、`node web/tests/beer_lookup_test.mjs`（检索表单 userEdited 保护、选择候选后中止在途请求）。
 - 验收新 UI/流程：本机起服务 + 浏览器真实操作（登录→操作→看结果），不造页面状态。

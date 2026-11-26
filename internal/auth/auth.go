@@ -9,15 +9,20 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/platform"
@@ -129,38 +134,73 @@ func UserByName(ctx context.Context, pool *pgxpool.Pool, name string) (User, err
 	return scanUser(pool.QueryRow(ctx, userCols+` where lower(username)=lower($1)`, name))
 }
 
+func validateUsername(name string) (string, error) {
+	u := strings.TrimSpace(name)
+	if u == "" {
+		return "", platform.UserErr("用户名不能为空")
+	}
+	if utf8.RuneCountInString(u) > 32 {
+		return "", platform.UserErr("用户名最多 32 个字符")
+	}
+	for _, r := range u {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return "", platform.UserErr("用户名不能包含空白或控制字符")
+		}
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-' || r == '.' {
+			continue
+		}
+		return "", platform.UserErr("用户名只能包含字母、数字、中文及 ._ -")
+	}
+	return u, nil
+}
+
 // SaveUser 新增或修改账号；ID 为 0 时要求给密码，改账号时密码留空表示不改。
 func SaveUser(ctx context.Context, pool *pgxpool.Pool, u User, password string) (int64, error) {
-	u.Username = strings.TrimSpace(u.Username)
-	if u.Username == "" {
-		return 0, errors.New("用户名不能为空")
+	cleanName, err := validateUsername(u.Username)
+	if err != nil {
+		return 0, err
 	}
+	u.Username = cleanName
 	if !ui.ValidRole(u.Role) {
-		return 0, errors.New("角色不对")
+		return 0, platform.UserErr("角色不对")
 	}
 	if u.ID == 0 {
 		if len(password) < 6 {
-			return 0, errors.New("密码至少 6 位")
+			return 0, platform.UserErr("密码至少 6 位")
 		}
 		var id int64
 		err := pool.QueryRow(ctx, `insert into users (username, password_hash, role, active) values ($1,$2,$3,$4) returning id`,
 			u.Username, HashPassword(password), u.Role, u.Active).Scan(&id)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return 0, platform.UserErr("用户名已存在")
+		}
 		return id, err
 	}
 	if password != "" && len(password) < 6 {
-		return 0, errors.New("密码至少 6 位")
+		return 0, platform.UserErr("密码至少 6 位")
 	}
 	// 资料和密码合成一条 update：用户名冲突等失败时密码不会先被改掉。
 	hash := ""
 	if password != "" {
 		hash = HashPassword(password)
 	}
-	_, err := pool.Exec(ctx, `update users set username=$2, role=$3, active=$4,
+	tag, err := pool.Exec(ctx, `update users set username=$2, role=$3, active=$4,
 		password_hash=coalesce(nullif($5,''), password_hash),
 		auth_version = auth_version + case when $5 <> '' or active is distinct from $4 then 1 else 0 end
 		where id=$1`,
 		u.ID, u.Username, u.Role, u.Active, hash)
-	return u.ID, err
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return 0, platform.UserErr("用户名已存在")
+	}
+	if err != nil {
+		return 0, err
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, platform.UserErr("找不到这个账号")
+	}
+	return u.ID, nil
 }
 
 func DeleteUser(ctx context.Context, pool *pgxpool.Pool, id int64) error {
@@ -208,56 +248,143 @@ type loginThrottle struct {
 	hits   map[string]*throttleEntry
 	limit  int
 	window time.Duration
+	maxCap int
 }
 
 type throttleEntry struct {
 	n     int
 	start time.Time
+	last  time.Time
 }
 
-func newLoginThrottle() *loginThrottle {
-	return &loginThrottle{hits: make(map[string]*throttleEntry), limit: 20, window: 5 * time.Minute}
-}
-
-func (t *loginThrottle) allow(addr string) bool {
-	ip := addr
-	if host, _, err := net.SplitHostPort(addr); err == nil {
-		ip = host
+func newLoginThrottle(limit int, window time.Duration) *loginThrottle {
+	return &loginThrottle{
+		hits:   make(map[string]*throttleEntry),
+		limit:  limit,
+		window: window,
+		maxCap: 4096,
 	}
-	now := time.Now()
-	t.mu.Lock()
-	defer t.mu.Unlock()
+}
+
+func normalizeIPKey(addr netip.Addr) string {
+	addr = addr.Unmap()
+	if addr.Is6() {
+		return netip.PrefixFrom(addr, 64).Masked().String()
+	}
+	return addr.String()
+}
+
+func clientIPKey(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	if platform.TrustProxy() {
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+			if addr, err := netip.ParseAddr(xri); err == nil {
+				return normalizeIPKey(addr)
+			}
+		}
+		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
+			// 反代把真实来路追加在 XFF 最右侧；从右向左取首个合法 IP，防止客户端伪造最左头绕过限速。
+			parts := strings.Split(xff, ",")
+			for i := len(parts) - 1; i >= 0; i-- {
+				if cand := strings.TrimSpace(parts[i]); cand != "" {
+					if addr, err := netip.ParseAddr(cand); err == nil {
+						return normalizeIPKey(addr)
+					}
+				}
+			}
+		}
+	}
+	raw := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		raw = host
+	}
+	if addr, err := netip.ParseAddr(raw); err == nil {
+		return normalizeIPKey(addr)
+	}
+	return raw
+}
+
+func (t *loginThrottle) pruneLocked(now time.Time) {
 	for k, e := range t.hits {
 		if now.Sub(e.start) > t.window {
 			delete(t.hits, k)
 		}
 	}
-	if len(t.hits) >= 4096 {
+}
+
+func (t *loginThrottle) allowCheck(key string) bool {
+	if t == nil {
 		return true
 	}
-	e := t.hits[ip]
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneLocked(now)
+	e := t.hits[key]
 	if e == nil {
-		t.hits[ip] = &throttleEntry{n: 1, start: now}
 		return true
 	}
-	e.n++
-	return e.n <= t.limit
+	return e.n < t.limit
+}
+
+func (t *loginThrottle) recordFailure(key string) {
+	if t == nil {
+		return
+	}
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneLocked(now)
+	if e := t.hits[key]; e != nil {
+		e.n++
+		e.last = now
+		return
+	}
+	// 表满时淘汰最久未更新条目而非无条件放行，防止洪泛填满表后绕过限速。
+	for len(t.hits) >= t.maxCap {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, e := range t.hits {
+			if oldestKey == "" || e.last.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = e.last
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(t.hits, oldestKey)
+	}
+	t.hits[key] = &throttleEntry{n: 1, start: now, last: now}
+}
+
+func (t *loginThrottle) reset(key string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	delete(t.hits, key)
+	t.mu.Unlock()
 }
 
 // Service 管理登录会话、角色守卫、账号列表与两步验证安全设置。
 type Service struct {
-	pool     *pgxpool.Pool
-	secret   []byte
-	renderer *ui.Renderer
-	limiter  *loginThrottle
+	pool        *pgxpool.Pool
+	secret      []byte
+	renderer    *ui.Renderer
+	limiter     *loginThrottle
+	acctLimiter *loginThrottle
 }
 
 func NewService(pool *pgxpool.Pool, secret []byte, renderer *ui.Renderer) *Service {
 	return &Service{
-		pool:     pool,
-		secret:   secret,
-		renderer: renderer,
-		limiter:  newLoginThrottle(),
+		pool:        pool,
+		secret:      secret,
+		renderer:    renderer,
+		limiter:     newLoginThrottle(20, 5*time.Minute),
+		acctLimiter: newLoginThrottle(10, 5*time.Minute),
 	}
 }
 
@@ -271,10 +398,12 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /admin/users/{id}/edit", s.RequireBoss(s.UserEdit))
 	mux.HandleFunc("POST /admin/users", s.RequireBoss(s.UserSave))
 	mux.HandleFunc("POST /admin/users/{id}/toggle", s.RequireBoss(s.UserToggle))
+	mux.HandleFunc("POST /admin/users/{id}/reset-2fa", s.RequireBoss(s.UserReset2FA))
 	mux.HandleFunc("POST /admin/users/{id}/delete", s.RequireBoss(s.UserDelete))
 
 	mux.HandleFunc("GET /account/security", s.RequireAny(s.AccountSecurity))
 	mux.HandleFunc("POST /account/security/password", s.RequireAny(s.AccountChangePassword))
+	mux.HandleFunc("POST /account/security/logout-all", s.RequireAny(s.AccountLogoutAll))
 	mux.HandleFunc("POST /account/security/2fa/setup", s.RequireAny(s.AccountStart2FA))
 	mux.HandleFunc("POST /account/security/2fa/enable", s.RequireAny(s.AccountEnable2FA))
 	mux.HandleFunc("POST /account/security/2fa/disable", s.RequireAny(s.AccountDisable2FA))
@@ -320,7 +449,7 @@ func (s *Service) setChallenge(w http.ResponseWriter, r *http.Request, u User) {
 	http.SetCookie(w, &http.Cookie{
 		Name: ChallengeCookie, Value: s.signToken("challenge", u.ID, u.AuthVersion, time.Now().Add(challengeTTL)),
 		Path: "/admin/login", MaxAge: int(challengeTTL.Seconds()),
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: platform.IsSecureRequest(r),
 	})
 }
 
@@ -335,14 +464,19 @@ func (s *Service) challenge(r *http.Request) (uid, ver int64, ok bool) {
 func clearCookie(w http.ResponseWriter, r *http.Request, name, path string) {
 	http.SetCookie(w, &http.Cookie{
 		Name: name, Value: "", Path: path, MaxAge: -1,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: platform.IsSecureRequest(r),
 	})
 }
 
-// CurrentUser 解析 cookie 并回库查账号；停用、删号或 auth_version 变了都算没登录。
+type ctxUserKey struct{}
+
+// CurrentUser 解析 cookie 并优先复用本次请求上下文内已查库的 User，减少重复回库。
 func (s *Service) CurrentUser(r *http.Request) *User {
 	if s == nil || s.pool == nil || r == nil {
 		return nil
+	}
+	if cached, ok := r.Context().Value(ctxUserKey{}).(*User); ok {
+		return cached
 	}
 	c, err := r.Cookie(SessionCookie)
 	if err != nil {
@@ -378,14 +512,15 @@ func (s *Service) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, u.Landing(), http.StatusSeeOther)
 			return
 		}
-		next(w, r.WithContext(platform.WithActor(r.Context(), u.Username)))
+		ctx := context.WithValue(platform.WithActor(r.Context(), u.Username), ctxUserKey{}, u)
+		next(w, r.WithContext(ctx))
 	}
 }
 
 func (s *Service) RequireBoss(next http.HandlerFunc) http.HandlerFunc {
 	return s.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if u := s.CurrentUser(r); u == nil || !u.IsBoss() {
-			http.Redirect(w, r, "/admin/?msg="+platform.URLMsg("只有 BOSS 能管账号"), http.StatusSeeOther)
+			platform.RedirectErr(w, r, "/admin/", "只有 BOSS 能管账号")
 			return
 		}
 		next(w, r)
@@ -399,7 +534,8 @@ func (s *Service) RequireAny(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 			return
 		}
-		next(w, r.WithContext(platform.WithActor(r.Context(), u.Username)))
+		ctx := context.WithValue(platform.WithActor(r.Context(), u.Username), ctxUserKey{}, u)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -459,35 +595,56 @@ func (s *Service) LoginPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	switch r.FormValue("action") {
-	case "2fa":
-		s.loginSecondFactor(w, r)
-		return
-	case "back":
+	if r.FormValue("action") == "back" {
 		clearCookie(w, r, ChallengeCookie, "/admin/login")
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
-	if s.limiter != nil && !s.limiter.allow(r.RemoteAddr) {
-		w.WriteHeader(http.StatusTooManyRequests)
+	ipKey := clientIPKey(r)
+	if !s.limiter.allowCheck(ipKey) {
 		if s.renderer != nil {
-			s.renderer.Render(w, r, "admin/login.html", &loginPageData{Layout: ui.Layout{Title: "登录", Auth: true, Err: "尝试太频繁，请稍后再试"}})
+			s.renderer.RenderStatus(w, r, http.StatusTooManyRequests, "admin/login.html", &loginPageData{Layout: ui.Layout{Title: "登录", Auth: true, Err: "尝试太频繁，请稍后再试"}})
+		} else {
+			w.WriteHeader(http.StatusTooManyRequests)
 		}
+		return
+	}
+	if r.FormValue("action") == "2fa" {
+		s.loginSecondFactor(w, r, ipKey)
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("username"))
 	pw := r.FormValue("password")
+	acctKey := "u:" + strings.ToLower(name)
+	if name != "" && !s.acctLimiter.allowCheck(acctKey) {
+		if s.renderer != nil {
+			s.renderer.RenderStatus(w, r, http.StatusTooManyRequests, "admin/login.html", &loginPageData{Layout: ui.Layout{Title: "登录", Auth: true, Err: "该账号尝试太频繁，请稍后再试"}, Username: name})
+		} else {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}
+		return
+	}
 	if name == "" || len(name) > 64 || pw == "" || len(pw) > 1024 {
+		s.limiter.recordFailure(ipKey)
+		if name != "" {
+			s.acctLimiter.recordFailure(acctKey)
+		}
 		s.loginFailed(w, r, name, "用户名或密码不对")
 		return
 	}
 	u, err := UserByName(r.Context(), s.pool, name)
 	if err != nil {
 		CheckPassword(pw, dummyHash)
+		s.limiter.recordFailure(ipKey)
+		s.acctLimiter.recordFailure(acctKey)
 		s.loginFailed(w, r, name, "用户名或密码不对")
 		return
 	}
-	if !u.Active || !CheckPassword(pw, u.PasswordHash) {
+	// 停用账号同样走完整 PBKDF2 校验耗时，消除时间侧信道。
+	pwOK := CheckPassword(pw, u.PasswordHash)
+	if !pwOK || !u.Active {
+		s.limiter.recordFailure(ipKey)
+		s.acctLimiter.recordFailure(acctKey)
 		s.loginFailed(w, r, name, "用户名或密码不对")
 		return
 	}
@@ -502,43 +659,63 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.limiter.reset(ipKey)
+	s.acctLimiter.reset(acctKey)
 	s.issueSession(w, r, u)
 	http.Redirect(w, r, u.Landing(), http.StatusSeeOther)
 }
 
 func (s *Service) loginFailed(w http.ResponseWriter, r *http.Request, name, msg string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusUnauthorized)
 	if s.renderer != nil {
-		s.renderer.Render(w, r, "admin/login.html", &loginPageData{
+		s.renderer.RenderStatus(w, r, http.StatusUnauthorized, "admin/login.html", &loginPageData{
 			Layout:   ui.Layout{Title: "登录", Auth: true, Err: msg},
 			Username: name,
 		})
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
 }
 
-func (s *Service) loginSecondFactor(w http.ResponseWriter, r *http.Request) {
+func (s *Service) loginSecondFactor(w http.ResponseWriter, r *http.Request, ipKey string) {
 	noStore(w)
 	uid, ver, ok := s.challenge(r)
 	if !ok {
+		s.limiter.recordFailure(ipKey)
 		clearCookie(w, r, ChallengeCookie, "/admin/login")
 		s.loginFailed(w, r, "", "验证已过期，请重新登录")
 		return
 	}
+	acctKey := fmt.Sprintf("id:%d", uid)
+	if !s.acctLimiter.allowCheck(acctKey) {
+		if s.renderer != nil {
+			s.renderer.RenderStatus(w, r, http.StatusTooManyRequests, "admin/login.html", &loginPageData{
+				Layout:    ui.Layout{Title: "两步验证", Auth: true, Err: "验证尝试太频繁，请稍后再试"},
+				TwoFactor: true,
+			})
+		} else {
+			w.WriteHeader(http.StatusTooManyRequests)
+		}
+		return
+	}
 	code := strings.TrimSpace(r.FormValue("code"))
 	if code == "" || len(code) > 64 {
-		w.WriteHeader(http.StatusUnauthorized)
+		s.limiter.recordFailure(ipKey)
+		s.acctLimiter.recordFailure(acctKey)
 		if s.renderer != nil {
-			s.renderer.Render(w, r, "admin/login.html", &loginPageData{
+			s.renderer.RenderStatus(w, r, http.StatusUnauthorized, "admin/login.html", &loginPageData{
 				Layout:    ui.Layout{Title: "两步验证", Auth: true, Err: "请输入动态码或恢复码"},
 				TwoFactor: true,
 			})
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
 		}
 		return
 	}
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
+		log.Printf("2fa begin tx: %v", err)
 		http.Error(w, "验证暂时不可用，请稍后再试", http.StatusInternalServerError)
 		return
 	}
@@ -558,22 +735,36 @@ func (s *Service) loginSecondFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !passed {
+		var newVer int64
+		_ = tx.QueryRow(ctx, `select auth_version from users where id=$1`, uid).Scan(&newVer)
 		if err := tx.Commit(ctx); err != nil {
 			log.Printf("两步验证失败计数落库: %v", err)
 		}
-		w.WriteHeader(http.StatusUnauthorized)
+		s.limiter.recordFailure(ipKey)
+		s.acctLimiter.recordFailure(acctKey)
+		if newVer > u.AuthVersion {
+			clearCookie(w, r, ChallengeCookie, "/admin/login")
+			s.loginFailed(w, r, "", "失败次数过多，验证挑战已作废，请重新登录")
+			return
+		}
 		if s.renderer != nil {
-			s.renderer.Render(w, r, "admin/login.html", &loginPageData{
+			s.renderer.RenderStatus(w, r, http.StatusUnauthorized, "admin/login.html", &loginPageData{
 				Layout:    ui.Layout{Title: "两步验证", Auth: true, Err: "动态码或恢复码不对"},
 				TwoFactor: true,
 			})
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
 		}
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
+		log.Printf("2fa commit: %v", err)
 		http.Error(w, "验证暂时不可用，请稍后再试", http.StatusInternalServerError)
 		return
 	}
+	s.limiter.reset(ipKey)
+	s.acctLimiter.reset(acctKey)
+	s.acctLimiter.reset("u:" + strings.ToLower(u.Username))
 	s.issueSession(w, r, u)
 	http.Redirect(w, r, u.Landing(), http.StatusSeeOther)
 }
@@ -582,7 +773,7 @@ func (s *Service) issueSession(w http.ResponseWriter, r *http.Request, u User) {
 	http.SetCookie(w, &http.Cookie{
 		Name: SessionCookie, Value: s.SignSession(u.ID, u.AuthVersion, time.Now().Add(sessionTTL)),
 		Path: "/", MaxAge: int(sessionTTL.Seconds()),
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: platform.IsSecureRequest(r),
 	})
 	clearCookie(w, r, ChallengeCookie, "/admin/login")
 }
@@ -603,7 +794,7 @@ func (s *Service) UsersList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.renderer.Render(w, r, "admin/users.html", &usersPageData{
-		Layout: ui.Layout{Title: "账号", Nav: "users", Msg: r.URL.Query().Get("msg")},
+		Layout: ui.Layout{Title: "账号", Nav: "users"},
 		Users:  users,
 	})
 }
@@ -637,27 +828,37 @@ func (s *Service) UserSave(w http.ResponseWriter, r *http.Request) {
 		Role:     r.FormValue("role"),
 		Active:   r.FormValue("active") != "",
 	}
+	renderFail := func(status int, msg string) {
+		if s.renderer != nil {
+			s.renderer.RenderStatus(w, r, status, "admin/user_form.html", &userFormPageData{
+				Layout: ui.Layout{Title: "账号", Nav: "users", Err: msg},
+				User:   u,
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(status)
+	}
 	if me != nil && id == me.ID && (u.Role != RoleBoss || !u.Active) {
-		s.renderer.Render(w, r, "admin/user_form.html", &userFormPageData{
-			Layout: ui.Layout{Title: "编辑账号", Nav: "users", Err: "不能改掉自己的 BOSS 角色或停用自己"},
-			User:   u,
-		})
+		renderFail(http.StatusBadRequest, "不能改掉自己的 BOSS 角色或停用自己")
 		return
 	}
 	if _, err := SaveUser(r.Context(), s.pool, u, r.FormValue("password")); err != nil {
-		s.renderer.Render(w, r, "admin/user_form.html", &userFormPageData{
-			Layout: ui.Layout{Title: "账号", Nav: "users", Err: err.Error()},
-			User:   u,
-		})
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			renderFail(http.StatusBadRequest, msg)
+			return
+		}
+		log.Printf("save user (%d): %v", id, err)
+		renderFail(http.StatusInternalServerError, "保存账号失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/users?msg="+platform.URLMsg("账号已保存"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/users", "账号已保存")
 }
 
 func (s *Service) UserToggle(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if me := s.CurrentUser(r); me != nil && me.ID == id {
-		http.Redirect(w, r, "/admin/users?msg="+platform.URLMsg("不能停用自己"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/users", "不能停用自己")
 		return
 	}
 	if err := ToggleUser(r.Context(), s.pool, id); err != nil {
@@ -665,13 +866,35 @@ func (s *Service) UserToggle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "操作失败", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/admin/users?msg="+platform.URLMsg("状态已切换"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/users", "状态已切换")
+}
+
+func (s *Service) UserReset2FA(w http.ResponseWriter, r *http.Request) {
+	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	var username string
+	err := s.pool.QueryRow(r.Context(), `
+		update users set totp_secret='', totp_last_step=-1, recovery_hashes='{}',
+		                 otp_failures=0, otp_lock_level=0, otp_blocked_until=null,
+		                 auth_version=auth_version+1
+		where id=$1
+		returning username`, id).Scan(&username)
+	if errors.Is(err, pgx.ErrNoRows) {
+		platform.RedirectErr(w, r, "/admin/users", "找不到这个账号")
+		return
+	}
+	if err != nil {
+		log.Printf("reset 2fa user (%d): %v", id, err)
+		platform.RedirectErr(w, r, "/admin/users", "重置两步验证失败，请稍后重试")
+		return
+	}
+	log.Printf("security audit: admin %q reset 2fa for user %d (%q)", platform.OperationActor(r.Context()), id, username)
+	platform.RedirectMsg(w, r, "/admin/users", fmt.Sprintf("已重置账号「%s」的两步验证", username))
 }
 
 func (s *Service) UserDelete(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if me := s.CurrentUser(r); me != nil && me.ID == id {
-		http.Redirect(w, r, "/admin/users?msg="+platform.URLMsg("不能删自己"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/users", "不能删自己")
 		return
 	}
 	if err := DeleteUser(r.Context(), s.pool, id); err != nil {
@@ -679,7 +902,7 @@ func (s *Service) UserDelete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "删除失败", http.StatusInternalServerError)
 		return
 	}
-	http.Redirect(w, r, "/admin/users?msg="+platform.URLMsg("账号已删除"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/users", "账号已删除")
 }
 
 // LookupUserForTest 仅用于包内或关联测试验证。

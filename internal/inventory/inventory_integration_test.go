@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -263,7 +262,7 @@ func TestDeleteBeerForbiddenWhenHasPours(t *testing.T) {
 
 	if err := catalog.DeleteBeer(ctx, pool, soldBeerID); err == nil {
 		t.Fatal("有售出记录的酒款不应被删除")
-	} else if msg, ok := platform.UserErrorMessage(err); !ok || msg != "有售出记录的酒款不能删除，下架保留即可" {
+	} else if msg, ok := platform.UserErrorMessage(err); !ok || msg != "已有酒桶或售出记录的酒款不能删除，下架保留即可" {
 		t.Fatalf("错误信息不对: ok=%v err=%v", ok, err)
 	}
 
@@ -271,9 +270,9 @@ func TestDeleteBeerForbiddenWhenHasPours(t *testing.T) {
 	req.SetPathValue("id", fmt.Sprintf("%d", soldBeerID))
 	rec := httptest.NewRecorder()
 	svc.DeleteBeerHandler(rec, req)
-	loc, _ := url.QueryUnescape(rec.Header().Get("Location"))
-	if rec.Code != http.StatusSeeOther || !strings.Contains(loc, "有售出记录的酒款不能删除") {
-		t.Fatalf("HTTP 删除应跳转错误提示，实际 code=%d loc=%q", rec.Code, loc)
+	_, errFlash := platform.ReadFlashCookies(rec.Result().Cookies())
+	if rec.Code != http.StatusSeeOther || !strings.Contains(errFlash, "已有酒桶或售出记录的酒款不能删除") {
+		t.Fatalf("HTTP 删除应带 Flash 错误提示，实际 code=%d errFlash=%q loc=%q", rec.Code, errFlash, rec.Header().Get("Location"))
 	}
 
 	// 验证酒款与售出记录完好保留。
@@ -292,12 +291,18 @@ func TestDeleteBeerForbiddenWhenHasPours(t *testing.T) {
 		t.Fatalf("不存在酒款错误不对: ok=%v err=%v", ok, err)
 	}
 
-	// 没有售出记录的酒款（即使有未售出桶）允许删除。
-	unusedBeerID := invSeedBeer(t, pool, "无售出可删")
+	// 仅进货未开桶（有 kegs 行但 0 pours）的酒款同样禁止删除，防止级联丢成本。
+	unusedBeerID := invSeedBeer(t, pool, "有未开桶禁删")
 	if err := PurchaseKegs(ctx, pool, unusedBeerID, 1, 20000, 100000); err != nil {
 		t.Fatal(err)
 	}
-	if err := catalog.DeleteBeer(ctx, pool, unusedBeerID); err != nil {
-		t.Fatalf("无售出记录酒款应允许删除: %v", err)
+	if err := catalog.DeleteBeer(ctx, pool, unusedBeerID); err == nil {
+		t.Fatal("存在进货未开桶记录的酒款不应允许删除")
+	}
+
+	// 没有任何酒桶记录的空酒款允许删除并写入 OpStock 流水。
+	cleanBeerID := invSeedBeer(t, pool, "无桶可删")
+	if err := catalog.DeleteBeer(ctx, pool, cleanBeerID); err != nil {
+		t.Fatalf("无任何酒桶记录酒款应允许删除: %v", err)
 	}
 }

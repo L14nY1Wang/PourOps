@@ -25,13 +25,34 @@ type AssetManifest struct {
 	fileServer  http.Handler
 }
 
+type noDirFS struct {
+	fsys fs.FS
+}
+
+func (d noDirFS) Open(name string) (fs.File, error) {
+	f, err := d.fsys.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		_ = f.Close()
+		return nil, fs.ErrNotExist
+	}
+	return f, nil
+}
+
 // NewAssetManifest 基于以 static 为根的 fs.FS 构建清单。
 func NewAssetManifest(staticRoot fs.FS) (*AssetManifest, error) {
 	m := &AssetManifest{
 		staticRoot: staticRoot,
 		urls:       make(map[string]string),
 		fileHashes: make(map[string]string),
-		fileServer: http.StripPrefix("/static/", http.FileServer(http.FS(staticRoot))),
+		fileServer: http.StripPrefix("/static/", http.FileServer(http.FS(noDirFS{staticRoot}))),
 	}
 
 	// 1. 拼接 css/*.css
@@ -116,8 +137,14 @@ func (m *AssetManifest) Handler() http.Handler {
 			http.ServeContent(w, r, "admin.bundle.css", time.Time{}, bytes.NewReader(m.adminBundle))
 			return
 		}
-		if h, ok := m.fileHashes[p]; ok && r.URL.Query().Get("v") == h {
-			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		if h, ok := m.fileHashes[p]; ok {
+			etag := `"` + h + `"`
+			w.Header().Set("ETag", etag)
+			if r.URL.Query().Get("v") == h {
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			} else {
+				w.Header().Set("Cache-Control", "no-cache")
+			}
 		}
 		m.fileServer.ServeHTTP(w, r)
 	})

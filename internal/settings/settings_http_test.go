@@ -115,7 +115,7 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 	addReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recAdd := httptest.NewRecorder()
 	svc.AddCategory(recAdd, addReq)
-	if recAdd.Code != http.StatusSeeOther || strings.Contains(recAdd.Header().Get("Location"), "err=") {
+	if _, errMsg := platform.ReadFlashCookies(recAdd.Result().Cookies()); recAdd.Code != http.StatusSeeOther || errMsg != "" {
 		t.Fatalf("AddCategory failed: code=%d loc=%q", recAdd.Code, recAdd.Header().Get("Location"))
 	}
 	if cats := store.BeerCategories(); cats[len(cats)-1] != "赛松" {
@@ -126,7 +126,7 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 	dupReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recDup := httptest.NewRecorder()
 	svc.AddCategory(recDup, dupReq)
-	if !strings.Contains(recDup.Header().Get("Location"), "err=") {
+	if _, errMsg := platform.ReadFlashCookies(recDup.Result().Cookies()); errMsg == "" {
 		t.Fatalf("duplicate category ipa should redirect with err, got %q", recDup.Header().Get("Location"))
 	}
 
@@ -153,7 +153,7 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 		delReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		recDel := httptest.NewRecorder()
 		svc.DeleteCategory(recDel, delReq)
-		if strings.Contains(recDel.Header().Get("Location"), "err=") {
+		if _, errMsg := platform.ReadFlashCookies(recDel.Result().Cookies()); errMsg != "" {
 			t.Fatalf("DeleteCategory(%q) unexpected err: %q", cat, recDel.Header().Get("Location"))
 		}
 	}
@@ -161,7 +161,7 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 	lastReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recLast := httptest.NewRecorder()
 	svc.DeleteCategory(recLast, lastReq)
-	if !strings.Contains(recLast.Header().Get("Location"), "err=") || len(store.BeerCategories()) != 1 {
+	if _, errMsg := platform.ReadFlashCookies(recLast.Result().Cookies()); errMsg == "" || len(store.BeerCategories()) != 1 {
 		t.Fatalf("deleting last category must fail cleanly, loc=%q cats=%v", recLast.Header().Get("Location"), store.BeerCategories())
 	}
 
@@ -197,7 +197,7 @@ func TestSettingsHTTPSaveGeneralAndWebhookIsolated(t *testing.T) {
 	reqGen.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recGen := httptest.NewRecorder()
 	svc.SaveGeneral(recGen, reqGen)
-	if recGen.Code != http.StatusSeeOther || strings.Contains(recGen.Header().Get("Location"), "err=") {
+	if _, errMsg := platform.ReadFlashCookies(recGen.Result().Cookies()); recGen.Code != http.StatusSeeOther || errMsg != "" {
 		t.Fatalf("SaveGeneral status=%d loc=%q", recGen.Code, recGen.Header().Get("Location"))
 	}
 	cfg := store.Get()
@@ -237,7 +237,7 @@ func TestSettingsHTTPSaveGeneralAndWebhookIsolated(t *testing.T) {
 	reqWH.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recWH := httptest.NewRecorder()
 	svc.SaveWebhook(recWH, reqWH)
-	if recWH.Code != http.StatusSeeOther || strings.Contains(recWH.Header().Get("Location"), "err=") {
+	if _, errMsg := platform.ReadFlashCookies(recWH.Result().Cookies()); recWH.Code != http.StatusSeeOther || errMsg != "" {
 		t.Fatalf("SaveWebhook status=%d loc=%q", recWH.Code, recWH.Header().Get("Location"))
 	}
 	cfg = store.Get()

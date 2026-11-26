@@ -296,7 +296,8 @@
 <script>
 (function () {
   var q = new URLSearchParams(location.search);
-  var SOURCES = [q.get('src'), '/api/screen/playlist', 'playlist.json'].filter(Boolean);
+  var allowDemo = q.get('demo') === '1' || q.get('demo') === 'true';
+  var SOURCES = [q.get('src'), '/api/screen/playlist', allowDemo ? 'playlist.json' : null].filter(Boolean);
   var EVENTS = q.get('events') || '/api/screen/events';
   var CACHE_KEY = 'screen:menu:v3';
 
@@ -309,6 +310,12 @@
   var data = null;
   var signature = '';
   var es = null;
+  var sseDebounce = null;
+  var sseRetry = null;
+  var SSE_RETRY_DELAYS = [5000, 15000, 60000];
+  var sseRetryStep = 0;
+  var loadSeq = 0;
+  var loadCtrl = null;
 
   /* 风格 → 顶栏色条。9 种精酿默认分类独立高区分度配色 + 兼容旧分类 + 自定义分类稳定取色 */
   var PALETTE = ['#a3e635', '#2dd4bf', '#818cf8', '#e879f9', '#38bdf8', '#fbbf24', '#fb7185', '#34d399', '#c084fc', '#f97316'];
@@ -383,13 +390,19 @@
     return isFinite(n) ? n : null;
   }
 
+  function normalizePriceText(raw) {
+    var s = raw != null ? String(raw).trim() : '';
+    if (!s || /^¥\s*0+(?:\.0+)?(?:\s*\/\s*.*)?$/i.test(s)) return '';
+    return s;
+  }
+
   function normalizeCups(raw) {
     if (!Array.isArray(raw)) return [];
     return raw.map(function (c) {
       if (!c) return null;
       var ml = num(c.ml);
       var size = c.size != null ? String(c.size).trim() : (ml != null ? ml + 'ml' : '');
-      var price = c.price != null ? String(c.price).trim() : '';
+      var price = normalizePriceText(c.price);
       if (!size && !price) return null;
       return { ml: ml, size: size, price: price };
     }).filter(Boolean);
@@ -407,7 +420,7 @@
       items: items.map(function (s, i) {
         var cups = normalizeCups(s.cups);
         var size = (s.size != null && String(s.size).trim()) || (cups.length === 1 ? cups[0].size : '');
-        var price = (s.price != null && String(s.price).trim()) || (cups.length === 1 ? cups[0].price : '');
+        var price = normalizePriceText(s.price) || (cups.length === 1 ? cups[0].price : '');
         return {
           no: s.no != null ? String(s.no) : ('0' + (i + 1)).slice(-2),
           brewery: s.brewery || '',
@@ -508,7 +521,7 @@
         var priceWrap = el('div', s.cups.length === 2 ? 'price price--multi price--2' : 'price price--multi');
         s.cups.forEach(function (cup) {
           var tier = el('div', 'cup-tier');
-          tier.appendChild(el('b', null, cup.price || '—'));
+          tier.appendChild(el('b', null, cup.price || '时价'));
           tier.appendChild(el('small', null, cup.size || '—'));
           priceWrap.appendChild(tier);
         });
@@ -588,27 +601,41 @@
     document.body.classList.toggle('empty', !next.items.length);
     hintEl.textContent = next.items.length ? '正在同步酒单' : '暂无酒款';
 
-    preload(next.items);
-    if (changed) render();
+    if (changed) {          /* 只在酒单真的变了才预载图片 */
+      preload(next.items);
+      render();
+    }
     return true;
   }
 
   function load() {
+    var seq = ++loadSeq;
+    if (loadCtrl && typeof loadCtrl.abort === 'function') {
+      try { loadCtrl.abort(); } catch (e) {}
+    }
+    loadCtrl = (typeof AbortController === 'function') ? new AbortController() : null;
     var i = 0;
     (function attempt() {
+      if (seq !== loadSeq) return;
       if (i >= SOURCES.length) { giveUp(); return; }
       var url = SOURCES[i++];
-      fetch(url, { cache: 'no-store' })
+      var opts = { cache: 'no-store' };
+      if (loadCtrl) opts.signal = loadCtrl.signal;
+      fetch(url, opts)
         .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
         .then(function (json) {
+          if (seq !== loadSeq) return;
           var ok = apply(json);                        /* 先上屏，缓存坏了不影响展示 */
-          if (ok) {
+          if (ok && url.indexOf('/api/') !== -1) {
             try { localStorage.setItem(CACHE_KEY, JSON.stringify(json)); } catch (e) {}
           }
           if (url.indexOf('/api/') !== -1) subscribe();   /* 静态文件没有 SSE */
           if (!ok) throw new Error('bad payload');         /* 结构不对：换下一个源 */
         })
-        .catch(attempt);
+        .catch(function (err) {
+          if (seq !== loadSeq || (err && err.name === 'AbortError')) return;
+          attempt();
+        });
     })();
   }
 
@@ -625,8 +652,24 @@
     if (es || !('EventSource' in window)) return;
     try {
       es = new EventSource(EVENTS);
-      es.onmessage = function () { load(); };
-      es.onerror = function () { es.close(); es = null; };
+      es.onopen = function () { sseRetryStep = 0; };
+      es.onmessage = function () {
+        sseRetryStep = 0;
+        clearTimeout(sseDebounce);
+        sseDebounce = setTimeout(load, 250);
+      };
+      es.onerror = function () {
+        if (es) es.close();
+        es = null;
+        if (sseRetry) return;
+        /* SSE 断了就按 5s → 15s → 60s 退避重连，不用干等到下一次轮询 */
+        var delay = SSE_RETRY_DELAYS[Math.min(sseRetryStep, SSE_RETRY_DELAYS.length - 1)];
+        sseRetryStep += 1;
+        sseRetry = setTimeout(function () {
+          sseRetry = null;
+          subscribe();
+        }, delay);
+      };
     } catch (e) { es = null; }
   }
 

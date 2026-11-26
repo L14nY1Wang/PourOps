@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -227,12 +228,12 @@ func (s *Service) ConsumeSecondFactor(ctx context.Context, tx pgx.Tx, id int64, 
 	var secret string
 	var lastStep int64
 	var hashes []string
-	var failures int
+	var failures, lockLevel int
 	var blocked *time.Time
 	err := tx.QueryRow(ctx,
-		`select totp_secret, totp_last_step, recovery_hashes, otp_failures, otp_blocked_until
+		`select totp_secret, totp_last_step, recovery_hashes, otp_failures, otp_lock_level, otp_blocked_until
 		   from users where id=$1`, id).
-		Scan(&secret, &lastStep, &hashes, &failures, &blocked)
+		Scan(&secret, &lastStep, &hashes, &failures, &lockLevel, &blocked)
 	if err != nil {
 		return false, err
 	}
@@ -249,7 +250,7 @@ func (s *Service) ConsumeSecondFactor(ctx context.Context, tx pgx.Tx, id int64, 
 				if subtle.ConstantTimeCompare([]byte(h), []byte(got)) == 1 {
 					_, err := tx.Exec(ctx,
 						`update users set recovery_hashes = array_remove(recovery_hashes, $2),
-						        otp_failures = 0, otp_blocked_until = null where id=$1`, id, h)
+						        otp_failures = 0, otp_lock_level = 0, otp_blocked_until = null where id=$1`, id, h)
 					return err == nil, err
 				}
 			}
@@ -267,7 +268,7 @@ func (s *Service) ConsumeSecondFactor(ctx context.Context, tx pgx.Tx, id int64, 
 		}
 		if ok && step > lastStep {
 			_, err := tx.Exec(ctx,
-				`update users set totp_last_step = $2, otp_failures = 0, otp_blocked_until = null where id=$1`,
+				`update users set totp_last_step = $2, otp_failures = 0, otp_lock_level = 0, otp_blocked_until = null where id=$1`,
 				id, step)
 			return err == nil, err
 		}
@@ -275,22 +276,44 @@ func (s *Service) ConsumeSecondFactor(ctx context.Context, tx pgx.Tx, id int64, 
 
 	failures++
 	var until any
+	bumpAuth := 0
 	if failures >= otpMaxFailures {
-		until = time.Now().Add(otpBlockFor)
 		failures = 0
+		lockLevel++
+		var dur time.Duration
+		switch {
+		case lockLevel <= 1:
+			dur = otpBlockFor
+		case lockLevel == 2:
+			dur = 2 * time.Minute
+		case lockLevel == 3:
+			dur = 10 * time.Minute
+		default:
+			dur = 30 * time.Minute
+			bumpAuth = 1
+		}
+		until = time.Now().Add(dur)
+		log.Printf("auth 2fa locked user=%d level=%d dur=%v bumpAuth=%d", id, lockLevel, dur, bumpAuth)
 	}
 	_, err = tx.Exec(ctx,
-		`update users set otp_failures = $2, otp_blocked_until = coalesce($3::timestamptz, otp_blocked_until) where id=$1`,
-		id, failures, until)
+		`update users set otp_failures = $2, otp_lock_level = $3,
+		        otp_blocked_until = coalesce($4::timestamptz, otp_blocked_until),
+		        auth_version = auth_version + $5
+		  where id=$1`,
+		id, failures, lockLevel, until, bumpAuth)
 	return false, err
 }
 
 // ---------- 页面 ----------
 
 func (s *Service) securityPage(w http.ResponseWriter, r *http.Request, v SecurityView, errMsg string) {
+	s.securityPageStatus(w, r, http.StatusOK, v, errMsg)
+}
+
+func (s *Service) securityPageStatus(w http.ResponseWriter, r *http.Request, status int, v SecurityView, errMsg string) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.renderer != nil {
-		s.renderer.Render(w, r, "admin/account_security.html", &securityPageData{
+		s.renderer.RenderStatus(w, r, status, "admin/account_security.html", &securityPageData{
 			Layout: ui.Layout{Title: "账号安全", Nav: "security", Err: errMsg},
 			Sec:    v,
 		})
@@ -306,6 +329,23 @@ func (s *Service) AccountSecurity(w http.ResponseWriter, r *http.Request) {
 	s.securityPage(w, r, SecurityView{TwoFactor: u.TwoFactor}, "")
 }
 
+func (s *Service) AccountLogoutAll(w http.ResponseWriter, r *http.Request) {
+	u := s.CurrentUser(r)
+	if u == nil {
+		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
+		return
+	}
+	if _, err := s.pool.Exec(r.Context(), `update users set auth_version = auth_version + 1 where id=$1`, u.ID); err != nil {
+		log.Printf("logout all (%d): %v", u.ID, err)
+		platform.RedirectErr(w, r, "/account/security", "下线所有设备失败，请稍后重试")
+		return
+	}
+	clearSetupCookie(w, r)
+	clearCookie(w, r, SessionCookie, "/")
+	clearCookie(w, r, ChallengeCookie, "/admin/login")
+	platform.RedirectMsg(w, r, "/admin/login", "已下线所有设备，请重新登录")
+}
+
 func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	u := s.CurrentUser(r)
@@ -316,9 +356,6 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 	view := SecurityView{TwoFactor: u.TwoFactor}
 	nw := r.FormValue("new_password")
 	switch {
-	case !CheckPassword(r.FormValue("current_password"), u.PasswordHash):
-		s.securityPage(w, r, view, "当前密码不对")
-		return
 	case len(nw) < 6:
 		s.securityPage(w, r, view, "新密码至少 6 位")
 		return
@@ -326,11 +363,17 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 		s.securityPage(w, r, view, "两次输入的新密码不一致")
 		return
 	}
+	acctKey := fmt.Sprintf("pwd:%d", u.ID)
+	if !s.acctLimiter.allowCheck(acctKey) {
+		s.securityPageStatus(w, r, http.StatusTooManyRequests, view, "密码校验错误次数过多，请稍后再试")
+		return
+	}
 
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		http.Error(w, "修改密码暂时不可用", http.StatusInternalServerError)
+		log.Printf("change password begin (%d): %v", u.ID, err)
+		http.Error(w, "修改密码暂时不可用，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -348,22 +391,26 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 	view.TwoFactor = enabled
 	if version != u.AuthVersion {
 		clearCookie(w, r, SessionCookie, "/")
-		http.Redirect(w, r, "/admin/login?msg="+platform.URLMsg("账号状态已变化，请重新登录"), http.StatusSeeOther)
+		platform.RedirectMsg(w, r, "/admin/login", "账号状态已变化，请重新登录")
 		return
 	}
 	if !CheckPassword(r.FormValue("current_password"), hash) {
+		s.acctLimiter.recordFailure(acctKey)
 		s.securityPage(w, r, view, "当前密码不对")
 		return
 	}
 	if enabled {
 		ok, err := s.ConsumeSecondFactor(ctx, tx, u.ID, r.FormValue("code"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("change password 2fa (%d): %v", u.ID, err)
+			http.Error(w, "两步验证校验暂时不可用，请稍后重试", http.StatusInternalServerError)
 			return
 		}
 		if !ok {
+			s.acctLimiter.recordFailure(acctKey)
 			if err := tx.Commit(ctx); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Printf("change password 2fa commit (%d): %v", u.ID, err)
+				http.Error(w, "保存失败，请稍后重试", http.StatusInternalServerError)
 				return
 			}
 			s.securityPage(w, r, view, "动态码或恢复码不对")
@@ -372,15 +419,18 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 	}
 	if _, err := tx.Exec(ctx,
 		`update users set password_hash=$2, auth_version=auth_version+1 where id=$1`, u.ID, HashPassword(nw)); err != nil {
-		http.Error(w, "保存失败", http.StatusInternalServerError)
+		log.Printf("change password update (%d): %v", u.ID, err)
+		http.Error(w, "保存失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		http.Error(w, "保存失败", http.StatusInternalServerError)
+		log.Printf("change password commit (%d): %v", u.ID, err)
+		http.Error(w, "保存失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
+	s.acctLimiter.reset(acctKey)
 	clearCookie(w, r, SessionCookie, "/")
-	http.Redirect(w, r, "/admin/login?msg="+platform.URLMsg("密码已更新，请重新登录"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/login", "密码已更新，请重新登录")
 }
 
 func groupSecret(secret string) string {
@@ -438,7 +488,7 @@ func (s *Service) setSetupCookie(w http.ResponseWriter, r *http.Request, uid, ve
 	http.SetCookie(w, &http.Cookie{
 		Name: setupCookie, Value: s.signSetup(payload), Path: "/account/security",
 		MaxAge: int(setupCookieTTL / time.Second), HttpOnly: true, SameSite: http.SameSiteLaxMode,
-		Secure: r.TLS != nil,
+		Secure: platform.IsSecureRequest(r),
 	})
 	return nil
 }
@@ -446,7 +496,7 @@ func (s *Service) setSetupCookie(w http.ResponseWriter, r *http.Request, uid, ve
 func clearSetupCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: setupCookie, Value: "", Path: "/account/security", MaxAge: -1,
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: platform.IsSecureRequest(r),
 	})
 }
 
@@ -466,17 +516,26 @@ func (s *Service) AccountStart2FA(w http.ResponseWriter, r *http.Request) {
 		s.securityPage(w, r, view, "服务器未配置 TWO_FACTOR_KEY，暂时不能开启两步验证")
 		return
 	}
+	acctKey := fmt.Sprintf("pwd:%d", u.ID)
+	if !s.acctLimiter.allowCheck(acctKey) {
+		s.securityPageStatus(w, r, http.StatusTooManyRequests, view, "密码校验错误次数过多，请稍后再试")
+		return
+	}
 	if !CheckPassword(r.FormValue("password"), u.PasswordHash) {
+		s.acctLimiter.recordFailure(acctKey)
 		s.securityPage(w, r, view, "当前密码不对")
 		return
 	}
+	s.acctLimiter.reset(acctKey)
 	secret, err := newTOTPSecret()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("start 2fa secret (%d): %v", u.ID, err)
+		http.Error(w, "暂时无法生成两步验证，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if err := s.setSetupCookie(w, r, u.ID, u.AuthVersion, secret, time.Now().Add(setupCookieTTL)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("start 2fa cookie (%d): %v", u.ID, err)
+		http.Error(w, "暂时无法生成两步验证，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	s.securityPage(w, r, SecurityView{Setup: true, Secret: groupSecret(secret)}, "")
@@ -513,19 +572,22 @@ func (s *Service) AccountEnable2FA(w http.ResponseWriter, r *http.Request) {
 
 	codes, hashes, err := newRecoveryCodes()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("enable 2fa recovery (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	sealed, err := seal2FA(u.ID, secret)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("enable 2fa seal (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("enable 2fa begin (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -546,13 +608,15 @@ func (s *Service) AccountEnable2FA(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := tx.Exec(ctx,
 		`update users set totp_secret=$2, totp_last_step=$3, recovery_hashes=$4,
-		        otp_failures=0, otp_blocked_until=null, auth_version=auth_version+1
+		        otp_failures=0, otp_lock_level=0, otp_blocked_until=null, auth_version=auth_version+1
 		  where id=$1`, u.ID, sealed, step, hashes); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("enable 2fa update (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("enable 2fa commit (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	clearSetupCookie(w, r)
@@ -572,11 +636,17 @@ func (s *Service) AccountDisable2FA(w http.ResponseWriter, r *http.Request) {
 		s.securityPage(w, r, view, "两步验证没有开启")
 		return
 	}
+	acctKey := fmt.Sprintf("pwd:%d", u.ID)
+	if !s.acctLimiter.allowCheck(acctKey) {
+		s.securityPageStatus(w, r, http.StatusTooManyRequests, view, "密码校验错误次数过多，请稍后再试")
+		return
+	}
 
 	ctx := r.Context()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("disable 2fa begin (%d): %v", u.ID, err)
+		http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	defer tx.Rollback(ctx)
@@ -593,22 +663,26 @@ func (s *Service) AccountDisable2FA(w http.ResponseWriter, r *http.Request) {
 	}
 	if version != u.AuthVersion {
 		clearCookie(w, r, SessionCookie, "/")
-		http.Redirect(w, r, "/admin/login?msg="+platform.URLMsg("账号状态已变化，请重新登录"), http.StatusSeeOther)
+		platform.RedirectMsg(w, r, "/admin/login", "账号状态已变化，请重新登录")
 		return
 	}
 	if !CheckPassword(r.FormValue("password"), hash) {
+		s.acctLimiter.recordFailure(acctKey)
 		s.securityPage(w, r, view, "当前密码不对")
 		return
 	}
 	if enabled {
 		ok, err := s.ConsumeSecondFactor(ctx, tx, u.ID, r.FormValue("code"))
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Printf("disable 2fa check (%d): %v", u.ID, err)
+			http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 			return
 		}
 		if !ok {
+			s.acctLimiter.recordFailure(acctKey)
 			if err := tx.Commit(ctx); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				log.Printf("disable 2fa commit (%d): %v", u.ID, err)
+				http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 				return
 			}
 			s.securityPage(w, r, view, "动态码或恢复码不对")
@@ -617,15 +691,18 @@ func (s *Service) AccountDisable2FA(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := tx.Exec(ctx,
 		`update users set totp_secret='', totp_last_step=-1, recovery_hashes='{}',
-		        otp_failures=0, otp_blocked_until=null, auth_version=auth_version+1 where id=$1`, u.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		        otp_failures=0, otp_lock_level=0, otp_blocked_until=null, auth_version=auth_version+1 where id=$1`, u.ID); err != nil {
+		log.Printf("disable 2fa update (%d): %v", u.ID, err)
+		http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if err := tx.Commit(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("disable 2fa final commit (%d): %v", u.ID, err)
+		http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
+	s.acctLimiter.reset(acctKey)
 	clearSetupCookie(w, r)
 	clearCookie(w, r, SessionCookie, "/")
-	http.Redirect(w, r, "/admin/login?msg="+platform.URLMsg("两步验证已关闭，请重新登录"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/login", "两步验证已关闭，请重新登录")
 }

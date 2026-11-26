@@ -13,10 +13,10 @@
 
 <form class="card overview-filter" method="get" action="/admin/analytics" role="search" aria-label="选择分析时间范围">
   <nav class="period-tabs" aria-label="快捷时间范围">
-    <a class="period-tab{{if eq .ReportPeriod "today"}} active" aria-current="true{{end}}" href="/admin/analytics?period=today">今日</a>
-    <a class="period-tab{{if eq .ReportPeriod "7d"}} active" aria-current="true{{end}}" href="/admin/analytics?period=7d">近 7 天</a>
-    <a class="period-tab{{if eq .ReportPeriod "30d"}} active" aria-current="true{{end}}" href="/admin/analytics?period=30d">近 30 天</a>
-    <a class="period-tab{{if eq .ReportPeriod "month"}} active" aria-current="true{{end}}" href="/admin/analytics?period=month">本月</a>
+    <a class="period-tab{{if eq .ReportPeriod "today"}} active{{end}}"{{if eq .ReportPeriod "today"}} aria-current="page"{{end}} href="/admin/analytics?period=today">今日</a>
+    <a class="period-tab{{if eq .ReportPeriod "7d"}} active{{end}}"{{if eq .ReportPeriod "7d"}} aria-current="page"{{end}} href="/admin/analytics?period=7d">近 7 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "30d"}} active{{end}}"{{if eq .ReportPeriod "30d"}} aria-current="page"{{end}} href="/admin/analytics?period=30d">近 30 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "month"}} active{{end}}"{{if eq .ReportPeriod "month"}} aria-current="page"{{end}} href="/admin/analytics?period=month">本月</a>
   </nav>
   <div class="period-form">
     <label class="period-field"><span>开始日期</span><input type="date" name="start" value="{{.ReportStart}}" aria-describedby="analytics-period-hint"></label>
@@ -26,7 +26,7 @@
   </div>
 </form>
 
-{{if not .Err}}
+{{if not .InvalidPeriod}}
 <div class="stats-grid overview-stats">
   <div class="card stat-card stat-card--ink">
     <div class="stat-top"><span>区间营业额</span><i class="bi bi-cash-coin" aria-hidden="true"></i></div>
@@ -36,7 +36,8 @@
   <div class="card stat-card">
     <div class="stat-top"><span>区间毛利</span><i class="bi bi-graph-up-arrow stat-icon--success" aria-hidden="true"></i></div>
     <strong class="stat-value">{{.Sales.Current.ProfitText}}</strong>
-    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong></div>
+    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong>{{if gt .Sales.FinishedWasteCost 0}} · 含结桶损耗 {{.Sales.FinishedWasteCostText}}{{end}}</div>
+    {{if gt .Sales.UncostedRevenue 0}}<div class="stat-meta text-warning">含 {{.Sales.UncostedRevenueText}} 未填成本售出，毛利率偏高仅供参考</div>{{end}}
   </div>
   <div class="card stat-card">
     <div class="stat-top"><span>日均营业额</span><i class="bi bi-calendar2-week stat-icon--amber" aria-hidden="true"></i></div>
@@ -109,7 +110,7 @@
     <div class="audience-highlight">
       <span class="audience-highlight-k">杯型与饮用场景</span>
       <strong class="audience-highlight-v">{{.Audience.CupSizes.DominantLabel}}</strong>
-      <small>小杯 {{.Audience.CupSizes.SmallShareText}} · 标准杯 {{.Audience.CupSizes.MediumShareText}} · 大杯 {{.Audience.CupSizes.LargeShareText}}{{if .Audience.Spots.HasData}} · {{.Audience.Spots.SummaryText}}{{end}}</small>
+      <small>小杯 {{.Audience.CupSizes.SmallShareText}} · 标准杯 {{.Audience.CupSizes.MediumShareText}} · 大杯 {{.Audience.CupSizes.LargeShareText}}{{if .Audience.CupSizes.UnknownCups}} · 未记录杯型 {{.Audience.CupSizes.UnknownCups}} 杯（{{.Audience.CupSizes.UnknownShareText}}）{{end}}{{if .Audience.Spots.HasData}} · {{.Audience.Spots.SummaryText}}{{end}}</small>
     </div>
   </div>
 
@@ -190,7 +191,7 @@
   </ul>
 </section>
 
-{{if not .Err}}
+{{if not .InvalidPeriod}}
 {{if .Sales.HasData}}<script type="application/json" id="sales-trend-data">{{.Sales.TrendJSON}}</script>{{end}}
 {{if .Audience.HasData}}<script type="application/json" id="audience-data">{{.Audience.ChartJSON}}</script>{{end}}
 {{end}}

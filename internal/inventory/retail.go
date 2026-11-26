@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -78,7 +79,7 @@ type StockMove struct {
 	CreatedAt time.Time
 }
 
-func (m StockMove) When() string { return m.CreatedAt.Format("01-02 15:04") }
+func (m StockMove) When() string { return platform.TimeText(&m.CreatedAt) }
 func (m StockMove) DeltaText() string {
 	if m.Delta > 0 {
 		return "+" + strconv.Itoa(m.Delta)
@@ -88,7 +89,7 @@ func (m StockMove) DeltaText() string {
 
 func ListRetail(ctx context.Context, pool *pgxpool.Pool) ([]RetailItem, error) {
 	rows, err := pool.Query(ctx, `select id, name, category, spec, price_cents, cost_cents, stock, active
-		from retail_items order by active desc, category, name`)
+		from retail_items where archived_at is null order by active desc, category, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -107,14 +108,30 @@ func ListRetail(ctx context.Context, pool *pgxpool.Pool) ([]RetailItem, error) {
 func GetRetail(ctx context.Context, pool *pgxpool.Pool, id int64) (RetailItem, error) {
 	var it RetailItem
 	err := pool.QueryRow(ctx, `select id, name, category, spec, price_cents, cost_cents, stock, active
-		from retail_items where id=$1`, id).
+		from retail_items where id=$1 and archived_at is null`, id).
 		Scan(&it.ID, &it.Name, &it.Category, &it.Spec, &it.PriceCents, &it.CostCents, &it.Stock, &it.Active)
 	return it, err
 }
 
 func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, *LowStockItem, error) {
-	if strings.TrimSpace(it.Name) == "" {
+	return SaveRetailWithExpected(ctx, pool, it, nil)
+}
+
+func SaveRetailWithExpected(ctx context.Context, pool *pgxpool.Pool, it RetailItem, expectedStock *int) (int64, *LowStockItem, error) {
+	it.Name = strings.TrimSpace(it.Name)
+	it.Category = strings.TrimSpace(it.Category)
+	it.Spec = strings.TrimSpace(it.Spec)
+	if it.Name == "" {
 		return 0, nil, platform.UserErr("商品名不能为空")
+	}
+	if len([]rune(it.Name)) > 120 {
+		return 0, nil, platform.UserErr("商品名过长（最多 120 字）")
+	}
+	if len([]rune(it.Category)) > 50 {
+		return 0, nil, platform.UserErr("分类名称过长（最多 50 字）")
+	}
+	if len([]rune(it.Spec)) > 80 {
+		return 0, nil, platform.UserErr("规格过长（最多 80 字）")
 	}
 	if it.Stock < 0 {
 		return 0, nil, platform.UserErr("库存不能为负")
@@ -153,7 +170,7 @@ func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, 
 			}
 		}
 		var low *LowStockItem
-		if it.Stock <= LowStockThreshold {
+		if newActive && it.Stock > 0 && it.Stock <= LowStockThreshold {
 			low = &LowStockItem{ItemID: id, Name: it.Name, Stock: it.Stock, Active: newActive}
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -164,18 +181,34 @@ func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, 
 
 	// 锁住商品行再算库存差值，流水与库存不会打架；库存为 0 的商品不能保存在架。
 	var old int
-	var oldActive bool
-	if err := tx.QueryRow(ctx, `select stock, active from retail_items where id=$1 for update`,
-		it.ID).Scan(&old, &oldActive); err != nil {
+	var oldActive, archived bool
+	err = tx.QueryRow(ctx, `select stock, active, archived_at is not null from retail_items where id=$1 for update`,
+		it.ID).Scan(&old, &oldActive, &archived)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil, platform.UserErr("商品不存在")
+	}
+	if err != nil {
 		return 0, nil, err
 	}
-	newActive := it.Active && it.Stock > 0
+	if archived {
+		return 0, nil, platform.UserErr("商品已停用删除，无法编辑")
+	}
+	finalStock := it.Stock
+	if expectedStock != nil {
+		if it.Stock == *expectedStock {
+			// 未改动库存字段时保留最新并发库存，防止覆盖收银刚扣减的库存。
+			finalStock = old
+		} else if old != *expectedStock {
+			return 0, nil, platform.UserErr(fmt.Sprintf("商品库存刚刚已变动（当前库存 %d），请刷新后再改", old))
+		}
+	}
+	newActive := it.Active && finalStock > 0
 	if _, err := tx.Exec(ctx, `update retail_items set name=$2, category=$3, spec=$4, price_cents=$5,
 		cost_cents=$6, stock=$7, active=$8 where id=$1`,
-		it.ID, it.Name, it.Category, it.Spec, it.PriceCents, it.CostCents, it.Stock, newActive); err != nil {
+		it.ID, it.Name, it.Category, it.Spec, it.PriceCents, it.CostCents, finalStock, newActive); err != nil {
 		return 0, nil, err
 	}
-	if diff := it.Stock - old; diff != 0 {
+	if diff := finalStock - old; diff != 0 {
 		reason := "调整"
 		if diff > 0 {
 			reason = "入库"
@@ -185,7 +218,7 @@ func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, 
 			return 0, nil, err
 		}
 		if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.RetailSubject(it.Name),
-			fmt.Sprintf("%s %+d，现有 %d", reason, diff, it.Stock)); err != nil {
+			fmt.Sprintf("%s %+d，现有 %d", reason, diff, finalStock)); err != nil {
 			return 0, nil, err
 		}
 	}
@@ -195,13 +228,13 @@ func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, 
 			kind, verb = platform.OpRetailOn, "上架"
 		}
 		if err := platform.LogOperation(ctx, tx, kind, platform.RetailSubject(it.Name),
-			fmt.Sprintf("%s · 库存 %d", verb, it.Stock)); err != nil {
+			fmt.Sprintf("%s · 库存 %d", verb, finalStock)); err != nil {
 			return 0, nil, err
 		}
 	}
 	var low *LowStockItem
-	if it.Stock < old && it.Stock <= LowStockThreshold {
-		low = &LowStockItem{ItemID: it.ID, Name: it.Name, Stock: it.Stock, Active: newActive}
+	if (old > LowStockThreshold && finalStock <= LowStockThreshold) || (old > 0 && finalStock == 0) {
+		low = &LowStockItem{ItemID: it.ID, Name: it.Name, Stock: finalStock, Active: newActive}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, nil, err
@@ -209,9 +242,42 @@ func SaveRetail(ctx context.Context, pool *pgxpool.Pool, it RetailItem) (int64, 
 	return it.ID, low, nil
 }
 
+// DeleteRetail 软删除零售商品：保留历史销售/库存流水审计，阻止尚有未结 POS 订单的商品删除。
 func DeleteRetail(ctx context.Context, pool *pgxpool.Pool, id int64) error {
-	_, err := pool.Exec(ctx, `delete from retail_items where id=$1`, id)
-	return err
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var name string
+	var active bool
+	err = tx.QueryRow(ctx, `select name, active from retail_items where id=$1 and archived_at is null for update`, id).Scan(&name, &active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return platform.UserErr("商品不存在或已删除")
+	}
+	if err != nil {
+		return err
+	}
+	var hasOpenOrder bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from order_items where kind='retail' and ref_id=$1 and paid_at is null)`, id).Scan(&hasOpenOrder); err != nil {
+		return err
+	}
+	if hasOpenOrder {
+		return platform.UserErr("该商品还有未结账 POS 订单占用，先清理或结清订单")
+	}
+	if _, err := tx.Exec(ctx, `update retail_items set active=false, archived_at=now() where id=$1`, id); err != nil {
+		return err
+	}
+	if active {
+		if err := platform.LogOperation(ctx, tx, platform.OpRetailOff, platform.RetailSubject(name), "删除下架"); err != nil {
+			return err
+		}
+	}
+	if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.RetailSubject(name), "删除归档商品"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // ToggleRetail 切上下架；库存为 0 时不允许上架（卖光了就下架，补货再手动上架）。
@@ -221,19 +287,27 @@ func ToggleRetail(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var active bool
+
+	var oldActive, archived bool
 	var stock int
 	var name string
-	err = tx.QueryRow(ctx, `update retail_items set active = not active where id=$1 and (active or stock > 0)
-		returning active, stock, name`, id).Scan(&active, &stock, &name)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return platform.UserErr("库存为 0，先入库再上架")
+	err = tx.QueryRow(ctx, `select active, stock, name, archived_at is not null from retail_items where id=$1 for update`, id).
+		Scan(&oldActive, &stock, &name, &archived)
+	if errors.Is(err, pgx.ErrNoRows) || archived {
+		return platform.UserErr("商品不存在或已删除")
 	}
 	if err != nil {
 		return err
 	}
+	if !oldActive && stock <= 0 {
+		return platform.UserErr("库存为 0，先入库再上架")
+	}
+	newActive := !oldActive
+	if _, err := tx.Exec(ctx, `update retail_items set active=$2 where id=$1`, id, newActive); err != nil {
+		return err
+	}
 	kind, verb := platform.OpRetailOff, "下架"
-	if active {
+	if newActive {
 		kind, verb = platform.OpRetailOn, "上架"
 	}
 	if err := platform.LogOperation(ctx, tx, kind, platform.RetailSubject(name),
@@ -243,7 +317,8 @@ func ToggleRetail(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	return tx.Commit(ctx)
 }
 
-// SellRetail 是店员端的结账事务入口（兼容无多商品合单场景的直接调用）。
+// SellRetail 是独立事务版零售结账，仅供测试与内部补录使用；正式 POS 结账必须在
+// pos.PayItemsWithGateway 的同一事务内调用 SellRetailTx，确保扣库存与 payments 记账原子提交。
 func SellRetail(ctx context.Context, pool *pgxpool.Pool, lines []SaleLine) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -257,20 +332,15 @@ func SellRetail(ctx context.Context, pool *pgxpool.Pool, lines []SaleLine) (int6
 	return id, tx.Commit(ctx)
 }
 
-// SellRetailTx 在调用方的事务里结账：扣库存、写订单与明细、记库存流水，并返回需要预警的低库存条目。
+// SellRetailTx 在调用方的事务里结账：按固定 ID 升序加锁、扣库存、写订单与明细、记库存流水，并返回跨阈值低库存预警。
 // 售价用传入的单价（点餐单按下单时的价），成本取数据库当前值。
 func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []LowStockItem, error) {
 	if len(lines) == 0 {
 		return 0, nil, platform.UserErr("这一单里没有商品")
 	}
-	type line struct {
-		id               int64
-		name             string
-		price, cost, qty int
-	}
-	sold := make([]line, 0, len(lines))
-	var low []LowStockItem
-	var total, cost int
+	needQty := make(map[int64]int, len(lines))
+	reqName := make(map[int64]string, len(lines))
+	ids := make([]int64, 0, len(lines))
 	for _, l := range lines {
 		if l.Qty <= 0 {
 			return 0, nil, platform.UserErr("数量要大于 0")
@@ -278,28 +348,82 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 		if l.Item.PriceCents < 0 {
 			return 0, nil, platform.UserErr("售价不能为负")
 		}
-		var name string
-		var dbCost, newStock int
-		var newActive bool
-		err := tx.QueryRow(ctx, `update retail_items
-			set stock = stock - $2,
-			    active = case when stock - $2 > 0 then active else false end
-			where id=$1 and stock >= $2
-			returning name, cost_cents, stock, active`, l.Item.ID, l.Qty).Scan(&name, &dbCost, &newStock, &newActive)
+		if _, seen := needQty[l.Item.ID]; !seen {
+			ids = append(ids, l.Item.ID)
+			reqName[l.Item.ID] = l.Item.Name
+		}
+		needQty[l.Item.ID] += l.Qty
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	type itemSnap struct {
+		name      string
+		cost      int
+		origStock int
+		curStock  int
+		origAct   bool
+		curAct    bool
+	}
+	snaps := make(map[int64]*itemSnap, len(ids))
+	for _, id := range ids {
+		var s itemSnap
+		var archived bool
+		err := tx.QueryRow(ctx, `select name, cost_cents, stock, active, archived_at is not null
+			from retail_items where id=$1 for update`, id).Scan(&s.name, &s.cost, &s.origStock, &s.origAct, &archived)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, nil, platform.UserErr("「" + l.Item.Name + "」库存不够了")
+			return 0, nil, platform.UserErr("「" + reqName[id] + "」不存在")
 		}
 		if err != nil {
 			return 0, nil, err
 		}
-		if dbCost < 0 {
-			return 0, nil, platform.UserErr("「" + name + "」成本不能为负")
+		if archived {
+			return 0, nil, platform.UserErr("「" + s.name + "」已停用删除，不能售出")
 		}
-		sold = append(sold, line{id: l.Item.ID, name: name, price: l.Item.PriceCents, cost: dbCost, qty: l.Qty})
+		if s.cost < 0 {
+			return 0, nil, platform.UserErr("「" + s.name + "」成本不能为负")
+		}
+		if s.origStock < needQty[id] {
+			return 0, nil, platform.UserErr("「" + reqName[id] + "」库存不够了")
+		}
+		s.curStock = s.origStock
+		s.curAct = s.origAct
+		snaps[id] = &s
+	}
+
+	type line struct {
+		id               int64
+		name             string
+		price, cost, qty int
+	}
+	sold := make([]line, 0, len(lines))
+	var total, cost int
+	for _, l := range lines {
+		s := snaps[l.Item.ID]
+		if _, err := tx.Exec(ctx, `update retail_items
+			set stock = stock - $2,
+			    active = case when stock - $2 > 0 then active else false end
+			where id=$1`, l.Item.ID, l.Qty); err != nil {
+			return 0, nil, err
+		}
+		s.curStock -= l.Qty
+		if s.curStock == 0 {
+			s.curAct = false
+		}
+		sold = append(sold, line{id: l.Item.ID, name: s.name, price: l.Item.PriceCents, cost: s.cost, qty: l.Qty})
 		total += l.Item.PriceCents * l.Qty
-		cost += dbCost * l.Qty
-		if newStock <= LowStockThreshold {
-			low = append(low, LowStockItem{ItemID: l.Item.ID, Name: name, Stock: newStock, Active: newActive})
+		cost += s.cost * l.Qty
+	}
+
+	var low []LowStockItem
+	for _, id := range ids {
+		s := snaps[id]
+		if s.origAct && !s.curAct {
+			if err := platform.LogOperation(ctx, tx, platform.OpRetailOff, platform.RetailSubject(s.name), "下架 · 售罄"); err != nil {
+				return 0, nil, err
+			}
+		}
+		if (s.origStock > LowStockThreshold && s.curStock <= LowStockThreshold) || (s.origStock > 0 && s.curStock == 0) {
+			low = append(low, LowStockItem{ItemID: id, Name: s.name, Stock: s.curStock, Active: s.curAct})
 		}
 	}
 
@@ -321,7 +445,9 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 	return saleID, low, nil
 }
 
-// DeleteSale 撤销订单：库存加回去，订单删掉（明细级联），流水留痕。
+// DeleteSale 仅用于测试/内部补偿：库存加回去、零售单删除（明细级联），流水与操作台账留痕。
+// 它不会撤销 payments 或订单收款，因此不得直接挂后台路由——否则会退掉库存却留下已收资金记录；
+// 生产环境的撤单必须先走支付冲正，再在同一事务里回滚零售库存。
 // 先锁订单行，并发撤销只有抢到锁的那次退库存，重复调用是空操作。
 func DeleteSale(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	tx, err := pool.Begin(ctx)
@@ -331,25 +457,27 @@ func DeleteSale(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	defer tx.Rollback(ctx)
 
 	var saleID int64
-	err = tx.QueryRow(ctx, `select id from retail_sales where id=$1 for update`, id).Scan(&saleID)
+	var totalCents int
+	err = tx.QueryRow(ctx, `select id, total_cents from retail_sales where id=$1 for update`, id).Scan(&saleID, &totalCents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // 已经撤过了
 	}
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `select item_id, qty from retail_sale_items where sale_id=$1 and item_id is not null`, id)
+	rows, err := tx.Query(ctx, `select item_id, name, qty from retail_sale_items where sale_id=$1`, id)
 	if err != nil {
 		return err
 	}
 	type back struct {
-		id  int64
-		qty int
+		id   *int64
+		name string
+		qty  int
 	}
 	var list []back
 	for rows.Next() {
 		var b back
-		if err := rows.Scan(&b.id, &b.qty); err != nil {
+		if err := rows.Scan(&b.id, &b.name, &b.qty); err != nil {
 			rows.Close()
 			return err
 		}
@@ -359,16 +487,29 @@ func DeleteSale(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	subjectName := fmt.Sprintf("零售单 #%d", id)
+	if len(list) == 1 && list[0].name != "" {
+		subjectName = platform.RetailSubject(list[0].name)
+	} else if len(list) > 1 && list[0].name != "" {
+		subjectName = platform.RetailSubject(fmt.Sprintf("%s 等%d件", list[0].name, len(list)))
+	}
 	for _, b := range list {
-		if _, err := tx.Exec(ctx, `update retail_items set stock = stock + $2 where id=$1`, b.id, b.qty); err != nil {
+		if b.id == nil {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `update retail_items set stock = stock + $2 where id=$1`, *b.id, b.qty); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `insert into retail_moves (item_id, delta, reason, ref_id) values ($1,$2,'撤销',$3)`,
-			b.id, b.qty, id); err != nil {
+			*b.id, b.qty, id); err != nil {
 			return err
 		}
 	}
 	if _, err := tx.Exec(ctx, `delete from retail_sales where id=$1`, id); err != nil {
+		return err
+	}
+	if err := platform.LogOperation(ctx, tx, platform.OpSaleVoid, subjectName,
+		fmt.Sprintf("撤销零售单 #%d · %s", id, platform.PriceText(totalCents))); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -415,7 +556,8 @@ func SearchRetail(ctx context.Context, pool *pgxpool.Pool, q, category string, l
 	q = strings.TrimSpace(q)
 	rows, err := pool.Query(ctx, `select id, name, category, spec, price_cents, cost_cents, stock, active
 		from retail_items
-		where ($1 = '' or name ilike '%'||$1||'%' or category ilike '%'||$1||'%' or spec ilike '%'||$1||'%')
+		where archived_at is null
+		  and ($1 = '' or name ilike '%'||$1||'%' or category ilike '%'||$1||'%' or spec ilike '%'||$1||'%')
 		  and ($2 = '' or category = $2)
 		  and (not $3 or stock <= $5)
 		  and (not $4 or active)
@@ -444,22 +586,30 @@ func AddStock(ctx context.Context, pool *pgxpool.Pool, id int64, delta int, reas
 	}
 	defer tx.Rollback(ctx)
 
-	var oldActive bool
-	err = tx.QueryRow(ctx, `select active from retail_items where id=$1 for update`, id).Scan(&oldActive)
+	var oldActive, archived bool
+	var oldStock int
+	var name string
+	err = tx.QueryRow(ctx, `select active, stock, name, archived_at is not null from retail_items where id=$1 for update`, id).
+		Scan(&oldActive, &oldStock, &name, &archived)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, platform.UserErr("库存不够扣，先核对数量")
+		return nil, platform.UserErr("商品不存在")
 	}
 	if err != nil {
 		return nil, err
 	}
+	if archived {
+		return nil, platform.UserErr("商品已停用删除，无法调整库存")
+	}
+	if oldStock+delta < 0 {
+		return nil, platform.UserErr("库存不够扣，先核对数量")
+	}
 	var stock int
 	var active bool
-	var name string
 	err = tx.QueryRow(ctx, `update retail_items
 		set stock = stock + $2,
 		    active = case when stock + $2 > 0 then active else false end
 		where id=$1 and stock + $2 >= 0
-		returning stock, active, name`, id, delta).Scan(&stock, &active, &name)
+		returning stock, active`, id, delta).Scan(&stock, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, platform.UserErr("库存不够扣，先核对数量")
 	}
@@ -484,7 +634,7 @@ func AddStock(ctx context.Context, pool *pgxpool.Pool, id int64, delta int, reas
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	if delta < 0 && stock <= LowStockThreshold {
+	if delta < 0 && ((oldStock > LowStockThreshold && stock <= LowStockThreshold) || (oldStock > 0 && stock == 0)) {
 		return &LowStockItem{ItemID: id, Name: name, Stock: stock, Active: active}, nil
 	}
 	return nil, nil

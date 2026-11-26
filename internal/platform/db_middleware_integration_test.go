@@ -2,8 +2,10 @@ package platform_test
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"pourops/internal/platform"
@@ -17,12 +19,22 @@ func TestMigrateRollbackAndIdempotent(t *testing.T) {
 	if err := platform.Migrate(ctx, pool, migrations.FS); err != nil {
 		t.Fatalf("重复迁移应该幂等: %v", err)
 	}
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatalf("读迁移目录: %v", err)
+	}
+	wantMigrations := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
+			wantMigrations++
+		}
+	}
 	var n1 int
 	if err := pool.QueryRow(ctx, `select count(*) from schema_migrations`).Scan(&n1); err != nil {
 		t.Fatalf("数迁移记录: %v", err)
 	}
-	if n1 < 11 {
-		t.Fatalf("迁移数量过少: %d", n1)
+	if n1 != wantMigrations {
+		t.Fatalf("迁移数量 = %d, want %d", n1, wantMigrations)
 	}
 
 	conn, err := pool.Acquire(ctx)

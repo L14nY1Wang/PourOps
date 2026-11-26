@@ -164,17 +164,24 @@ func TestTapUntapOnlyRealTransitions(t *testing.T) {
 		t.Fatalf("重复下架多记了结桶流水: %d", n)
 	}
 
-	if _, err := catalog.ToggleBeer(ctx, pool, beerID); err != nil {
-		t.Fatal(err)
-	}
 	if n := ledgerCount(t, pool, platform.OpScreenOn); n != 1 {
-		t.Fatalf("上屏流水 %d 条，应为 1", n)
-	}
-	if _, err := catalog.ToggleBeer(ctx, pool, beerID); err != nil {
-		t.Fatal(err)
+		t.Fatalf("上架开桶上屏流水 %d 条，应为 1", n)
 	}
 	if n := ledgerCount(t, pool, platform.OpScreenOff); n != 1 {
-		t.Fatalf("下屏流水 %d 条，应为 1", n)
+		t.Fatalf("下架撤屏流水 %d 条，应为 1", n)
+	}
+
+	if _, err := catalog.ToggleBeer(ctx, pool, beerID); err != nil {
+		t.Fatal(err)
+	}
+	if n := ledgerCount(t, pool, platform.OpScreenOn); n != 2 {
+		t.Fatalf("上屏流水 %d 条，应为 2", n)
+	}
+	if _, err := catalog.ToggleBeer(ctx, pool, beerID); err != nil {
+		t.Fatal(err)
+	}
+	if n := ledgerCount(t, pool, platform.OpScreenOff); n != 2 {
+		t.Fatalf("下屏流水 %d 条，应为 2", n)
 	}
 }
 

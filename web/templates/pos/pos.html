@@ -436,7 +436,7 @@
 </nav>
 
 <div class="pos">
-  <aside class="side" id="{{if .Order}}bill{{else}}spots{{end}}">
+  <aside class="side" id="{{if .Order}}bill{{else}}spots{{end}}" data-order-id="{{if .Order}}{{.Order.ID}}{{end}}">
     {{if .Order}}
     <div class="side-head">
       <a class="back" href="/pos/">← 全部台位</a>
@@ -470,6 +470,8 @@
         <p class="side-cta"><a class="btn primary block" href="/pos/">回台位开新单</a></p>
       {{else}}
         <form method="post" action="/pos/order/{{.Order.ID}}/pay" id="pay-form">
+          <input type="hidden" name="idempotency_key" value="{{.PayToken}}">
+          <input type="hidden" name="expected_total_cents" id="expected-total-cents" value="">
           <div class="basket-head">
             <h2>待结账</h2>
             {{if .Order.Unpaid}}
@@ -544,7 +546,12 @@
       <section class="spot-group">
         <div class="group-head">
           <h2>吧台</h2>
-          <form class="form-reset" method="post" action="/pos/bar/add"><button class="mini" type="submit">+ 加位</button></form>
+          {{if and .Me .Me.CanBackend}}
+          <div class="pick">
+            <form class="form-reset" method="post" action="/pos/bar/add"><button class="mini" type="submit">+ 加位</button></form>
+            <form class="form-reset" method="post" action="/pos/bar/remove"><button class="mini" type="submit">− 减位</button></form>
+          </div>
+          {{end}}
         </div>
         <div class="spots">
           {{range .Spots}}{{if eq .Kind "bar"}}
@@ -565,7 +572,12 @@
       <section class="spot-group">
         <div class="group-head">
           <h2>小桌</h2>
-          <form class="form-reset" method="post" action="/pos/table/add"><button class="mini" type="submit">+ 加位</button></form>
+          {{if and .Me .Me.CanBackend}}
+          <div class="pick">
+            <form class="form-reset" method="post" action="/pos/table/add"><button class="mini" type="submit">+ 加位</button></form>
+            <form class="form-reset" method="post" action="/pos/table/remove"><button class="mini" type="submit">− 减位</button></form>
+          </div>
+          {{end}}
         </div>
         <div class="spots">
           {{range .Spots}}{{if eq .Kind "table"}}
@@ -593,10 +605,10 @@
         <h2>酒与零售</h2>
       </div>
       <div class="catalog-tools">
-        <div class="seg" role="tablist" aria-label="目录分类">
-          <button type="button" class="active" data-cat-tab="all" role="tab" aria-selected="true">全部</button>
-          <button type="button" data-cat-tab="beer" role="tab" aria-selected="false">桶装</button>
-          <button type="button" data-cat-tab="retail" role="tab" aria-selected="false">零售</button>
+        <div class="seg" role="group" aria-label="目录分类">
+          <button type="button" class="active" data-cat-tab="all" aria-pressed="true">全部</button>
+          <button type="button" data-cat-tab="beer" aria-pressed="false">桶装</button>
+          <button type="button" data-cat-tab="retail" aria-pressed="false">零售</button>
         </div>
         <input class="filter-input" id="menu-filter" type="search" placeholder="快搜酒名 / 风格 / 商品…" aria-label="筛选菜单">
         <p class="hint{{if not $canAdd}} is-off{{end}}">
@@ -670,7 +682,40 @@
   // 勾选多少行，底部小计就跟着变；提交时后端按勾选的整行算钱。
   (() => {
     const form = document.getElementById('pay-form');
+    // P3-32：未勾选的行按订单记进 sessionStorage，改量或刷新后勾选状态不丢
+    const posSide = document.querySelector('.side[data-order-id]');
+    const posOrderId = posSide ? posSide.dataset.orderId : '';
+    const uncheckedKey = posOrderId ? 'pos:unchecked:' + posOrderId : '';
+    const itemBoxes = () => (form ? Array.from(form.querySelectorAll('input[name="items"]')) : []);
+    const saveUnchecked = () => {
+      if (!uncheckedKey || !form) return;
+      const keep = itemBoxes().filter(box => !box.checked).map(box => box.value);
+      try {
+        if (keep.length) sessionStorage.setItem(uncheckedKey, JSON.stringify(keep));
+        else sessionStorage.removeItem(uncheckedKey);
+      } catch (e) {}
+    };
+    const restoreUnchecked = () => {
+      let saved = [];
+      try {
+        const raw = JSON.parse(sessionStorage.getItem(uncheckedKey) || '[]');
+        if (Array.isArray(raw)) saved = raw;
+      } catch (e) {}
+      if (saved.length) {
+        const byId = new Map(itemBoxes().map(box => [box.value, box]));
+        saved.forEach(id => {
+          const box = byId.get(String(id));
+          if (box) box.checked = false;
+        });
+      }
+      saveUnchecked();   // 顺手剔除已不存在的行 id（改量/结账后行会重建）
+    };
+    let syncPay = null;   // 结账小计重算，pageshow 解锁时直接调用（dispatchEvent('change') 会被 form 监听器过滤掉）
+    if (!form && uncheckedKey) {
+      try { sessionStorage.removeItem(uncheckedKey); } catch (e) {}   // 订单已结清，勾选状态作废
+    }
     if (form) {
+      restoreUnchecked();
       const out = document.getElementById('sel-total');
       const count = document.getElementById('sel-count');
       const pay = document.getElementById('pay-btn');
@@ -689,14 +734,21 @@
           });
           out.textContent = money(cents);
           count.textContent = String(n);
+          const expInput = document.getElementById('expected-total-cents');
+          if (expInput) expInput.value = String(cents);
           if (pay) {
             pay.disabled = n === 0;
             pay.textContent = n === 0 ? '先勾选要结的行' : '结账所选 · ' + money(cents);
           }
         };
+        syncPay = sync;
         form.addEventListener('change', ev => {
-          if (ev.target && ev.target.name === 'items') sync();
+          if (ev.target && ev.target.name === 'items') {
+            saveUnchecked();
+            sync();
+          }
         });
+        form.addEventListener('submit', saveUnchecked);
         form.querySelectorAll('[data-pick]').forEach(btn => {
           btn.addEventListener('click', () => {
             const on = btn.dataset.pick === 'all';
@@ -704,6 +756,7 @@
               const box = line.querySelector('input[name="items"]');
               if (box) box.checked = on;
             });
+            saveUnchecked();
             sync();
           });
         });
@@ -734,12 +787,42 @@
         tabs.forEach(t => {
           const on = t === tab;
           t.classList.toggle('active', on);
-          t.setAttribute('aria-selected', String(on));
+          t.setAttribute('aria-pressed', String(on));
         });
         applyFilter();
       });
     });
     if (filterInput) filterInput.addEventListener('input', applyFilter);
+
+    // P2-8：POS 结账、加单、改量与开台表单防重复提交，pageshow 时自动解锁。
+    const posSubmitSelector = '#pay-form, .tile-form, .spot-form, .spot-group form';
+    const unlockPosForms = () => {
+      document.querySelectorAll('form[data-pos-busy]').forEach(f => {
+        delete f.dataset.posBusy;
+        f.removeAttribute('aria-busy');
+        f.querySelectorAll('button[type="submit"], input[type="submit"]').forEach(btn => {
+          btn.disabled = false;
+        });
+      });
+      if (syncPay) syncPay();
+    };
+    window.addEventListener('pageshow', unlockPosForms);
+    document.querySelectorAll(posSubmitSelector).forEach(f => {
+      f.addEventListener('submit', ev => {
+        if (f.dataset.posBusy === '1') {
+          ev.preventDefault();
+          return;
+        }
+        f.dataset.posBusy = '1';
+        f.setAttribute('aria-busy', 'true');
+        window.setTimeout(() => {
+          if (f.dataset.posBusy !== '1') return;
+          f.querySelectorAll('button[type="submit"], input[type="submit"]').forEach(btn => {
+            btn.disabled = true;
+          });
+        }, 0);
+      });
+    });
   })();
 </script>
 </body>

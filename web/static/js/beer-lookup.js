@@ -215,7 +215,10 @@
   const applyDetail = detail => {
     let filled = 0;
     Object.entries(fieldEls).forEach(([key, el]) => {
-      if (isEdit && (key === 'capacity_ml' || key === 'cost') && el.value.trim() !== '' && el.dataset.autofilled !== '1') {
+      if (el.dataset.userEdited === '1') {
+        return;
+      }
+      if (isEdit && el.value.trim() !== '' && el.dataset.autofilled !== '1') {
         return;
       }
       const val = (detail[key] || '').trim();
@@ -273,7 +276,16 @@
   };
 
   const selectCandidate = async item => {
+    // 选定候选后停掉待发的防抖搜索与在途请求，否则迟到的结果会把下拉重新弹开
+    window.clearTimeout(debounceTimer);
+    debounceTimer = 0;
+    if (searchAbort) {
+      searchAbort.abort();
+      searchAbort = null;
+    }
     closeMenu();
+    // 检索关键词写在 #name 里会被打上 userEdited，选定候选后必须清掉，否则酒名永远填不进去。
+    delete nameInput.dataset.userEdited;
     if (detailAbort) detailAbort.abort();
     detailAbort = new AbortController();
     setStatus('loading', '正在拉取「' + (item.brewery ? item.brewery + ' · ' : '') + item.name + '」的完整资料…');

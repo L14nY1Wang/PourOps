@@ -86,6 +86,13 @@
     background:var(--line-soft);font-size:.75rem;font-weight:600;color:var(--ink-2);
   }
 
+  .notice{
+    margin:0;padding:.65rem .85rem;border-radius:var(--r-sm);
+    background:var(--warn-soft);border:1px solid #dfcfa9;color:#6f4a0f;
+    font-size:.8rem;line-height:1.45;
+  }
+  .notice.is-err{background:#fdeceb;border-color:#f3c0ba;color:#9f2c20}
+
   .qr{
     display:flex;align-items:center;gap:.82rem;border:1px dashed #dfcfa9;border-radius:var(--r);
     background:var(--warn-soft);padding:.9rem .95rem;text-align:left;
@@ -151,6 +158,8 @@
     </div>
   </div>
 
+  {{if .Err}}<p class="notice is-err" role="alert">{{.Err}}</p>{{end}}
+  {{if .Msg}}<p class="notice" role="status">{{.Msg}}</p>{{end}}
   <div class="amount-box">
     <p class="amount-label">本次收款</p>
     <p class="amount">{{.Pay.AmountText}}</p>

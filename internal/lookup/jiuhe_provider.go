@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,7 +26,19 @@ const (
 	jiuheMaxBodyBytes    = 1 << 20 // 1 MiB
 	jiuheCacheTTL        = 5 * time.Minute
 	jiuheCacheMaxEntries = 128
+	// jiuheFailThreshold/jiuheFailCooldown：连续多次超时或 5xx 后进入 30s 冷却，
+	// 冷却期内直接快速失败，避免持续等待已宕机的上游。
+	jiuheFailThreshold = 2
+	jiuheFailCooldown  = 30 * time.Second
 )
+
+// jiuheHTTPError 保留 HTTP 状态码，供失败冷却区分 5xx 与 4xx。
+type jiuheHTTPError int
+
+func (e jiuheHTTPError) Error() string { return fmt.Sprintf("HTTP %d", int(e)) }
+
+// errJiuheCoolingDown 是上游失败冷却期内返回的错误，不发起任何网络请求。
+var errJiuheCoolingDown = errors.New("在线 UT 库暂时不可用")
 
 var reKegCap = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(ml|l|升)`)
 
@@ -137,6 +150,11 @@ type JiuheProvider struct {
 	client       *http.Client
 	cache        *JiuheCache
 	categoriesFn func() []string
+	now          func() time.Time // 可注入时钟，测试用；nil 时使用 time.Now
+
+	failMu   sync.Mutex
+	failures int
+	cooldown time.Time
 }
 
 func NewJiuheProvider(baseURL string, client *http.Client) *JiuheProvider {
@@ -148,6 +166,51 @@ func NewJiuheProvider(baseURL string, client *http.Client) *JiuheProvider {
 		client:  client,
 		cache:   NewJiuheCache(),
 	}
+}
+
+func (p *JiuheProvider) clock() time.Time {
+	if p.now != nil {
+		return p.now()
+	}
+	return time.Now()
+}
+
+// coolingDown 报告是否处于失败冷却期；冷却中直接失败，不再排队等待上游。
+func (p *JiuheProvider) coolingDown() bool {
+	p.failMu.Lock()
+	defer p.failMu.Unlock()
+	return p.clock().Before(p.cooldown)
+}
+
+// recordFetchResult 累计连续瞬时失败；达到阈值后开启冷却，成功则立即恢复。
+func (p *JiuheProvider) recordFetchResult(err error) {
+	p.failMu.Lock()
+	defer p.failMu.Unlock()
+	if err == nil {
+		p.failures = 0
+		p.cooldown = time.Time{}
+		return
+	}
+	if !isJiuheTransient(err) {
+		return
+	}
+	p.failures++
+	if p.failures >= jiuheFailThreshold {
+		p.failures = 0
+		p.cooldown = p.clock().Add(jiuheFailCooldown)
+	}
+}
+
+// isJiuheTransient 仅把超时/网络故障/5xx/坏响应体视为上游不可用；404 等业务错误不触发冷却。
+func isJiuheTransient(err error) bool {
+	if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var status jiuheHTTPError
+	if errors.As(err, &status) {
+		return int(status) >= 500
+	}
+	return true
 }
 
 func (p *JiuheProvider) SetCategoriesFn(fn func() []string) {
@@ -193,6 +256,15 @@ func (p *JiuheProvider) httpClient() *http.Client {
 }
 
 func (p *JiuheProvider) fetchJSON(ctx context.Context, targetURL string, dst any) error {
+	if p.coolingDown() {
+		return errJiuheCoolingDown
+	}
+	err := p.doFetchJSON(ctx, targetURL, dst)
+	p.recordFetchResult(err)
+	return err
+}
+
+func (p *JiuheProvider) doFetchJSON(ctx context.Context, targetURL string, dst any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return err
@@ -206,11 +278,13 @@ func (p *JiuheProvider) fetchJSON(ctx context.Context, targetURL string, dst any
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
-	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
+		// 读空剩余响应体，让底层连接可以复用（keep-alive），而不是被直接丢弃。
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		if resp.StatusCode == http.StatusNotFound {
+			return ErrNotFound
+		}
+		return jiuheHTTPError(resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, jiuheMaxBodyBytes+1))
 	if err != nil {
@@ -321,9 +395,14 @@ func (p *JiuheProvider) Search(ctx context.Context, q string, limit int) ([]Cand
 	if !p.Enabled() || strings.TrimSpace(q) == "" {
 		return nil, nil
 	}
+	maxOut := 10
+	if limit > 0 && limit < maxOut {
+		maxOut = limit
+	}
+	// 缓存整份未截断结果，按 limit 切片返回：不同 limit 复用同一次上游请求。
 	cacheKey := strings.ToLower(strings.TrimSpace(q))
 	if cached, ok := p.cache.getSearch(cacheKey); ok {
-		return cached, nil
+		return slices.Clone(cached[:min(len(cached), maxOut)]), nil
 	}
 
 	u := p.base() + "/mall/products?keyword=" + url.QueryEscape(q) + "&size=15&page=1"
@@ -394,7 +473,7 @@ func (p *JiuheProvider) Search(ctx context.Context, q string, limit int) ([]Cand
 			rating = fmt.Sprintf("%.2f", *it.Wine.UntappdRating)
 		}
 		poster := strings.TrimSpace(it.Product.CoverURL)
-		if !platform.ValidPosterURL(poster) {
+		if !platform.ValidRemotePosterURL(poster) {
 			poster = ""
 		}
 		c := Candidate{
@@ -418,16 +497,8 @@ func (p *JiuheProvider) Search(ctx context.Context, q string, limit int) ([]Cand
 	merged := make([]Candidate, 0, len(drafts)+len(nonDrafts))
 	merged = append(merged, drafts...)
 	merged = append(merged, nonDrafts...)
-	maxOut := 10
-	if limit > 0 && limit < maxOut {
-		maxOut = limit
-	}
-	if len(merged) > maxOut {
-		merged = merged[:maxOut]
-	}
-
 	p.cache.setSearch(cacheKey, merged)
-	return merged, nil
+	return slices.Clone(merged[:min(len(merged), maxOut)]), nil
 }
 
 func (p *JiuheProvider) Detail(ctx context.Context, rawID string) (Detail, error) {
@@ -506,7 +577,7 @@ func (p *JiuheProvider) Detail(ctx context.Context, rawID string) (Detail, error
 	if poster == "" && len(resp.Product.Images) > 0 {
 		poster = strings.TrimSpace(resp.Product.Images[0])
 	}
-	if !platform.ValidPosterURL(poster) {
+	if !platform.ValidRemotePosterURL(poster) {
 		poster = ""
 	}
 

@@ -290,62 +290,55 @@ func normalizeWebhook(rawURL, rawSecret string, rawEvents []string) (string, str
 	return urlStr, secret, cleanEvents, nil
 }
 
-func (s *SettingsStore) Save(ctx context.Context, in StoreSettings) (StoreSettings, error) {
+// SaveCombined 在 writeMu 锁保护下合并保存常规设置与 Webhook 配置，避免并发覆盖分类或现有密钥/事件。
+func (s *SettingsStore) SaveCombined(ctx context.Context, rawBrand string, sellablePct, marginPct int, rawURL, rawSecret string, clearSecret bool, rawEvents []string, hasEventsField bool) (StoreSettings, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
-	brand, sellable, margin, err := s.normalizeGeneral(in.Brand, in.DefaultSellablePct, in.DefaultMarginPct)
+	s.mu.RLock()
+	curCats := slices.Clone(s.cur.BeerCategories)
+	effectiveSecret := s.cur.WebhookSecret
+	effectiveEvents := slices.Clone(s.cur.WebhookEvents)
+	s.mu.RUnlock()
+
+	if len(curCats) == 0 {
+		curCats = slices.Clone(platform.DefaultBeerCategories)
+	}
+	if clearSecret {
+		effectiveSecret = ""
+	} else if trimmed := strings.TrimSpace(rawSecret); trimmed != "" {
+		effectiveSecret = trimmed
+	}
+	if hasEventsField {
+		effectiveEvents = rawEvents
+	}
+
+	brand, sellable, margin, err := s.normalizeGeneral(rawBrand, sellablePct, marginPct)
 	if err != nil {
 		return StoreSettings{}, err
 	}
-	in.Brand = brand
-	in.DefaultSellablePct = sellable
-	in.DefaultMarginPct = margin
-
-	if len(in.BeerCategories) == 0 {
-		in.BeerCategories = s.BeerCategories()
-	} else {
-		cleanCats, err := platform.NormalizeBeerCategories(in.BeerCategories)
-		if err != nil {
-			return StoreSettings{}, err
-		}
-		in.BeerCategories = cleanCats
-	}
-
-	urlStr, secret, cleanEvents, err := normalizeWebhook(in.WebhookURL, in.WebhookSecret, in.WebhookEvents)
-	if err != nil {
-		return StoreSettings{}, err
-	}
-	in.WebhookURL = urlStr
-	in.WebhookSecret = secret
-	in.WebhookEvents = cleanEvents
-
-	catsJSON, err := json.Marshal(in.BeerCategories)
+	urlStr, secret, cleanEvents, err := normalizeWebhook(rawURL, effectiveSecret, effectiveEvents)
 	if err != nil {
 		return StoreSettings{}, err
 	}
 	if err := s.upsertPairs(ctx, map[string]string{
-		"brand":                in.Brand,
-		"default_sellable_pct": strconv.Itoa(in.DefaultSellablePct),
-		"default_margin_pct":   strconv.Itoa(in.DefaultMarginPct),
-		"beer_categories":      string(catsJSON),
-		"webhook_url":          in.WebhookURL,
-		"webhook_secret":       in.WebhookSecret,
-		"webhook_events":       strings.Join(in.WebhookEvents, ","),
+		"brand":                brand,
+		"default_sellable_pct": strconv.Itoa(sellable),
+		"default_margin_pct":   strconv.Itoa(margin),
+		"webhook_url":          urlStr,
+		"webhook_secret":       secret,
+		"webhook_events":       strings.Join(cleanEvents, ","),
 	}); err != nil {
 		return StoreSettings{}, err
 	}
-
 	s.mu.Lock()
-	s.cur = StoreSettings{
-		Brand:              in.Brand,
-		DefaultSellablePct: in.DefaultSellablePct,
-		DefaultMarginPct:   in.DefaultMarginPct,
-		BeerCategories:     slices.Clone(in.BeerCategories),
-		WebhookURL:         in.WebhookURL,
-		WebhookSecret:      in.WebhookSecret,
-		WebhookEvents:      slices.Clone(in.WebhookEvents),
-	}
+	s.cur.Brand = brand
+	s.cur.DefaultSellablePct = sellable
+	s.cur.DefaultMarginPct = margin
+	s.cur.BeerCategories = slices.Clone(curCats)
+	s.cur.WebhookURL = urlStr
+	s.cur.WebhookSecret = secret
+	s.cur.WebhookEvents = slices.Clone(cleanEvents)
 	s.mu.Unlock()
 	return s.Get(), nil
 }

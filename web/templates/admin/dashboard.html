@@ -13,10 +13,10 @@
 
 <form class="card overview-filter" method="get" action="/admin/" role="search" aria-label="选择统计时间范围">
   <nav class="period-tabs" aria-label="快捷时间范围">
-    <a class="period-tab{{if eq .ReportPeriod "today"}} active" aria-current="true{{end}}" href="/admin/?period=today">今日</a>
-    <a class="period-tab{{if eq .ReportPeriod "7d"}} active" aria-current="true{{end}}" href="/admin/?period=7d">近 7 天</a>
-    <a class="period-tab{{if eq .ReportPeriod "30d"}} active" aria-current="true{{end}}" href="/admin/?period=30d">近 30 天</a>
-    <a class="period-tab{{if eq .ReportPeriod "month"}} active" aria-current="true{{end}}" href="/admin/?period=month">本月</a>
+    <a class="period-tab{{if eq .ReportPeriod "today"}} active{{end}}"{{if eq .ReportPeriod "today"}} aria-current="page"{{end}} href="/admin/?period=today">今日</a>
+    <a class="period-tab{{if eq .ReportPeriod "7d"}} active{{end}}"{{if eq .ReportPeriod "7d"}} aria-current="page"{{end}} href="/admin/?period=7d">近 7 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "30d"}} active{{end}}"{{if eq .ReportPeriod "30d"}} aria-current="page"{{end}} href="/admin/?period=30d">近 30 天</a>
+    <a class="period-tab{{if eq .ReportPeriod "month"}} active{{end}}"{{if eq .ReportPeriod "month"}} aria-current="page"{{end}} href="/admin/?period=month">本月</a>
   </nav>
   <div class="period-form">
     <label class="period-field"><span>开始日期</span><input type="date" name="start" value="{{.ReportStart}}" aria-describedby="period-hint"></label>
@@ -26,7 +26,7 @@
   </div>
 </form>
 
-{{if not .Err}}
+{{if not .InvalidPeriod}}
 <div class="section-head">
   <div>
     <h2>销售事实</h2>
@@ -44,7 +44,8 @@
   <div class="card stat-card">
     <div class="stat-top"><span>毛利</span><i class="bi bi-graph-up-arrow stat-icon--success" aria-hidden="true"></i></div>
     <strong class="stat-value">{{.Sales.Current.ProfitText}}</strong>
-    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong></div>
+    <div class="stat-meta">成本 {{.Sales.Current.CostText}} · 毛利率 {{.Sales.Current.MarginText}} · 环比 <strong>{{.Sales.ProfitChangeText}}</strong>{{if gt .Sales.FinishedWasteCost 0}} · 含结桶损耗 {{.Sales.FinishedWasteCostText}}{{end}}</div>
+    {{if gt .Sales.UncostedRevenue 0}}<div class="stat-meta text-warning">含 {{.Sales.UncostedRevenueText}} 未填成本售出，毛利率偏高仅供参考</div>{{end}}
   </div>
   <div class="card stat-card">
     <div class="stat-top"><span>桶装精酿</span><i class="bi bi-cup-straw stat-icon--amber" aria-hidden="true"></i></div>
@@ -88,7 +89,7 @@
 {{end}}
 
 <div class="dashboard-bottom">
-  {{if not .Err}}
+  {{if not .InvalidPeriod}}
   <section class="card overview-top" aria-labelledby="top-title">
     <div class="panel-heading"><h2 id="top-title">商品榜</h2><span class="panel-period">{{template "periodLabel" .}}</span></div>
     {{if .Sales.Top}}
@@ -214,7 +215,7 @@
   </ul>
 </section>
 
-{{if not .Err}}
+{{if not .InvalidPeriod}}
 {{if .POS.Orders}}<script type="application/json" id="pos-hours-data">{{.POS.HoursJSON}}</script>{{end}}
 {{end}}
 {{end}}

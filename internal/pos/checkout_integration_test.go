@@ -579,16 +579,20 @@ func TestPosAddItemRejectsDelistedBeer(t *testing.T) {
 		return w
 	}
 
-	if w := add(); !strings.Contains(w.Header().Get("Location"), "err=") {
-		t.Fatalf("下架酒加购应带错误提示重定向，Location=%q", w.Header().Get("Location"))
+	if w := add(); w.Code != http.StatusSeeOther {
+		t.Fatalf("下架酒加购状态 = %d, want 303", w.Code)
+	} else if _, errMsg := platform.ReadFlashCookies(w.Result().Cookies()); errMsg == "" {
+		t.Fatalf("下架酒加购应带 Flash 错误提示，实际空")
 	}
 	if got := qInt(t, pool, `select count(*)::int from order_items where order_id=$1`, order); got != 0 {
 		t.Fatalf("下架酒被加进账单：%d 行", got)
 	}
 
 	execSQL(t, pool, `update beers set on_screen=true where id=(select beer_id from kegs where id=$1)`, keg)
-	if w := add(); w.Code != http.StatusSeeOther || strings.Contains(w.Header().Get("Location"), "err=") {
+	if w := add(); w.Code != http.StatusSeeOther {
 		t.Fatalf("上架后加购失败：%d %q", w.Code, w.Header().Get("Location"))
+	} else if _, errMsg := platform.ReadFlashCookies(w.Result().Cookies()); errMsg != "" {
+		t.Fatalf("上架后加购不应有错误提示：%q", errMsg)
 	}
 	if got := qInt(t, pool, `select count(*)::int from order_items where order_id=$1`, order); got != 1 {
 		t.Fatalf("上架酒没加进账单：%d 行", got)
@@ -623,7 +627,7 @@ func TestPaymentGatewayAndPrinterExtensionPoints(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
 	ctx := platform.WithActor(context.Background(), "bar1")
 	keg := seedKeg(t, pool, 4500)
-	item := seedRetail(t, pool, 3000, 1000, 2)
+	item := seedRetail(t, pool, 3000, 1000, 4)
 	order, err := EnsureOrder(ctx, pool, "bar-1")
 	if err != nil {
 		t.Fatal(err)
@@ -658,9 +662,9 @@ func TestPaymentGatewayAndPrinterExtensionPoints(t *testing.T) {
 	reqFail.SetPathValue("id", strconv.FormatInt(order, 10))
 	recFail := httptest.NewRecorder()
 	svcReject.PosPay(recFail, reqFail)
-	locFail, _ := url.QueryUnescape(recFail.Header().Get("Location"))
-	if !strings.Contains(locFail, "扫码渠道超时") {
-		t.Fatalf("网关失败应跳转错误提示: %q", locFail)
+	_, failErrMsg := platform.ReadFlashCookies(recFail.Result().Cookies())
+	if !strings.Contains(failErrMsg, "扫码渠道超时") {
+		t.Fatalf("网关失败应跳转 Flash 错误提示: %q", failErrMsg)
 	}
 	if got := qInt(t, pool, `select count(*)::int from payments`); got != 0 {
 		t.Fatalf("网关失败应回滚支付: %d", got)

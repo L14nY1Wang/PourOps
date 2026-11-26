@@ -12,7 +12,6 @@ import (
 
 	"pourops/internal/event"
 	"pourops/internal/platform"
-	"pourops/internal/settings"
 	"pourops/migrations"
 )
 
@@ -53,7 +52,7 @@ func TestUntapSummaryKegListFiltersAndEventBus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// HTTP 下架第 1 桶，跳转 ?msg= 应带出整桶达标盈利复盘摘要，并发布 EventKegFinished。
+	// HTTP 下架第 1 桶，跳转 Flash Cookie 应带出整桶达标盈利复盘摘要，并发布 EventKegFinished。
 	reqUntap := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/admin/beers/%d/untap", beerID), nil)
 	reqUntap.SetPathValue("id", fmt.Sprintf("%d", beerID))
 	recUntap := httptest.NewRecorder()
@@ -61,9 +60,9 @@ func TestUntapSummaryKegListFiltersAndEventBus(t *testing.T) {
 	if recUntap.Code != http.StatusSeeOther {
 		t.Fatalf("untap status = %d", recUntap.Code)
 	}
-	loc, _ := url.QueryUnescape(recUntap.Header().Get("Location"))
-	if !strings.Contains(loc, "达标盈利") || !strings.Contains(loc, "1200") || !strings.Contains(loc, "50.0%") {
-		t.Fatalf("下架跳转提示未带盈利复盘摘要: %q", loc)
+	flashMsg, _ := platform.ReadFlashCookies(recUntap.Result().Cookies())
+	if !strings.Contains(flashMsg, "达标盈利") || !strings.Contains(flashMsg, "1200") || !strings.Contains(flashMsg, "50.0%") {
+		t.Fatalf("下架跳转提示未带盈利复盘摘要: %q", flashMsg)
 	}
 
 	mu.Lock()
@@ -153,11 +152,7 @@ func TestUntapSummaryKegListFiltersAndEventBus(t *testing.T) {
 	}
 
 	// 修改 SettingsStore 默认口径后，KegDetail HTML 应直接响应新配置
-	if _, err := cfgStore.Save(ctx, settings.StoreSettings{
-		Brand:              "PourOps",
-		DefaultSellablePct: 85,
-		DefaultMarginPct:   55,
-	}); err != nil {
+	if _, err := cfgStore.SaveGeneral(ctx, "PourOps", 85, 55); err != nil {
 		t.Fatal(err)
 	}
 	recDetCustom := httptest.NewRecorder()

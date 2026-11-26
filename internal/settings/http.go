@@ -69,10 +69,9 @@ func buildSelectedMap(events []string) map[string]bool {
 }
 
 func (s *Service) Page(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
 	cfg := s.store.Get()
 	s.renderer.Render(w, r, "admin/settings.html", &SettingsPage{
-		Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Msg: q.Get("msg"), Err: q.Get("err")},
+		Layout:         ui.Layout{Title: "系统设置", Nav: "settings"},
 		Settings:       cfg,
 		EventOptions:   event.WebhookEventOptions,
 		HasSecret:      cfg.WebhookSecret != "",
@@ -82,8 +81,7 @@ func (s *Service) Page(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) renderFormError(w http.ResponseWriter, r *http.Request, cfg StoreSettings, hasSecret bool, errMsg string) {
-	w.WriteHeader(http.StatusBadRequest)
-	s.renderer.Render(w, r, "admin/settings.html", &SettingsPage{
+	s.renderer.RenderStatus(w, r, http.StatusBadRequest, "admin/settings.html", &SettingsPage{
 		Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Err: errMsg},
 		Settings:       cfg,
 		EventOptions:   event.WebhookEventOptions,
@@ -130,7 +128,10 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing := s.store.Get()
-
+	_, hasEventsField := r.PostForm["webhook_events"]
+	if !hasEventsField && len(r.Form["webhook_events"]) > 0 {
+		hasEventsField = true
+	}
 	next := StoreSettings{
 		Brand:          strings.TrimSpace(r.FormValue("brand")),
 		BeerCategories: existing.BeerCategories,
@@ -138,23 +139,21 @@ func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
 		WebhookSecret:  existing.WebhookSecret,
 		WebhookEvents:  r.Form["webhook_events"],
 	}
-	if r.FormValue("clear_webhook_secret") != "" {
-		next.WebhookSecret = ""
-	} else if sec := strings.TrimSpace(r.FormValue("webhook_secret")); sec != "" {
-		next.WebhookSecret = sec
-	}
+	clearSecret := r.FormValue("clear_webhook_secret") != ""
+	rawSecret := r.FormValue("webhook_secret")
 
 	if errMsg := parsePricingFields(r, &next); errMsg != "" {
 		s.renderFormError(w, r, next, existing.WebhookSecret != "", errMsg)
 		return
 	}
 
-	if _, err := s.store.Save(r.Context(), next); err != nil {
+	if _, err := s.store.SaveCombined(r.Context(), next.Brand, next.DefaultSellablePct, next.DefaultMarginPct,
+		next.WebhookURL, rawSecret, clearSecret, next.WebhookEvents, hasEventsField); err != nil {
 		s.renderFormError(w, r, next, existing.WebhookSecret != "", saveErrorMessage(err, "保存系统设置失败，请稍后重试"))
 		return
 	}
 
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("系统设置已保存并实时生效"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", "系统设置已保存并实时生效")
 }
 
 func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
@@ -176,7 +175,7 @@ func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("门店与核算设置已保存并实时生效"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", "门店与核算设置已保存并实时生效")
 }
 
 func (s *Service) SaveWebhook(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +193,7 @@ func (s *Service) SaveWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("Webhook 配置已保存"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", "Webhook 配置已保存")
 }
 
 func (s *Service) AddCategory(w http.ResponseWriter, r *http.Request) {
@@ -205,14 +204,14 @@ func (s *Service) AddCategory(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.FormValue("name"))
 	if _, err := s.store.AddBeerCategory(r.Context(), raw); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
-			http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			platform.RedirectErr(w, r, "/admin/settings", msg)
 			return
 		}
 		log.Printf("add beer category (%q): %v", raw, err)
-		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("添加分类失败，请稍后重试"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/settings", "添加分类失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg(fmt.Sprintf("已添加分类「%s」", raw)), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", fmt.Sprintf("已添加分类「%s」", raw))
 }
 
 func (s *Service) DeleteCategory(w http.ResponseWriter, r *http.Request) {
@@ -223,34 +222,35 @@ func (s *Service) DeleteCategory(w http.ResponseWriter, r *http.Request) {
 	raw := strings.TrimSpace(r.FormValue("name"))
 	if _, err := s.store.DeleteBeerCategory(r.Context(), raw); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
-			http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			platform.RedirectErr(w, r, "/admin/settings", msg)
 			return
 		}
 		log.Printf("delete beer category (%q): %v", raw, err)
-		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("删除分类失败，请稍后重试"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/settings", "删除分类失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg(fmt.Sprintf("已从预设列表移除分类「%s」", raw)), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", fmt.Sprintf("已从预设列表移除分类「%s」", raw))
 }
 
 func (s *Service) ResetCategories(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.store.ResetBeerCategories(r.Context()); err != nil {
 		log.Printf("reset beer categories: %v", err)
-		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("恢复默认分类失败，请稍后重试"), http.StatusSeeOther)
+		platform.RedirectErr(w, r, "/admin/settings", "恢复默认分类失败，请稍后重试")
 		return
 	}
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("已恢复默认酒款分类"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", "已恢复默认酒款分类")
 }
 
 func (s *Service) TestWebhook(w http.ResponseWriter, r *http.Request) {
 	actor := platform.OperationActor(r.Context())
 	if err := s.webhooks.SendTest(r.Context(), actor); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
-			http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg(msg), http.StatusSeeOther)
+			platform.RedirectErr(w, r, "/admin/settings", msg)
 			return
 		}
-		http.Redirect(w, r, "/admin/settings?err="+platform.URLMsg("发送测试 Webhook 失败"), http.StatusSeeOther)
+		log.Printf("test webhook: %v", err)
+		platform.RedirectErr(w, r, "/admin/settings", "发送测试 Webhook 失败")
 		return
 	}
-	http.Redirect(w, r, "/admin/settings?msg="+platform.URLMsg("测试 Webhook 发送成功（HTTP 2xx）"), http.StatusSeeOther)
+	platform.RedirectMsg(w, r, "/admin/settings", "测试 Webhook 发送成功（HTTP 2xx）")
 }

@@ -65,14 +65,44 @@
     }
   });
 
+  const unlockSubmittingForms = () => {
+    document.querySelectorAll('form[data-submitting]').forEach(form => {
+      delete form.dataset.submitting;
+      form.removeAttribute('aria-busy');
+      form.querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]').forEach(btn => {
+        btn.disabled = false;
+      });
+    });
+  };
+  window.addEventListener('pageshow', unlockSubmittingForms);
+
   document.querySelectorAll('form').forEach(form => {
     form.addEventListener('submit', event => {
-      if (form.noValidate) return;
-      if (!form.checkValidity()) {
+      // 行内 onsubmit="return confirm(...)" 取消时先于本监听器调用 preventDefault，
+      // 不早退就会把按钮永久禁用。
+      if (event.defaultPrevented) return;
+      if (!form.noValidate && !form.checkValidity()) {
         event.preventDefault();
         form.reportValidity();
+        form.classList.add('was-validated');
+        return;
       }
       form.classList.add('was-validated');
+      if ((form.method || '').toLowerCase() !== 'post' || form.hasAttribute('data-allow-multi')) {
+        return;
+      }
+      if (form.dataset.submitting === '1') {
+        event.preventDefault();
+        return;
+      }
+      form.dataset.submitting = '1';
+      form.setAttribute('aria-busy', 'true');
+      window.setTimeout(() => {
+        if (form.dataset.submitting !== '1') return;
+        form.querySelectorAll('button[type="submit"], button:not([type]), input[type="submit"]').forEach(btn => {
+          btn.disabled = true;
+        });
+      }, 0);
     });
   });
 

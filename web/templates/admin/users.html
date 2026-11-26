@@ -32,6 +32,11 @@
               <form class="inline-form" method="post" action="/admin/users/{{.ID}}/toggle">
                 <button class="button button--tertiary button--sm" type="submit">{{if .Active}}停用{{else}}启用{{end}}<span class="visually-hidden"> {{.Username}}</span></button>
               </form>
+              {{if .TwoFactor}}
+              <form class="inline-form" method="post" action="/admin/users/{{.ID}}/reset-2fa" onsubmit="return confirm('重置 {{.Username}} 的两步验证？该账号下次登录需重新绑定验证器。')">
+                <button class="button button--tertiary button--sm" type="submit">重置 2FA<span class="visually-hidden"> {{.Username}}</span></button>
+              </form>
+              {{end}}
               <form class="inline-form" method="post" action="/admin/users/{{.ID}}/delete" onsubmit="return confirm('删掉账号 {{.Username}}？')">
                 <button class="button button--danger-soft button--sm" type="submit">删除<span class="visually-hidden"> {{.Username}}</span></button>
               </form>

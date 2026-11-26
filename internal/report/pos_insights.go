@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,22 +28,25 @@ type POSHour struct {
 
 func (i POSInsights) ReceivedText() string { return platform.PriceText(int(i.Received)) }
 
+// AverageText 客单价四舍五入到分；截断会把 50.5 分显示成 50 分。
 func (i POSInsights) AverageText() string {
 	if i.Orders == 0 {
 		return "—"
 	}
-	return platform.PriceText(int(i.Received / i.Orders))
+	return platform.PriceText(int(math.Round(float64(i.Received) / float64(i.Orders))))
 }
 
 func (h POSHour) ReceivedText() string { return platform.PriceText(int(h.Received)) }
 func (h POSHour) Label() string        { return fmt.Sprintf("%02d:00", h.Hour) }
 
 // LoadPOSInsights 在只读快照里读汇总和 24 小时分布（按营业日 07:00 至次日 06:00 顺序排列）。
+// Orders 只数「真有收款」的订单：amount_cents = 0 的赠送单不进客单价；同一张单跨营业日
+// 分两次收款时按收款日各记一次，所以它是「有收款的营业日订单数」，不是去重后的账单数。
 func LoadPOSInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (POSInsights, error) {
 	var out POSInsights
 	err := tx.QueryRow(ctx, `
 		select coalesce(sum(amount_cents), 0)::bigint,
-		       count(distinct order_id)::bigint,
+		       count(distinct order_id) filter (where amount_cents > 0)::bigint,
 		       count(*)::bigint
 		from payments
 		where created_at >= $1 and created_at < $2`, start, end).
@@ -52,7 +56,7 @@ func LoadPOSInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (POSI
 	}
 
 	rows, err := tx.Query(ctx, `
-		select extract(hour from created_at at time zone 'Asia/Shanghai')::int,
+		select extract(hour from (created_at at time zone 'UTC' + interval '8 hours'))::int,
 		       sum(amount_cents)::bigint,
 		       count(*)::bigint
 		from payments

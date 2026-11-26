@@ -288,9 +288,9 @@ func TestSaveBeerStrictValidationAndErrorSanitization(t *testing.T) {
 		reqDel.SetPathValue("id", fmt.Sprintf("%d", 1))
 		wDel := httptest.NewRecorder()
 		badSvc.DeleteBeerHandler(wDel, reqDel)
-		locDel, _ := url.QueryUnescape(wDel.Header().Get("Location"))
-		if wDel.Code != http.StatusSeeOther || !strings.Contains(locDel, "删除失败，请稍后重试") || strings.Contains(locDel, "closed pool") {
-			t.Fatalf("DeleteBeerHandler DB 错误未脱敏: code=%d loc=%q", wDel.Code, locDel)
+		_, delErrMsg := platform.ReadFlashCookies(wDel.Result().Cookies())
+		if wDel.Code != http.StatusSeeOther || !strings.Contains(delErrMsg, "删除失败，请稍后重试") || strings.Contains(delErrMsg, "closed pool") {
+			t.Fatalf("DeleteBeerHandler DB 错误未脱敏: code=%d err=%q loc=%q", wDel.Code, delErrMsg, wDel.Header().Get("Location"))
 		}
 	}
 }
@@ -387,7 +387,13 @@ func TestPosterUploadRemoteFetchReplaceAndCleanupKeepsOnlyLatest(t *testing.T) {
 		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
 		0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89,
 	}
-	jpegBytes := []byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xD9}
+	// 1×1 基线 JPEG：带 SOF0，才能通过 image.DecodeConfig 的尺寸校验。
+	jpegBytes := []byte{
+		0xFF, 0xD8,
+		0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+		0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+		0xFF, 0xD9,
+	}
 
 	svc.posters.SetHTTPClientForTest(&http.Client{Transport: invRoundTripFn(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{

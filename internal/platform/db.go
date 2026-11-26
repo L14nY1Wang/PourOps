@@ -34,13 +34,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS) error {
 		return err
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(ctx, `select pg_advisory_lock($1)`, MigrationLockKey); err != nil {
+	if err := acquireMigrationLock(ctx, conn); err != nil {
 		return err
 	}
 	defer conn.Exec(context.WithoutCancel(ctx), `select pg_advisory_unlock($1)`, MigrationLockKey)
 
-	if _, err := conn.Exec(ctx, `create table if not exists schema_migrations (
-		name text primary key, applied_at timestamptz not null default now())`); err != nil {
+	if err := ensureMigrationsTable(ctx, conn); err != nil {
 		return err
 	}
 	entries, err := fs.ReadDir(migrationFS, ".")
@@ -69,18 +68,53 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, migrationFS fs.FS) error {
 }
 
 func MigrateOneForTest(ctx context.Context, conn *pgxpool.Conn, name, sqlText string) error {
+	if err := ensureMigrationsTable(ctx, conn); err != nil {
+		return err
+	}
 	return migrateOne(ctx, conn, name, sqlText)
 }
 
-// migrateOne 在单个事务里跑一个文件的 SQL 并记下它；出错回滚，下次启动可重跑。
-// 事务里放不了 create index concurrently，以后要加这种迁移得单独走一条路径。
-func migrateOne(ctx context.Context, conn *pgxpool.Conn, name, sqlText string) error {
-	var done bool
-	if err := conn.QueryRow(ctx,
-		`select exists(select 1 from schema_migrations where name=$1)`, name).Scan(&done); err != nil {
+func ensureMigrationsTable(ctx context.Context, conn *pgxpool.Conn) error {
+	if _, err := conn.Exec(ctx, `create table if not exists schema_migrations (
+		name text primary key,
+		applied_at timestamptz not null default now(),
+		checksum text not null default '')`); err != nil {
 		return err
 	}
+	_, err := conn.Exec(ctx, `alter table schema_migrations add column if not exists checksum text not null default ''`)
+	return err
+}
+
+// migrateOne 在单个事务里跑一个文件的 SQL 并记下它及校验和；出错回滚，下次启动可重跑。
+// 事务里放不了 create index concurrently，以后要加这种迁移得单独走一条路径。
+func migrateOne(ctx context.Context, conn *pgxpool.Conn, name, sqlText string) error {
+	rows, err := conn.Query(ctx, `select checksum from schema_migrations where name=$1`, name)
+	if err != nil {
+		return err
+	}
+	done := false
+	var recorded string
+	if rows.Next() {
+		done = true
+		if err := rows.Scan(&recorded); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	sum := sqlChecksum(sqlText)
 	if done {
+		if recorded != "" && recorded != sum {
+			return fmt.Errorf("迁移 %s 校验和不一致（已应用的文件可能被修改）", name)
+		}
+		if recorded == "" {
+			if _, err := conn.Exec(ctx, `update schema_migrations set checksum=$2 where name=$1 and checksum=''`, name, sum); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	tx, err := conn.Begin(ctx)
@@ -91,7 +125,7 @@ func migrateOne(ctx context.Context, conn *pgxpool.Conn, name, sqlText string) e
 	if _, err := tx.Exec(ctx, sqlText); err != nil {
 		return fmt.Errorf("迁移 %s: %w", name, err)
 	}
-	if _, err := tx.Exec(ctx, `insert into schema_migrations (name) values ($1)`, name); err != nil {
+	if _, err := tx.Exec(ctx, `insert into schema_migrations (name, checksum) values ($1, $2)`, name, sum); err != nil {
 		return fmt.Errorf("迁移 %s: %w", name, err)
 	}
 	if err := tx.Commit(ctx); err != nil {

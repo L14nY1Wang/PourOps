@@ -170,6 +170,9 @@ func SaveBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, all
 	b.Name = strings.TrimSpace(b.Name)
 	b.Style = strings.TrimSpace(b.Style)
 	b.PosterURL = strings.TrimSpace(b.PosterURL)
+	if err := platform.ValidateBeerTexts(b.Brewery, b.Name, b.Style, b.Category, b.PosterURL, b.Tags); err != nil {
+		return 0, err
+	}
 	cat, err := platform.ValidateBeerFieldsWithCategories(b.Name, b.Category, b.PosterURL, b.ABV, b.UT, b.IBU, b.UTCount, b.Price150, b.Price330, b.Price500, b.SortOrder, allowed, extraAllowed...)
 	if err != nil {
 		return 0, err
@@ -185,6 +188,9 @@ func SaveBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, all
 		b.SalesTags = []string{}
 	}
 	b.SyncPrice()
+	if err := lockPosterURL(ctx, q, b.PosterURL); err != nil {
+		return 0, err
+	}
 	if b.ID == 0 {
 		err := q.QueryRow(ctx, `insert into beers
 			(no, brewery, name, style, category, abv, ibu, size, price_cents, price_150, price_330, price_500,
@@ -212,7 +218,7 @@ func SaveBeerWithCategories(ctx context.Context, q platform.Querier, b Beer, all
 	return b.ID, nil
 }
 
-// DeleteBeer 禁止删除已有售出流水的酒款，防止级联擦除历史营业额与桶装记录。
+// DeleteBeer 禁止删除已有酒桶或售出记录的酒款，防止破坏库存与历史营收审计台账。
 func DeleteBeer(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -220,28 +226,26 @@ func DeleteBeer(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	}
 	defer tx.Rollback(ctx)
 
-	var lockedID int64
-	if err := tx.QueryRow(ctx, `select id from beers where id=$1 for update`, id).Scan(&lockedID); err != nil {
+	var brewery, name string
+	if err := tx.QueryRow(ctx, `select brewery, name from beers where id=$1 for update`, id).Scan(&brewery, &name); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return platform.UserErr("酒款不存在")
 		}
 		return err
 	}
 
-	var hasPours bool
-	if err := tx.QueryRow(ctx, `
-		select exists(
-			select 1 from keg_pours p
-			join kegs k on k.id = p.keg_id
-			where k.beer_id = $1
-		)`, id).Scan(&hasPours); err != nil {
+	var hasKegs bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from kegs where beer_id=$1)`, id).Scan(&hasKegs); err != nil {
 		return err
 	}
-	if hasPours {
-		return platform.UserErr("有售出记录的酒款不能删除，下架保留即可")
+	if hasKegs {
+		return platform.UserErr("已有酒桶或售出记录的酒款不能删除，下架保留即可")
 	}
 
 	if _, err := tx.Exec(ctx, `delete from beers where id=$1`, id); err != nil {
+		return err
+	}
+	if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.BeerSubject(brewery, name), "删除酒款"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

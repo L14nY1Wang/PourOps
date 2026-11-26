@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/catalog"
@@ -57,14 +58,14 @@ func scanKeg(row interface {
 	return k, err
 }
 
-func ListKegs(ctx context.Context, pool *pgxpool.Pool, onlyActive bool) ([]Keg, error) {
-	q := kegSelect
+func ListKegs(ctx context.Context, q platform.Querier, onlyActive bool) ([]Keg, error) {
+	sqlStr := kegSelect
 	if onlyActive {
 		// 在售＝已开桶且没停售；进了货还没开的那几桶不算。
-		q += ` where k.tapped_at is not null and k.finished_at is null`
+		sqlStr += ` where k.tapped_at is not null and k.finished_at is null`
 	}
-	q += kegGroup + ` order by (k.finished_at is null and k.tapped_at is not null) desc, k.placed_at desc nulls last, k.id desc`
-	rows, err := pool.Query(ctx, q)
+	sqlStr += kegGroup + ` order by (k.finished_at is null and k.tapped_at is not null) desc, k.placed_at desc nulls last, k.id desc`
+	rows, err := q.Query(ctx, sqlStr)
 	if err != nil {
 		return nil, err
 	}
@@ -87,33 +88,61 @@ func GetKeg(ctx context.Context, pool *pgxpool.Pool, id int64) (Keg, error) {
 // SaveKeg 新建或更新一桶；beer_id 必须指向已存在的酒款。
 // 先按 id 升序锁 beers 行（和 TapBeer/UntapBeerResult 同序），再锁桶行，
 // 所以后台手工把一桶填成「在售」也要过单在售桶的检查。
+type SaveKegResult struct {
+	KegID    int64
+	BeerID   int64
+	Brewery  string
+	BeerName string
+	OpKind   string
+}
+
 func SaveKeg(ctx context.Context, pool *pgxpool.Pool, k Keg) (int64, error) {
+	res, err := SaveKegResultFn(ctx, pool, k)
+	return res.KegID, err
+}
+
+func SaveKegResultFn(ctx context.Context, pool *pgxpool.Pool, k Keg) (SaveKegResult, error) {
 	if k.BeerID == 0 {
-		return 0, platform.UserErr("先选一款酒")
+		return SaveKegResult{}, platform.UserErr("先选一款酒")
 	}
 	if k.CapacityML <= 0 {
-		return 0, platform.UserErr("桶容量要大于 0")
+		return SaveKegResult{}, platform.UserErr("桶容量要大于 0")
 	}
 	if k.CostCents < 0 {
-		return 0, platform.UserErr("成本不能为负")
+		return SaveKegResult{}, platform.UserErr("成本不能为负")
+	}
+	if len([]rune(strings.TrimSpace(k.KegNo))) > 40 {
+		return SaveKegResult{}, platform.UserErr("桶号过长（最多 40 字）")
+	}
+	if len([]rune(strings.TrimSpace(k.Note))) > 500 {
+		return SaveKegResult{}, platform.UserErr("备注过长（最多 500 字）")
+	}
+	if k.PlacedAt != nil && k.TappedAt != nil && k.TappedAt.Before(*k.PlacedAt) {
+		return SaveKegResult{}, platform.UserErr("开桶时间不能早于入库时间")
+	}
+	if k.FinishedAt != nil && k.TappedAt == nil {
+		return SaveKegResult{}, platform.UserErr("未开桶的酒桶不能直接填结桶时间")
+	}
+	if k.FinishedAt != nil && k.TappedAt != nil && k.FinishedAt.Before(*k.TappedAt) {
+		return SaveKegResult{}, platform.UserErr("结桶时间不能早于开桶时间")
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return SaveKegResult{}, err
 	}
 	defer tx.Rollback(ctx)
 
 	beerIDs := []int64{k.BeerID}
 	var oldBeerID int64
+	var oldCapacity, oldCost int
 	var oldTapped, oldFinished bool
 	if k.ID != 0 {
-		err = tx.QueryRow(ctx, `select beer_id, tapped_at is not null, finished_at is not null
-			from kegs where id=$1`, k.ID).Scan(&oldBeerID, &oldTapped, &oldFinished)
+		err = tx.QueryRow(ctx, `select beer_id from kegs where id=$1`, k.ID).Scan(&oldBeerID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, platform.UserErr("酒桶不存在")
+			return SaveKegResult{}, platform.UserErr("酒桶不存在")
 		}
 		if err != nil {
-			return 0, err
+			return SaveKegResult{}, err
 		}
 		if oldBeerID != k.BeerID {
 			beerIDs = append(beerIDs, oldBeerID)
@@ -122,24 +151,43 @@ func SaveKeg(ctx context.Context, pool *pgxpool.Pool, k Keg) (int64, error) {
 	var locked int
 	if err := tx.QueryRow(ctx, `select count(*)::int from (
 		select id from beers where id = any($1) order by id for update) b`, beerIDs).Scan(&locked); err != nil {
-		return 0, err
+		return SaveKegResult{}, err
 	}
 	if locked != len(beerIDs) {
-		return 0, platform.UserErr("酒款不存在")
+		return SaveKegResult{}, platform.UserErr("酒款不存在")
 	}
 
 	var brewery, name string
 	if err := tx.QueryRow(ctx, `select coalesce(brewery,''), name from beers where id=$1`, k.BeerID).
 		Scan(&brewery, &name); err != nil {
-		return 0, err
+		return SaveKegResult{}, err
 	}
 	if k.ID != 0 {
 		var beerID int64
-		if err := tx.QueryRow(ctx, `select beer_id from kegs where id=$1 for update`, k.ID).Scan(&beerID); err != nil {
-			return 0, err
+		if err := tx.QueryRow(ctx, `select beer_id, capacity_ml, cost_cents, tapped_at is not null, finished_at is not null
+			from kegs where id=$1 for update`, k.ID).Scan(&beerID, &oldCapacity, &oldCost, &oldTapped, &oldFinished); err != nil {
+			return SaveKegResult{}, err
 		}
 		if beerID != oldBeerID {
-			return 0, platform.UserErr("这桶刚被改过，重试一下")
+			return SaveKegResult{}, platform.UserErr("这桶刚被改过，重试一下")
+		}
+		var soldML int
+		var pourCount int
+		if err := tx.QueryRow(ctx, `select count(*)::int, coalesce(sum(ml),0)::int from keg_pours where keg_id=$1`, k.ID).Scan(&pourCount, &soldML); err != nil {
+			return SaveKegResult{}, err
+		}
+		hasPours := pourCount > 0
+		if k.BeerID != oldBeerID && (hasPours || oldTapped) {
+			return SaveKegResult{}, platform.UserErr("已开桶或有售出记录的酒桶不能更换所属酒款")
+		}
+		if hasPours && k.TappedAt == nil {
+			return SaveKegResult{}, platform.UserErr("已有售出记录的酒桶不能改回未开桶状态")
+		}
+		if oldFinished && k.FinishedAt == nil {
+			return SaveKegResult{}, platform.UserErr("已结桶的酒桶不能重新改为在售，请新开一桶")
+		}
+		if soldML > 0 && k.CapacityML < soldML {
+			return SaveKegResult{}, platform.UserErr("桶容量不能小于已售出毫升数")
 		}
 	}
 	// 手工填了开桶时间就是在开桶，得和在售的那桶互斥。
@@ -148,10 +196,10 @@ func SaveKeg(ctx context.Context, pool *pgxpool.Pool, k Keg) (int64, error) {
 		if err := tx.QueryRow(ctx, `select exists (select 1 from kegs
 			where beer_id=$1 and tapped_at is not null and finished_at is null and id <> $2)`,
 			k.BeerID, k.ID).Scan(&active); err != nil {
-			return 0, err
+			return SaveKegResult{}, err
 		}
 		if active {
-			return 0, platform.UserErr("这款酒已经有在售桶了，先在酒单里下架那桶")
+			return SaveKegResult{}, platform.UserErr("这款酒已经有在售桶了，先在酒单里下架那桶")
 		}
 	}
 	if k.ID == 0 {
@@ -159,38 +207,116 @@ func SaveKeg(ctx context.Context, pool *pgxpool.Pool, k Keg) (int64, error) {
 		if err := tx.QueryRow(ctx, `insert into kegs (beer_id, keg_no, capacity_ml, cost_cents, placed_at, tapped_at, finished_at, note)
 			values ($1,$2,$3,$4,$5,$6,$7,$8) returning id`,
 			k.BeerID, k.KegNo, k.CapacityML, k.CostCents, k.PlacedAt, k.TappedAt, k.FinishedAt, k.Note).Scan(&id); err != nil {
-			return 0, err
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return SaveKegResult{}, platform.UserErr("这款酒已经有在售桶了，先在酒单里下架那桶")
+			}
+			return SaveKegResult{}, err
 		}
 		detail := fmt.Sprintf("新建酒桶 #%d · %s · %dml · 进价 %s", id, k.Status(), k.CapacityML, platform.PriceText(k.CostCents))
 		if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.BeerSubject(brewery, name), detail); err != nil {
-			return 0, err
+			return SaveKegResult{}, err
 		}
-		return id, tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return SaveKegResult{}, err
+		}
+		return SaveKegResult{KegID: id, BeerID: k.BeerID, Brewery: brewery, BeerName: name, OpKind: platform.OpStock}, nil
 	}
 	if _, err := tx.Exec(ctx, `update kegs set beer_id=$2, keg_no=$3, capacity_ml=$4, cost_cents=$5,
 		placed_at=$6, tapped_at=$7, finished_at=$8, note=$9 where id=$1`,
 		k.ID, k.BeerID, k.KegNo, k.CapacityML, k.CostCents, k.PlacedAt, k.TappedAt, k.FinishedAt, k.Note); err != nil {
-		return 0, err
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return SaveKegResult{}, platform.UserErr("这款酒已经有在售桶了，先在酒单里下架那桶")
+		}
+		return SaveKegResult{}, err
 	}
 	// 只有真实的状态翻转才写流水；改容量、成本、备注这些 metadata 不记。
+	opKind := ""
 	switch {
 	case k.FinishedAt != nil && !oldFinished:
+		opKind = platform.OpUntap
 		if err := platform.LogOperation(ctx, tx, platform.OpUntap, platform.BeerSubject(brewery, name),
 			fmt.Sprintf("编辑结桶 · 桶 #%d", k.ID)); err != nil {
-			return 0, err
+			return SaveKegResult{}, err
 		}
 	case k.FinishedAt == nil && k.TappedAt != nil && (!oldTapped || oldFinished):
+		opKind = platform.OpTap
 		if err := platform.LogOperation(ctx, tx, platform.OpTap, platform.BeerSubject(brewery, name),
 			fmt.Sprintf("编辑开桶 · 桶 #%d", k.ID)); err != nil {
-			return 0, err
+			return SaveKegResult{}, err
 		}
 	}
-	return k.ID, tx.Commit(ctx)
+	if oldCapacity != k.CapacityML || oldCost != k.CostCents {
+		if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.BeerSubject(brewery, name),
+			fmt.Sprintf("修改桶 #%d 规格 · %d→%dml · 进价 %s→%s",
+				k.ID, oldCapacity, k.CapacityML, platform.PriceText(oldCost), platform.PriceText(k.CostCents))); err != nil {
+			return SaveKegResult{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SaveKegResult{}, err
+	}
+	return SaveKegResult{KegID: k.ID, BeerID: k.BeerID, Brewery: brewery, BeerName: name, OpKind: opKind}, nil
 }
 
 func DeleteKeg(ctx context.Context, pool *pgxpool.Pool, id int64) error {
-	_, err := pool.Exec(ctx, `delete from kegs where id=$1`, id)
-	return err
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var beerID int64
+	err = tx.QueryRow(ctx, `select beer_id from kegs where id=$1`, id).Scan(&beerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return platform.UserErr("酒桶不存在")
+	}
+	if err != nil {
+		return err
+	}
+	// 严格按 beers -> kegs 顺序加锁，与 SaveKeg/TapBeer/UntapBeer 同序，杜绝 AB-BA 死锁。
+	var brewery, beerName string
+	if err := tx.QueryRow(ctx, `select coalesce(brewery,''), name from beers where id=$1 for update`, beerID).
+		Scan(&brewery, &beerName); err != nil {
+		return err
+	}
+	var lockedBeerID int64
+	err = tx.QueryRow(ctx, `select beer_id from kegs where id=$1 for update`, id).Scan(&lockedBeerID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return platform.UserErr("酒桶不存在")
+	}
+	if err != nil {
+		return err
+	}
+	if lockedBeerID != beerID {
+		return platform.UserErr("这桶刚被改过，重试一下")
+	}
+	var hasPours bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from keg_pours where keg_id=$1)`, id).Scan(&hasPours); err != nil {
+		return err
+	}
+	if hasPours {
+		return platform.UserErr("已有售出记录的酒桶不能删除")
+	}
+	var hasUnpaidOrder bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from order_items where kind='beer' and ref_id=$1 and paid_at is null)`, id).Scan(&hasUnpaidOrder); err != nil {
+		return err
+	}
+	if hasUnpaidOrder {
+		return platform.UserErr("该酒桶还有未结账 POS 订单占用，先清理订单")
+	}
+	if _, err := tx.Exec(ctx, `delete from kegs where id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `update beers set on_screen=false, updated_at=now()
+		where id=$1 and on_screen and not exists(select 1 from kegs where beer_id=$1 and tapped_at is not null and finished_at is null)`, beerID); err != nil {
+		return err
+	}
+	if err := platform.LogOperation(ctx, tx, platform.OpStock, platform.BeerSubject(brewery, beerName), fmt.Sprintf("删除酒桶 #%d", id)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 type Pour struct {
@@ -200,13 +326,22 @@ type Pour struct {
 	ML          int
 	AmountCents int
 	PouredAt    time.Time
+	Source      string
+	PaymentID   *int64
 }
 
-func (p Pour) PouredText() string { return p.PouredAt.Format("01-02 15:04") }
+func (p Pour) PouredText() string { return platform.TimeText(&p.PouredAt) }
 func (p Pour) Amount() string     { return platform.PriceText(p.AmountCents) }
+func (p Pour) CanVoid() bool      { return p.Source != "pos" && p.PaymentID == nil }
+func (p Pour) SourceLabel() string {
+	if p.Source == "pos" {
+		return "POS"
+	}
+	return "手工"
+}
 
 func ListPours(ctx context.Context, pool *pgxpool.Pool, kegID int64) ([]Pour, error) {
-	rows, err := pool.Query(ctx, `select id, keg_id, cups, ml, amount_cents, poured_at
+	rows, err := pool.Query(ctx, `select id, keg_id, cups, ml, amount_cents, poured_at, source, payment_id
 		from keg_pours where keg_id=$1 order by poured_at desc, id desc`, kegID)
 	if err != nil {
 		return nil, err
@@ -215,7 +350,7 @@ func ListPours(ctx context.Context, pool *pgxpool.Pool, kegID int64) ([]Pour, er
 	var out []Pour
 	for rows.Next() {
 		var p Pour
-		if err := rows.Scan(&p.ID, &p.KegID, &p.Cups, &p.ML, &p.AmountCents, &p.PouredAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.KegID, &p.Cups, &p.ML, &p.AmountCents, &p.PouredAt, &p.Source, &p.PaymentID); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -223,9 +358,16 @@ func ListPours(ctx context.Context, pool *pgxpool.Pool, kegID int64) ([]Pour, er
 	return out, rows.Err()
 }
 
-// AddPourTx 在调用方事务里记一笔售出；ml 是本次售出的总毫升。
-// 锁住桶行，与结桶（UntapBeerResult 写 finished_at）互斥。
-func AddPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int) error {
+// KegOrderSnap 保留 POS 结账锁桶后一次查询得到的酒桶状态与成本快照，避免同事务重复加锁查询。
+type KegOrderSnap struct {
+	ID         int64
+	TappedAt   *time.Time
+	FinishedAt *time.Time
+	CapacityML int
+	CostCents  int
+}
+
+func validatePourAmounts(cups, ml, amountCents int) error {
 	if cups <= 0 {
 		return platform.UserErr("杯数要大于 0")
 	}
@@ -235,24 +377,130 @@ func AddPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCent
 	if ml == 0 && amountCents == 0 {
 		return platform.UserErr("毫升和金额至少填一个")
 	}
-	var tapped, finished bool
-	err := tx.QueryRow(ctx, `select tapped_at is not null, finished_at is not null
-		from kegs where id=$1 for update`, kegID).Scan(&tapped, &finished)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return platform.UserErr("这桶不存在")
-	}
-	if err != nil {
+	return nil
+}
+
+// ValidateKegOrderSnap 按酒桶快照校验单笔售出合法性。
+func ValidateKegOrderSnap(snap KegOrderSnap, found bool, cups, ml, amountCents int, source string, orderedAt *time.Time) error {
+	if err := validatePourAmounts(cups, ml, amountCents); err != nil {
 		return err
 	}
-	if finished {
-		return platform.UserErr("这桶已结桶，不能再记售出")
+	if !found {
+		return platform.UserErr("这桶不存在")
 	}
-	if !tapped {
+	if snap.TappedAt == nil {
 		return platform.UserErr("这桶还没开，先上架开桶")
 	}
-	_, err = tx.Exec(ctx, `insert into keg_pours (keg_id, cups, ml, amount_cents) values ($1,$2,$3,$4)`,
-		kegID, cups, ml, amountCents)
+	if snap.FinishedAt != nil {
+		if source != "pos" || orderedAt == nil {
+			return platform.UserErr("这桶已结桶，不能再记售出")
+		}
+		if orderedAt.After(*snap.FinishedAt) {
+			return platform.UserErr("这桶已结桶，下单时间晚于结桶时间，无法继续核销")
+		}
+	}
+	return nil
+}
+
+// LockKegsForOrderTx 在 POS 结账事务里按 ID 升序一次锁住全部涉桶行并返回快照。
+func LockKegsForOrderTx(ctx context.Context, tx pgx.Tx, kegIDs []int64) (map[int64]KegOrderSnap, error) {
+	if len(kegIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `select id, tapped_at, finished_at, capacity_ml, cost_cents
+		from kegs where id = any($1::bigint[]) order by id for update`, kegIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	snaps := make(map[int64]KegOrderSnap, len(kegIDs))
+	for rows.Next() {
+		var s KegOrderSnap
+		if err := rows.Scan(&s.ID, &s.TappedAt, &s.FinishedAt, &s.CapacityML, &s.CostCents); err != nil {
+			return nil, err
+		}
+		snaps[s.ID] = s
+	}
+	return snaps, rows.Err()
+}
+
+// CheckKegOrderSnap 校验 POS 订单中的酒水条目在已锁定快照下可被核销。
+func CheckKegOrderSnap(snap KegOrderSnap, found bool, cups, ml, amountCents int, orderedAt time.Time) error {
+	return ValidateKegOrderSnap(snap, found, cups, ml, amountCents, "pos", &orderedAt)
+}
+
+func validateKegPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int, source string, orderedAt *time.Time) (KegOrderSnap, error) {
+	if err := validatePourAmounts(cups, ml, amountCents); err != nil {
+		return KegOrderSnap{}, err
+	}
+	snap := KegOrderSnap{ID: kegID}
+	err := tx.QueryRow(ctx, `select tapped_at, finished_at, capacity_ml, cost_cents
+		from kegs where id=$1 for update`, kegID).Scan(&snap.TappedAt, &snap.FinishedAt, &snap.CapacityML, &snap.CostCents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return KegOrderSnap{}, ValidateKegOrderSnap(snap, false, cups, ml, amountCents, source, orderedAt)
+	}
+	if err != nil {
+		return KegOrderSnap{}, err
+	}
+	if err := ValidateKegOrderSnap(snap, true, cups, ml, amountCents, source, orderedAt); err != nil {
+		return KegOrderSnap{}, err
+	}
+	return snap, nil
+}
+
+// CheckKegForOrderTx 校验 POS 订单中的酒水条目在当前事务里可被核销，并按需锁住酒桶行。
+func CheckKegForOrderTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int, orderedAt time.Time) error {
+	_, err := validateKegPourTx(ctx, tx, kegID, cups, ml, amountCents, "pos", &orderedAt)
 	return err
+}
+
+func insertPourValidatedTx(ctx context.Context, tx pgx.Tx, snap KegOrderSnap, cups, ml, amountCents int, source string, paymentID *int64) (bool, error) {
+	overSold := false
+	if ml > 0 && snap.CapacityML > 0 {
+		var pouredML int64
+		if err := tx.QueryRow(ctx, `select coalesce(sum(ml),0)::bigint from keg_pours where keg_id=$1`, snap.ID).Scan(&pouredML); err != nil {
+			return false, err
+		}
+		if pouredML+int64(ml) > int64(snap.CapacityML) {
+			overSold = true
+		}
+	}
+	var snapCost *int
+	if snap.CostCents > 0 && snap.CapacityML > 0 {
+		c := int((int64(snap.CostCents)*int64(ml) + int64(snap.CapacityML)/2) / int64(snap.CapacityML))
+		snapCost = &c
+	}
+	if _, err := tx.Exec(ctx, `insert into keg_pours (keg_id, cups, ml, amount_cents, source, payment_id, cost_cents)
+		values ($1,$2,$3,$4,$5,$6,$7)`,
+		snap.ID, cups, ml, amountCents, source, paymentID, snapCost); err != nil {
+		return false, err
+	}
+	return overSold, nil
+}
+
+func insertPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int, source string, paymentID *int64, orderedAt *time.Time) (bool, error) {
+	snap, err := validateKegPourTx(ctx, tx, kegID, cups, ml, amountCents, source, orderedAt)
+	if err != nil {
+		return false, err
+	}
+	return insertPourValidatedTx(ctx, tx, snap, cups, ml, amountCents, source, paymentID)
+}
+
+// AddPourTx 在调用方事务里记一笔手工售出；ml 是本次售出的总毫升。
+// 锁住桶行，与结桶（UntapBeerResult 写 finished_at）互斥。
+func AddPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int) error {
+	_, err := insertPourTx(ctx, tx, kegID, cups, ml, amountCents, "manual", nil, nil)
+	return err
+}
+
+// AddPourForOrderTx 在 POS 结账事务里记售出（记录付款单、成本快照，允许结桶前已下单条目核销，并标记是否超容）。
+func AddPourForOrderTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int, paymentID int64, orderedAt time.Time) (bool, error) {
+	return insertPourTx(ctx, tx, kegID, cups, ml, amountCents, "pos", &paymentID, &orderedAt)
+}
+
+// AddPourForOrderWithSnapTx 使用结账前置 LockKegsForOrderTx + CheckKegOrderSnap 的快照落库售出记录，免去重复锁桶查询。
+func AddPourForOrderWithSnapTx(ctx context.Context, tx pgx.Tx, snap KegOrderSnap, cups, ml, amountCents int, paymentID int64) (bool, error) {
+	return insertPourValidatedTx(ctx, tx, snap, cups, ml, amountCents, "pos", &paymentID)
 }
 
 func AddPour(ctx context.Context, pool *pgxpool.Pool, kegID int64, cups, ml, amountCents int) error {
@@ -276,8 +524,7 @@ func AddPour(ctx context.Context, pool *pgxpool.Pool, kegID int64, cups, ml, amo
 	return tx.Commit(ctx)
 }
 
-// DeletePour 删一笔手工售出；先 DELETE ... RETURNING 拿到快照，删不存在的记录直接报错，
-// 不会凭空写一条撤销流水。
+// DeletePour 删一笔手工售出；锁定并校验非 POS 订单与未结桶后才允许撤销并写审计流水。
 func DeletePour(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -286,17 +533,27 @@ func DeletePour(ctx context.Context, pool *pgxpool.Pool, id int64) error {
 	defer tx.Rollback(ctx)
 
 	var p Pour
-	err = tx.QueryRow(ctx, `delete from keg_pours where id=$1
-		returning keg_id, cups, ml, amount_cents`, id).Scan(&p.KegID, &p.Cups, &p.ML, &p.AmountCents)
+	err = tx.QueryRow(ctx, `select keg_id, cups, ml, amount_cents, source, payment_id
+		from keg_pours where id=$1 for update`, id).Scan(&p.KegID, &p.Cups, &p.ML, &p.AmountCents, &p.Source, &p.PaymentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return platform.UserErr("这笔记售出不存在")
 	}
 	if err != nil {
 		return err
 	}
+	if p.Source == "pos" || p.PaymentID != nil {
+		return platform.UserErr("POS 收银生成的售出记录不能直接删除")
+	}
+	var finished bool
 	var brewery, name string
-	if err := tx.QueryRow(ctx, `select coalesce(b.brewery,''), b.name
-		from kegs k join beers b on b.id = k.beer_id where k.id=$1`, p.KegID).Scan(&brewery, &name); err != nil {
+	if err := tx.QueryRow(ctx, `select k.finished_at is not null, coalesce(b.brewery,''), b.name
+		from kegs k join beers b on b.id = k.beer_id where k.id=$1 for update of k`, p.KegID).Scan(&finished, &brewery, &name); err != nil {
+		return err
+	}
+	if finished {
+		return platform.UserErr("已结桶的售出记录已封账，不能删除")
+	}
+	if _, err := tx.Exec(ctx, `delete from keg_pours where id=$1`, id); err != nil {
 		return err
 	}
 	detail := fmt.Sprintf("删除售出 %d 杯 · %dml · %s", p.Cups, p.ML, platform.PriceText(p.AmountCents))
@@ -313,6 +570,7 @@ const KegWarnSoldPct = 50
 
 func (k Keg) Revenue() string     { return platform.PriceText(k.RevenueCents) }
 func (k Keg) Cost() string        { return platform.PriceText(k.CostCents) }
+func (k Keg) CostInput() string   { return platform.MoneyInput(k.CostCents) }
 func (k Keg) ProfitCents() int    { return k.RevenueCents - k.CostCents }
 func (k Keg) Profit() string      { return platform.MoneyText(k.ProfitCents()) }
 func (k Keg) Profitable() bool    { return k.ProfitCents() >= 0 }
@@ -438,15 +696,24 @@ func TapBeerResult(ctx context.Context, pool *pgxpool.Pool, beerID int64, no str
 	}
 	defer tx.Rollback(ctx)
 
-	// 更新酒款行会锁住它，同一款酒的上架串行执行，不会并发开出两桶。
+	// 锁住酒款行，同一款酒的上架串行执行，并保留更新前上屏状态以准确记录上屏台账。
 	var brewery, name string
-	err = tx.QueryRow(ctx, `update beers set no=$2, on_screen=true, updated_at=now() where id=$1
-		returning coalesce(brewery,''), name`, beerID, no).Scan(&brewery, &name)
+	var wasOnScreen bool
+	err = tx.QueryRow(ctx, `select coalesce(brewery,''), name, on_screen from beers where id=$1 for update`, beerID).
+		Scan(&brewery, &name, &wasOnScreen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TapResult{}, platform.UserErr("酒款不存在")
 	}
 	if err != nil {
 		return TapResult{}, err
+	}
+	if _, err := tx.Exec(ctx, `update beers set no=$2, on_screen=true, updated_at=now() where id=$1`, beerID, no); err != nil {
+		return TapResult{}, err
+	}
+	if !wasOnScreen {
+		if err := platform.LogOperation(ctx, tx, platform.OpScreenOn, platform.BeerSubject(brewery, name), "号位 "+no+" 上屏"); err != nil {
+			return TapResult{}, err
+		}
 	}
 	var activeKegID int64
 	err = tx.QueryRow(ctx, `select id from kegs
@@ -475,6 +742,10 @@ func TapBeerResult(ctx context.Context, pool *pgxpool.Pool, beerID int64, no str
 		capacity, cost = capacityML, costCents
 	}
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return TapResult{}, platform.UserErr("这款酒已经有在售桶了")
+		}
 		return TapResult{}, err
 	}
 	detail := fmt.Sprintf("号位 %s · 桶 #%d · %dml · 进价 %s", no, kegID, capacity, platform.PriceText(cost))
@@ -531,13 +802,22 @@ func UntapBeerResult(ctx context.Context, pool *pgxpool.Pool, beerID int64) (int
 	defer tx.Rollback(ctx)
 
 	var brewery, name string
-	err = tx.QueryRow(ctx, `update beers set on_screen=false, updated_at=now() where id=$1
-		returning coalesce(brewery,''), name`, beerID).Scan(&brewery, &name)
+	var wasOnScreen bool
+	err = tx.QueryRow(ctx, `select coalesce(brewery,''), name, on_screen from beers where id=$1 for update`, beerID).
+		Scan(&brewery, &name, &wasOnScreen)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, tx.Commit(ctx)
 	}
 	if err != nil {
 		return 0, err
+	}
+	if wasOnScreen {
+		if _, err := tx.Exec(ctx, `update beers set on_screen=false, updated_at=now() where id=$1`, beerID); err != nil {
+			return 0, err
+		}
+		if err := platform.LogOperation(ctx, tx, platform.OpScreenOff, platform.BeerSubject(brewery, name), "下架撤屏"); err != nil {
+			return 0, err
+		}
 	}
 	var kegID int64
 	err = tx.QueryRow(ctx, `update kegs set finished_at=now()

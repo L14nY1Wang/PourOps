@@ -124,6 +124,21 @@ func TestMoneyCentsAndStrictBeerValidation(t *testing.T) {
 	if n, err := ParseSortOrder("-2147483647"); err != nil || n != -math.MaxInt32 {
 		t.Fatalf("ParseSortOrder = %d, %v", n, err)
 	}
+
+	ibuBadForm := url.Values{"name": {"高苦度酒"}, "ibu": {"1001"}}
+	reqBadIBU := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(ibuBadForm.Encode()))
+	reqBadIBU.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	_ = reqBadIBU.ParseForm()
+	if _, err := ParseBeerForm(reqBadIBU); err == nil {
+		t.Fatal("ParseBeerForm should reject IBU > 1000")
+	}
+	ibuOkForm := url.Values{"name": {"高苦度酒"}, "ibu": {"1000"}}
+	reqOkIBU := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(ibuOkForm.Encode()))
+	reqOkIBU.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	_ = reqOkIBU.ParseForm()
+	if got, err := ParseBeerForm(reqOkIBU); err != nil || got.IBU == nil || *got.IBU != 1000 {
+		t.Fatalf("ParseBeerForm(ibu=1000) = %+v, err=%v", got, err)
+	}
 }
 
 func TestPriceCentsAndText(t *testing.T) {
@@ -148,18 +163,6 @@ func TestSplitList(t *testing.T) {
 	}
 	if got := SplitList("https://assets.untappd.com/x.jpeg"); len(got) != 1 {
 		t.Fatalf("URL 被拆分: %#v", got)
-	}
-}
-
-func TestURLMsgRoundTrip(t *testing.T) {
-	for _, msg := range []string{"已删除", "删除失败: 外键 & 约束 #1?", "a+b c", "100% 保证金", ""} {
-		u, err := url.Parse("/admin/beers?msg=" + URLMsg(msg))
-		if err != nil {
-			t.Fatalf("URLMsg(%q) 生成的 URL 非法: %v", msg, err)
-		}
-		if got := u.Query().Get("msg"); got != msg {
-			t.Errorf("URLMsg 往返 %q → %q", msg, got)
-		}
 	}
 }
 

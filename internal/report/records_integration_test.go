@@ -87,7 +87,7 @@ func TestRecordOrdersAggregateSplitAndSnapshot(t *testing.T) {
 		t.Fatalf("拆单结账失败: %v", err)
 	}
 
-	recs, hasNext, err := ListRecordOrders(ctx, pool, "", 1)
+	recs, hasNext, err := ListRecordOrdersCursor(ctx, pool, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,14 +107,14 @@ func TestRecordOrdersAggregateSplitAndSnapshot(t *testing.T) {
 		t.Fatalf("聚合不对: total=%d paid=%d pending=%d status=%s", rec.Total, rec.Paid, rec.Pending, rec.Status)
 	}
 
-	partial, _, err := ListRecordOrders(ctx, pool, "partial", 1)
+	partial, _, err := ListRecordOrdersCursor(ctx, pool, "partial", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(partial) != 1 || partial[0].ID != order {
 		t.Fatalf("部分结筛选应只返回订单 %d，实际 %+v", order, partial)
 	}
-	if settled, _, err := ListRecordOrders(ctx, pool, "settled", 1); err != nil || len(settled) != 0 {
+	if settled, _, err := ListRecordOrdersCursor(ctx, pool, "settled", 0); err != nil || len(settled) != 0 {
 		t.Fatalf("未结完却出现在已结筛选: %+v err=%v", settled, err)
 	}
 
@@ -206,12 +206,29 @@ func TestRecordZeroPaymentAndUnlinkedHistoricalRow(t *testing.T) {
 	if len(unpaid) != 1 || unpaid[0].Kind != "beer" || len(unlinked) != 0 {
 		t.Fatalf("未结/无法关联列表不对: unpaid=%+v unlinked=%+v", unpaid, unlinked)
 	}
-	if listed, _, err := ListRecordOrders(ctx, pool, "partial", 1); err != nil || len(listed) != 1 || listed[0].ID != order || listed[0].Status != "partial" {
+	if listed, _, err := ListRecordOrdersCursor(ctx, pool, "partial", 0); err != nil || len(listed) != 1 || listed[0].ID != order || listed[0].Status != "partial" {
 		t.Fatalf("列表也应把零元支付当部分结: %+v err=%v", listed, err)
 	}
 
+	otherOrder, err := pos.EnsureOrder(ctx, pool, "bar-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKeg := seedKeg(t, pool, 4500)
+	if err := pos.AddOrderItem(ctx, pool, otherOrder, "beer", otherKeg, "别单酒", 4500, 330); err != nil {
+		t.Fatal(err)
+	}
+	var otherLine int64
+	if err := pool.QueryRow(ctx, `select id from order_items where order_id=$1`, otherOrder).Scan(&otherLine); err != nil {
+		t.Fatal(err)
+	}
+	otherPay, err := pos.PayItems(ctx, pool, otherOrder, []int64{otherLine})
+	if err != nil {
+		t.Fatalf("别单结账失败: %v", err)
+	}
+
 	beerLine := unpaid[0].ID
-	execSQL(t, pool, `update order_items set paid_at=now(), payment_id=999999 where id=$1`, beerLine)
+	execSQL(t, pool, `update order_items set paid_at=now(), payment_id=$2 where id=$1`, beerLine, otherPay)
 	o, checkouts, unpaid, unlinked, err = LoadRecordDetail(ctx, pool, order)
 	if err != nil {
 		t.Fatal(err)

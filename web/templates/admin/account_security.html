@@ -103,6 +103,11 @@
   </div>
   <div class="form-actions"><button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>更新密码</button></div>
 </form>
+<form class="card security-card" method="post" action="/account/security/logout-all" onsubmit="return confirm('确认注销当前账号在所有设备上的登录状态？');">
+  <h2><span class="security-head-icon"><i class="bi bi-box-arrow-right" aria-hidden="true"></i></span>下线所有设备</h2>
+  <p class="description">让当前账号在所有设备上退出登录（包括这台），之后需重新输入密码登录。发现账号可能被他人使用时请立即操作。</p>
+  <div class="form-actions"><button class="button button--danger-soft" type="submit"><i class="bi bi-power" aria-hidden="true"></i>下线所有设备</button></div>
+</form>
 {{end}}
 {{end}}
 

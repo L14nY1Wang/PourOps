@@ -47,7 +47,7 @@ func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/kegs/{id}/edit", guards.Auth(s.KegEdit))
 	mux.HandleFunc("POST /admin/kegs", guards.Auth(s.KegSave))
 	mux.HandleFunc("POST /admin/kegs/{id}/pours", guards.Auth(s.PourAdd))
-	mux.HandleFunc("POST /admin/kegs/{id}/delete", guards.Auth(s.KegDelete))
+	mux.HandleFunc("POST /admin/kegs/{id}/delete", guards.Boss(s.KegDelete))
 	mux.HandleFunc("POST /admin/pours/{id}/delete", guards.Auth(s.PourDelete))
 
 	mux.HandleFunc("GET /admin/retail", guards.Auth(s.RetailList))
