@@ -177,18 +177,18 @@ func TestAllTemplatesRender(t *testing.T) {
 		}, nil, false},
 		{"settings", "admin/settings.html", "layout", &settings.SettingsPage{
 			Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Me: me},
-			Settings:       settings.StoreSettings{Brand: "PourOps", DefaultSellablePct: 80, DefaultMarginPct: 50, BeerCategories: []string{"IPA", "赛松"}, WebhookEvents: []string{string(event.EventOrderPaid)}},
+			Settings:       settings.StoreSettings{Brand: "PourOps", DefaultSellablePct: 80, DefaultMarginPct: 50, BarCount: 3, TableCount: 4, BeerCategories: []string{"IPA", "赛松"}, WebhookEvents: []string{string(event.EventOrderPaid)}},
 			EventOptions:   event.WebhookEventOptions,
 			HasSecret:      true,
 			SelectedEvents: map[string]bool{string(event.EventOrderPaid): true},
 			CatalogTotal:   12,
-		}, []string{`/admin/settings/general`, `/admin/settings/webhook`, `/admin/settings/webhook-test`, `name="default_sellable_pct"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`, `历史酒单导入与导出`, `12`, `/admin/settings/catalog/export`, `/admin/settings/catalog/import`, `accept=".zip,application/zip"`}, false},
+		}, []string{`/admin/settings/general`, `/admin/settings/spots`, `/admin/settings/webhook`, `/admin/settings/webhook-test`, `name="default_sellable_pct"`, `name="bar_count"`, `name="table_count"`, `name="webhook_url"`, `酒款分类管理`, `/admin/settings/categories/add`, `赛松`, `历史酒单导入与导出`, `12`, `/admin/settings/catalog/export`, `/admin/settings/catalog/import`, `accept=".zip,application/zip"`}, false},
 		{"pos-spots", "pos/pos.html", "pos", &pos.PosPage{
 			Layout:   ui.Layout{Me: me},
-			Spots:    []pos.Spot{{Key: "bar-1", Kind: "bar", Label: "吧台 1", OrderID: 88, Items: 2, Total: 9600}, {Key: "table-1", Kind: "table", Label: "小桌 1"}},
+			Spots:    []pos.Spot{{Key: "bar-1", Kind: "bar", Label: "吧台 1", OrderID: 88, Items: 2, Total: 9600}, {Key: "table-1", Kind: "table", Label: "小桌 1"}, {Key: "temp-1", Kind: "temp", Label: "临时 1"}},
 			PosBeers: []pos.PosBeer{{KegID: 10, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "Hazy IPA", Price150: 2800, Price330: 5800, Price500: 7800}},
 			PosItems: []inventory.RetailItem{item},
-		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, true},
+		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`, `固定 1 位`, `固定 1 桌`, `/pos/temp/add`, `/pos/temp/remove`, `临时 1`}, true},
 		{"pos-order", "pos/pos.html", "pos", &pos.PosPage{
 			Layout:     ui.Layout{Me: me},
 			PosOrderID: 88,
@@ -349,6 +349,12 @@ func TestAllTemplatesRender(t *testing.T) {
 				if strings.Contains(body, `invert(1) grayscale(1)`) {
 					t.Fatalf("screen 不应再使用暗黑反相灰度酒标滤镜")
 				}
+			case "pos-spots":
+				for _, gone := range []string{`/pos/bar/add`, `/pos/table/add`, `/pos/bar/remove`, `/pos/table/remove`} {
+					if strings.Contains(body, gone) {
+						t.Fatalf("pos-spots 不应再包含固定台位增删路由 %q", gone)
+					}
+				}
 			}
 
 			if !tc.notLayout && tc.name != "login" && tc.name != "login-2fa" && tc.name != "security-staff" {
@@ -485,7 +491,7 @@ func TestNewHandlerSmoke(t *testing.T) {
 			t.Fatalf("GET %s 未登录应 303 -> /admin/login，实际 %d loc=%q", path, recAnon.Code, recAnon.Header().Get("Location"))
 		}
 	}
-	for _, postPath := range []string{"/admin/settings/general", "/admin/settings/webhook", "/admin/settings/categories/add", "/admin/settings/catalog/import"} {
+	for _, postPath := range []string{"/admin/settings/general", "/admin/settings/spots", "/admin/settings/webhook", "/admin/settings/categories/add", "/admin/settings/catalog/import", "/pos/temp/add", "/pos/temp/remove"} {
 		recCatAnon := httptest.NewRecorder()
 		h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, postPath, nil))
 		if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {

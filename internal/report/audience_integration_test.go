@@ -334,3 +334,53 @@ func TestSpotPreferenceUsesTopCategoryCupsInSummary(t *testing.T) {
 		t.Fatalf("SummaryText should report top category cups (2), got %q", got)
 	}
 }
+
+func TestSpotPreferenceIncludesTempSpots(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ciderKeg := seedBeerKeg(t, pool, "果园厂", "鲜榨西打", "Cider", "西打", 4.5, 60000)
+	ipaKeg := seedBeerKeg(t, pool, "山谷厂", "云雾IPA", "Hazy IPA", "IPA", 6.8, 90000)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 5, 21, 0, 0, 0, platform.ReportZone)
+
+	var ordTemp int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot, closed_at) values ('temp-1', $1) returning id`, at).Scan(&ordTemp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml, qty, paid_at) values
+		($1, 'beer', $2, '鲜榨西打', 4200, 330, 2, $3)`,
+		ordTemp, ciderKeg, at); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 6, 5, 7, 0, 0, 0, platform.ReportZone)
+	tx := beginTestTx(t, pool)
+	aud, err := LoadAudienceInsights(ctx, tx, start, start.AddDate(0, 0, 1), platform.DefaultBeerCategories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = tx.Rollback(ctx)
+	if aud.Spots.TempCups != 2 || aud.Spots.TempTopCat != "西打" || aud.Spots.TempTopCups != 2 {
+		t.Fatalf("Temp spot preference = %+v, want TempCups=2 TempTopCat=西打 TempTopCups=2", aud.Spots)
+	}
+	if got := aud.Spots.SummaryText(); got != "临时台位客群偏爱 西打（2 杯）" {
+		t.Fatalf("temp-only SummaryText = %q", got)
+	}
+
+	var ordBar int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot, closed_at) values ('bar-1', $1) returning id`, at).Scan(&ordBar); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml, qty, paid_at) values
+		($1, 'beer', $2, '云雾IPA', 5200, 330, 3, $3)`,
+		ordBar, ipaKeg, at); err != nil {
+		t.Fatal(err)
+	}
+	tx2 := beginTestTx(t, pool)
+	aud2, err := LoadAudienceInsights(ctx, tx2, start, start.AddDate(0, 0, 1), platform.DefaultBeerCategories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aud2.Spots.SummaryText(); got != "吧台偏爱 IPA（3 杯） · 临时偏爱 西打（2 杯）" {
+		t.Fatalf("bar+temp SummaryText = %q", got)
+	}
+}

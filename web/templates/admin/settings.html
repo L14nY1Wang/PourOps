@@ -50,6 +50,34 @@
   </div>
 </form>
 
+<form class="admin-form card editor-card mb-3" id="settings-spots" method="post" action="/admin/settings/spots">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <div>
+          <h2><i class="bi bi-grid-3x3-gap" aria-hidden="true"></i>点餐台固定台位</h2>
+          <span>固定吧台与小桌在点餐端不可增删；临时台位可由点餐员按现场需求随时增减</span>
+        </div>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="bar_count">吧台数量（位）</label>
+          <input class="form-control" type="number" id="bar_count" name="bar_count" value="{{.Settings.BarCount}}" min="0" max="50" required>
+          <div class="description">设为 0 则点餐端不显示吧台区；最多 50 位（调小前需先结清超出编号上的账单）</div>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="table_count">小桌数量（桌）</label>
+          <input class="form-control" type="number" id="table_count" name="table_count" value="{{.Settings.TableCount}}" min="0" max="50" required>
+          <div class="description">设为 0 则点餐端不显示小桌区；最多 50 桌（调小前需先结清超出编号上的账单）</div>
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存台位设置</button>
+  </div>
+</form>
+
 <div class="card editor-card mb-3" id="settings-categories">
   <div class="card__content">
     <fieldset class="form-section">

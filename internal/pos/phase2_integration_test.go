@@ -204,17 +204,17 @@ func TestPayIdempotencyExpectedTotalAndSpotBounds(t *testing.T) {
 		t.Fatalf("部分结单删掉最后未付项后应自动关单: closed=%v unpaid=%d", oAfter.Closed, len(oAfter.Unpaid))
 	}
 
-	// P3-15：台位增删与 50 上限
-	for range 47 { // default bar_count=3 -> up to 50
-		if err := AddSpot(ctx, pool, "bar_count"); err != nil {
-			t.Fatalf("AddSpot failed: %v", err)
+	// 临时台位从 0 起增删与 50 上限，减到 0 后再次减少报错
+	for range 50 {
+		if err := AddTempSpot(ctx, pool); err != nil {
+			t.Fatalf("AddTempSpot failed: %v", err)
 		}
 	}
-	if err := AddSpot(ctx, pool, "bar_count"); err == nil {
-		t.Fatal("台位应限制最多 50 个")
+	if err := AddTempSpot(ctx, pool); err == nil {
+		t.Fatal("临时台位应限制最多 50 个")
 	}
-	if err := RemoveSpot(ctx, pool, "bar_count"); err != nil {
-		t.Fatalf("RemoveSpot failed: %v", err)
+	if err := RemoveTempSpot(ctx, pool); err != nil {
+		t.Fatalf("RemoveTempSpot failed: %v", err)
 	}
 
 	// P3-16: slow printer timeout bound doesn't crash HTTP handler
@@ -250,21 +250,36 @@ func TestPosSpotEmptyDeleteStaleIdempotencyAndNoStore(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
 	ctx := platform.WithActor(context.Background(), "staff")
 
-	// 默认 bar_count=3：bar-3 仅有空挂单时允许缩减台位并清理空单。
-	emptyOrder, err := EnsureOrder(ctx, pool, "bar-3")
+	if got := SpotLabel("temp-2"); got != "临时 2" {
+		t.Fatalf("SpotLabel(temp-2) = %q, want 临时 2", got)
+	}
+
+	// 初始 temp_count=0：直接减位失败；新增 2 个临时台位后，temp-2 仅空挂单时可减位清理，temp-1 有未付明细时禁止减位。
+	if err := RemoveTempSpot(ctx, pool); err == nil {
+		t.Fatal("temp_count=0 时应禁止继续减位")
+	}
+	if _, err := EnsureOrder(ctx, pool, "temp-1"); err == nil {
+		t.Fatal("未新增临时台位前不应允许直接开 temp-1")
+	}
+	if err := AddTempSpot(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	if err := AddTempSpot(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	emptyOrder, err := EnsureOrder(ctx, pool, "temp-2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSpot(ctx, pool, "bar_count"); err != nil {
-		t.Fatalf("empty open order on last spot should be deletable: %v", err)
+	if err := RemoveTempSpot(ctx, pool); err != nil {
+		t.Fatalf("empty open order on last temp spot should be deletable: %v", err)
 	}
 	var cnt int
 	if err := pool.QueryRow(ctx, `select count(*)::int from orders where id=$1`, emptyOrder).Scan(&cnt); err != nil || cnt != 0 {
 		t.Fatalf("empty open order should be deleted, cnt=%d err=%v", cnt, err)
 	}
 
-	// bar-2 上有未付明细时禁止缩减台位。
-	nonEmptyOrder, err := EnsureOrder(ctx, pool, "bar-2")
+	nonEmptyOrder, err := EnsureOrder(ctx, pool, "temp-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,8 +287,8 @@ func TestPosSpotEmptyDeleteStaleIdempotencyAndNoStore(t *testing.T) {
 	if err := AddOrderItem(ctx, pool, nonEmptyOrder, "retail", rID, "花生", 1500, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveSpot(ctx, pool, "bar_count"); err == nil {
-		t.Fatal("non-empty open order on last spot must block RemoveSpot")
+	if err := RemoveTempSpot(ctx, pool); err == nil {
+		t.Fatal("non-empty open order on last temp spot must block RemoveTempSpot")
 	}
 
 	// 若先结了一行（幂等键 k1），随后选中的条目集合仍包含未付项时，同一幂等键不能静默返回成功。
@@ -295,9 +310,53 @@ func TestPosSpotEmptyDeleteStaleIdempotencyAndNoStore(t *testing.T) {
 		t.Fatalf("stale idempotency key with unpaid items selected should fail, got %v", err)
 	}
 
-	// POS 订单与小票页响应必须携带 Cache-Control: no-store。
+	// 验证 bar_count=0 / table_count=0 时，ListSpots 隐藏固定区且 EnsureOrder 禁止开固定台，仅保留临时台位。
+	if _, err := pool.Exec(ctx, `
+		insert into store_settings (key, value, updated_at)
+		values ('bar_count', '0', now()), ('table_count', '0', now())
+		on conflict (key) do update set value = excluded.value, updated_at = now()`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureOrder(ctx, pool, "bar-1"); err == nil {
+		t.Fatal("bar_count=0 时不应允许开 bar-1")
+	}
+	if _, err := EnsureOrder(ctx, pool, "table-1"); err == nil {
+		t.Fatal("table_count=0 时不应允许开 table-1")
+	}
+	spots, err := ListSpots(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spots) != 1 || spots[0].Key != "temp-1" || spots[0].Label != "临时 1" {
+		t.Fatalf("ListSpots with bar=0 table=0 temp=1 got %+v", spots)
+	}
+
+	// POS 订单与小票页响应必须携带 Cache-Control: no-store；店员可直接操作 /pos/temp/add|remove，旧 /pos/bar/add 已移除。
 	renderer := ui.MustRenderer(web.TemplatesFS, nil, func() string { return "PourOps" })
 	svc := NewService(pool, renderer, nil, ManualGateway{}, NoopPrinter{})
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux, ui.Guards{
+		Any:  func(h http.HandlerFunc) http.HandlerFunc { return h },
+		Auth: func(h http.HandlerFunc) http.HandlerFunc { return h },
+		Boss: func(h http.HandlerFunc) http.HandlerFunc { return h },
+	})
+
+	recAddTemp := httptest.NewRecorder()
+	mux.ServeHTTP(recAddTemp, httptest.NewRequest(http.MethodPost, "/pos/temp/add", nil))
+	if recAddTemp.Code != http.StatusSeeOther {
+		t.Fatalf("POST /pos/temp/add status = %d", recAddTemp.Code)
+	}
+	recRemTemp := httptest.NewRecorder()
+	mux.ServeHTTP(recRemTemp, httptest.NewRequest(http.MethodPost, "/pos/temp/remove", nil))
+	if recRemTemp.Code != http.StatusSeeOther {
+		t.Fatalf("POST /pos/temp/remove status = %d", recRemTemp.Code)
+	}
+	recOldRoute := httptest.NewRecorder()
+	mux.ServeHTTP(recOldRoute, httptest.NewRequest(http.MethodPost, "/pos/bar/add", nil))
+	if recOldRoute.Code != http.StatusNotFound && recOldRoute.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /pos/bar/add should be gone, got %d", recOldRoute.Code)
+	}
+
 	reqOrder := httptest.NewRequest(http.MethodGet, "/pos/order/"+strconv.FormatInt(nonEmptyOrder, 10), nil)
 	reqOrder.SetPathValue("id", strconv.FormatInt(nonEmptyOrder, 10))
 	recOrder := httptest.NewRecorder()

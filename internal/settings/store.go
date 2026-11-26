@@ -21,6 +21,10 @@ const (
 	MaxSellablePct     = 100
 	MinMarginPct       = 10
 	MaxMarginPct       = 85
+	DefaultBarCount    = 3
+	DefaultTableCount  = 4
+	MinFixedSpots      = 0
+	MaxFixedSpots      = 50
 )
 
 // PricingConfig 控制桶装可售出酒率与目标毛利率（默认 80% / 50%）。
@@ -51,11 +55,13 @@ func (c PricingConfig) Normalized() PricingConfig {
 	return c
 }
 
-// StoreSettings 保存运营参数、酒款分类与 Webhook 出站通知设置。
+// StoreSettings 保存运营参数、点餐台固定台位数量、酒款分类与 Webhook 出站通知设置。
 type StoreSettings struct {
 	Brand              string
 	DefaultSellablePct int
 	DefaultMarginPct   int
+	BarCount           int
+	TableCount         int
 	BeerCategories     []string
 	WebhookURL         string
 	WebhookSecret      string
@@ -94,6 +100,8 @@ func NewSettingsStore(pool *pgxpool.Pool, defaultBrand string) *SettingsStore {
 			Brand:              defaultBrand,
 			DefaultSellablePct: DefaultSellablePct,
 			DefaultMarginPct:   DefaultMarginPct,
+			BarCount:           DefaultBarCount,
+			TableCount:         DefaultTableCount,
 			BeerCategories:     defaultCategoriesCopy(),
 			WebhookEvents:      []string{},
 		},
@@ -105,6 +113,8 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 		Brand:              s.defaultBrand,
 		DefaultSellablePct: DefaultSellablePct,
 		DefaultMarginPct:   DefaultMarginPct,
+		BarCount:           DefaultBarCount,
+		TableCount:         DefaultTableCount,
 		BeerCategories:     defaultCategoriesCopy(),
 		WebhookEvents:      []string{},
 	}
@@ -138,6 +148,14 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 		case "default_margin_pct":
 			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= MinMarginPct && n <= MaxMarginPct {
 				base.DefaultMarginPct = n
+			}
+		case "bar_count":
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= MinFixedSpots && n <= MaxFixedSpots {
+				base.BarCount = n
+			}
+		case "table_count":
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= MinFixedSpots && n <= MaxFixedSpots {
+				base.TableCount = n
 			}
 		case "beer_categories":
 			var raw []string
@@ -298,6 +316,113 @@ func (s *SettingsStore) SaveGeneral(ctx context.Context, rawBrand string, sellab
 	s.cur.Brand = brand
 	s.cur.DefaultSellablePct = sellable
 	s.cur.DefaultMarginPct = margin
+	s.mu.Unlock()
+	return s.Get(), nil
+}
+
+// SaveSpots 仅更新点餐台固定吧台与小桌数量；调小前检查超编台位是否存在未结商品或付款。
+func (s *SettingsStore) SaveSpots(ctx context.Context, barCount, tableCount int) (StoreSettings, error) {
+	if barCount < MinFixedSpots || barCount > MaxFixedSpots {
+		return StoreSettings{}, platform.UserErrf("吧台数量需在 %d 到 %d 之间", MinFixedSpots, MaxFixedSpots)
+	}
+	if tableCount < MinFixedSpots || tableCount > MaxFixedSpots {
+		return StoreSettings{}, platform.UserErrf("小桌数量需在 %d 到 %d 之间", MinFixedSpots, MaxFixedSpots)
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.pool != nil {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return StoreSettings{}, err
+		}
+		defer tx.Rollback(ctx)
+
+		// 确保配置行存在并按固定顺序锁表：store_settings -> orders，与 POS EnsureOrder 同序防死锁。
+		if _, err := tx.Exec(ctx, `
+			insert into store_settings (key, value, updated_at)
+			values ('bar_count', '3', now()), ('table_count', '4', now())
+			on conflict (key) do nothing`); err != nil {
+			return StoreSettings{}, err
+		}
+		krows, err := tx.Query(ctx, `select key from store_settings where key in ('bar_count', 'table_count') order by key for update`)
+		if err != nil {
+			return StoreSettings{}, err
+		}
+		for krows.Next() {
+		}
+		krows.Close()
+		if err := krows.Err(); err != nil {
+			return StoreSettings{}, err
+		}
+
+		type openSpotOrder struct {
+			id   int64
+			spot string
+		}
+		orows, err := tx.Query(ctx, `select id, spot from orders where closed_at is null and (spot like 'bar-%' or spot like 'table-%') order by id for update`)
+		if err != nil {
+			return StoreSettings{}, err
+		}
+		var opens []openSpotOrder
+		for orows.Next() {
+			var o openSpotOrder
+			if err := orows.Scan(&o.id, &o.spot); err != nil {
+				orows.Close()
+				return StoreSettings{}, err
+			}
+			opens = append(opens, o)
+		}
+		orows.Close()
+		if err := orows.Err(); err != nil {
+			return StoreSettings{}, err
+		}
+
+		for _, o := range opens {
+			kind, num, ok := strings.Cut(o.spot, "-")
+			n, convErr := strconv.Atoi(num)
+			if !ok || convErr != nil || n < 1 || o.spot != kind+"-"+strconv.Itoa(n) {
+				continue
+			}
+			if (kind == "bar" && n > barCount) || (kind == "table" && n > tableCount) {
+				var busy bool
+				if err := tx.QueryRow(ctx, `select exists(select 1 from order_items where order_id=$1)
+					or exists(select 1 from payments where order_id=$1)`, o.id).Scan(&busy); err != nil {
+					return StoreSettings{}, err
+				}
+				if busy {
+					label := "小桌"
+					if kind == "bar" {
+						label = "吧台"
+					}
+					return StoreSettings{}, platform.UserErrf("%s %d 还有未结账单，请先结清再调小数量", label, n)
+				}
+				if _, err := tx.Exec(ctx, `delete from orders where id=$1`, o.id); err != nil {
+					return StoreSettings{}, err
+				}
+			}
+		}
+
+		for _, kv := range [2][2]string{
+			{"bar_count", strconv.Itoa(barCount)},
+			{"table_count", strconv.Itoa(tableCount)},
+		} {
+			if _, err := tx.Exec(ctx, `
+				insert into store_settings (key, value, updated_at)
+				values ($1, $2, now())
+				on conflict (key) do update set value = excluded.value, updated_at = now()`, kv[0], kv[1]); err != nil {
+				return StoreSettings{}, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return StoreSettings{}, err
+		}
+	}
+
+	s.mu.Lock()
+	s.cur.BarCount = barCount
+	s.cur.TableCount = tableCount
 	s.mu.Unlock()
 	return s.Get(), nil
 }

@@ -29,6 +29,20 @@ type PosPage struct {
 	PayToken   string
 }
 
+func (p PosPage) spotsByKind(kind string) []Spot {
+	var out []Spot
+	for _, sp := range p.Spots {
+		if sp.Kind == kind {
+			out = append(out, sp)
+		}
+	}
+	return out
+}
+
+func (p PosPage) BarSpots() []Spot   { return p.spotsByKind("bar") }
+func (p PosPage) TableSpots() []Spot { return p.spotsByKind("table") }
+func (p PosPage) TempSpots() []Spot  { return p.spotsByKind("temp") }
+
 type PayPage struct {
 	ui.Layout
 	Pay *Payment
@@ -61,10 +75,8 @@ func NewService(pool *pgxpool.Pool, renderer *ui.Renderer, bus *event.EventBus, 
 
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /pos/{$}", guards.Any(s.PosSpots))
-	mux.HandleFunc("POST /pos/bar/add", guards.Auth(s.PosAddBar))
-	mux.HandleFunc("POST /pos/table/add", guards.Auth(s.PosAddTable))
-	mux.HandleFunc("POST /pos/bar/remove", guards.Auth(s.PosRemoveBar))
-	mux.HandleFunc("POST /pos/table/remove", guards.Auth(s.PosRemoveTable))
+	mux.HandleFunc("POST /pos/temp/add", guards.Any(s.PosAddTemp))
+	mux.HandleFunc("POST /pos/temp/remove", guards.Any(s.PosRemoveTemp))
 	mux.HandleFunc("POST /pos/open", guards.Any(s.PosOpen))
 	mux.HandleFunc("GET /pos/order/{id}", guards.Any(s.PosOrder))
 	mux.HandleFunc("POST /pos/order/{id}/add", guards.Any(s.PosAddItem))
@@ -107,30 +119,22 @@ func (s *Service) PosSpots(w http.ResponseWriter, r *http.Request) {
 	s.renderer.RenderShell(w, r, "pos/pos.html", "pos", data)
 }
 
-func (s *Service) PosAddBar(w http.ResponseWriter, r *http.Request) {
-	s.spotMutate(w, r, "bar_count", AddSpot)
+func (s *Service) PosAddTemp(w http.ResponseWriter, r *http.Request) {
+	s.tempSpotMutate(w, r, AddTempSpot)
 }
 
-func (s *Service) PosAddTable(w http.ResponseWriter, r *http.Request) {
-	s.spotMutate(w, r, "table_count", AddSpot)
+func (s *Service) PosRemoveTemp(w http.ResponseWriter, r *http.Request) {
+	s.tempSpotMutate(w, r, RemoveTempSpot)
 }
 
-func (s *Service) PosRemoveBar(w http.ResponseWriter, r *http.Request) {
-	s.spotMutate(w, r, "bar_count", RemoveSpot)
-}
-
-func (s *Service) PosRemoveTable(w http.ResponseWriter, r *http.Request) {
-	s.spotMutate(w, r, "table_count", RemoveSpot)
-}
-
-func (s *Service) spotMutate(w http.ResponseWriter, r *http.Request, key string, fn func(context.Context, *pgxpool.Pool, string) error) {
-	if err := fn(r.Context(), s.pool, key); err != nil {
+func (s *Service) tempSpotMutate(w http.ResponseWriter, r *http.Request, fn func(context.Context, *pgxpool.Pool) error) {
+	if err := fn(r.Context(), s.pool); err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
 			platform.RedirectErr(w, r, "/pos/", msg)
 			return
 		}
-		log.Printf("pos spot mutate (%s): %v", key, err)
-		platform.RedirectErr(w, r, "/pos/", "调整台位失败，请稍后重试")
+		log.Printf("pos temp spot mutate: %v", err)
+		platform.RedirectErr(w, r, "/pos/", "调整临时台位失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, "/pos/", http.StatusSeeOther)
@@ -138,7 +142,7 @@ func (s *Service) spotMutate(w http.ResponseWriter, r *http.Request, key string,
 
 func (s *Service) PosOpen(w http.ResponseWriter, r *http.Request) {
 	key := r.FormValue("spot")
-	if !strings.HasPrefix(key, "bar-") && !strings.HasPrefix(key, "table-") {
+	if !strings.HasPrefix(key, "bar-") && !strings.HasPrefix(key, "table-") && !strings.HasPrefix(key, "temp-") {
 		platform.RedirectErr(w, r, "/pos/", "没有这个台位")
 		return
 	}

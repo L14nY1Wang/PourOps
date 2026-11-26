@@ -122,6 +122,8 @@
   .group-head{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin-bottom:.7rem}
   .group-head h2{display:flex;align-items:center;gap:.45rem;font-size:.9rem;font-weight:750}
   .group-head h2::before{content:"";width:4px;height:14px;border-radius:2px;background:var(--cobalt)}
+  .group-count{font-size:.7rem;font-weight:650;color:var(--ink-3);white-space:nowrap}
+  .spot-empty{margin:0;padding:.72rem .85rem;border:1px dashed var(--line);border-radius:var(--r);color:var(--ink-3);font-size:.76rem;text-align:center}
   .spots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.65rem}
   .spot-form{display:contents}
   .spot{
@@ -543,18 +545,14 @@
       {{if .Err}}<p class="alert" role="alert">{{.Err}}</p>{{end}}
       {{if .Msg}}<p class="alert ok" role="status">{{.Msg}}</p>{{end}}
 
+      {{with .BarSpots}}
       <section class="spot-group">
         <div class="group-head">
           <h2>吧台</h2>
-          {{if and .Me .Me.CanBackend}}
-          <div class="pick">
-            <form class="form-reset" method="post" action="/pos/bar/add"><button class="mini" type="submit">+ 加位</button></form>
-            <form class="form-reset" method="post" action="/pos/bar/remove"><button class="mini" type="submit">− 减位</button></form>
-          </div>
-          {{end}}
+          <span class="group-count">固定 {{len .}} 位</span>
         </div>
         <div class="spots">
-          {{range .Spots}}{{if eq .Kind "bar"}}
+          {{range .}}
           <form class="spot-form" method="post" action="/pos/open">
             <input type="hidden" name="spot" value="{{.Key}}">
             <button class="spot{{if .Busy}} is-busy{{end}}" type="submit" aria-label="{{.Label}}，{{if .Busy}}在用，{{.Items}} 件，{{.TotalText}}{{else}}空台，点一下开单{{end}}">
@@ -565,22 +563,19 @@
               <span class="spot-meta">{{if .Busy}}{{.Items}} 件 · {{.TotalText}}{{else}}点一下开单{{end}}</span>
             </button>
           </form>
-          {{end}}{{end}}
+          {{end}}
         </div>
       </section>
+      {{end}}
 
+      {{with .TableSpots}}
       <section class="spot-group">
         <div class="group-head">
           <h2>小桌</h2>
-          {{if and .Me .Me.CanBackend}}
-          <div class="pick">
-            <form class="form-reset" method="post" action="/pos/table/add"><button class="mini" type="submit">+ 加位</button></form>
-            <form class="form-reset" method="post" action="/pos/table/remove"><button class="mini" type="submit">− 减位</button></form>
-          </div>
-          {{end}}
+          <span class="group-count">固定 {{len .}} 桌</span>
         </div>
         <div class="spots">
-          {{range .Spots}}{{if eq .Kind "table"}}
+          {{range .}}
           <form class="spot-form" method="post" action="/pos/open">
             <input type="hidden" name="spot" value="{{.Key}}">
             <button class="spot{{if .Busy}} is-busy{{end}}" type="submit" aria-label="{{.Label}}，{{if .Busy}}在用，{{.Items}} 件，{{.TotalText}}{{else}}空台，点一下开单{{end}}">
@@ -591,8 +586,37 @@
               <span class="spot-meta">{{if .Busy}}{{.Items}} 件 · {{.TotalText}}{{else}}点一下开单{{end}}</span>
             </button>
           </form>
-          {{end}}{{end}}
+          {{end}}
         </div>
+      </section>
+      {{end}}
+
+      <section class="spot-group">
+        <div class="group-head">
+          <h2>临时</h2>
+          <div class="pick">
+            <form class="form-reset" method="post" action="/pos/temp/add"><button class="mini" type="submit">+ 加位</button></form>
+            <form class="form-reset" method="post" action="/pos/temp/remove"><button class="mini" type="submit"{{if not .TempSpots}} disabled{{end}}>− 减位</button></form>
+          </div>
+        </div>
+        {{with .TempSpots}}
+        <div class="spots">
+          {{range .}}
+          <form class="spot-form" method="post" action="/pos/open">
+            <input type="hidden" name="spot" value="{{.Key}}">
+            <button class="spot{{if .Busy}} is-busy{{end}}" type="submit" aria-label="{{.Label}}，{{if .Busy}}在用，{{.Items}} 件，{{.TotalText}}{{else}}空台，点一下开单{{end}}">
+              <span class="spot-top">
+                <span class="spot-name">{{.Label}}</span>
+                <span class="pill {{if .Busy}}pill-live{{else}}pill-muted{{end}}">{{if .Busy}}在用{{else}}空台{{end}}</span>
+              </span>
+              <span class="spot-meta">{{if .Busy}}{{.Items}} 件 · {{.TotalText}}{{else}}点一下开单{{end}}</span>
+            </button>
+          </form>
+          {{end}}
+        </div>
+        {{else}}
+        <p class="spot-empty">暂无临时台位，有需要点右上「+ 加位」。</p>
+        {{end}}
       </section>
     </div>
     {{end}}

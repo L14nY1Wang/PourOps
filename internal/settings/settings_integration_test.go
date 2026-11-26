@@ -101,8 +101,45 @@ func TestSettingsStorePersistenceAndValidation(t *testing.T) {
 	}
 	got3 := reloaded3.Get()
 	if got3.Brand != "南岸酒馆" || got3.DefaultSellablePct != 88 || got3.DefaultMarginPct != 60 ||
+		got3.BarCount != 3 || got3.TableCount != 4 ||
 		got3.WebhookURL != "https://example.com/v3" || got3.WebhookSecret != "sec-v3" ||
 		len(got3.WebhookEvents) != 1 || got3.WebhookEvents[0] != string(event.EventBeerTapped) {
 		t.Fatalf("isolated module persistence mismatch: %+v", got3)
+	}
+
+	// 验证固定台位数量持久化、调小清理空单、以及有未结账单时拒绝调小
+	if _, err := reloaded3.SaveSpots(ctx, 5, 6); err != nil {
+		t.Fatalf("SaveSpots(5, 6): %v", err)
+	}
+	reloaded4 := settings.NewSettingsStore(pool, "PourOps")
+	if err := reloaded4.Refresh(ctx); err != nil {
+		t.Fatalf("reloaded4 Refresh: %v", err)
+	}
+	if got4 := reloaded4.Get(); got4.BarCount != 5 || got4.TableCount != 6 || got4.Brand != "南岸酒馆" {
+		t.Fatalf("SaveSpots reload mismatch: %+v", got4)
+	}
+
+	var emptyBar5 int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot) values ('bar-5') returning id`).Scan(&emptyBar5); err != nil {
+		t.Fatal(err)
+	}
+	var busyTable6 int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot) values ('table-6') returning id`).Scan(&busyTable6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml, qty) values ($1, 'retail', 1, '薯片', 1500, 0, 1)`, busyTable6); err != nil {
+		t.Fatal(err)
+	}
+
+	// table-6 有未结商品，调小到 4 必须被拦截且不改 bar_count/table_count
+	if _, err := reloaded4.SaveSpots(ctx, 3, 4); err == nil {
+		t.Fatal("should block shrinking table_count below busy table-6")
+	}
+	if _, err := reloaded4.SaveSpots(ctx, 3, 6); err != nil {
+		t.Fatalf("shrinking bar_count with only empty bar-5 should succeed: %v", err)
+	}
+	var bar5Cnt int
+	if err := pool.QueryRow(ctx, `select count(*)::int from orders where id=$1`, emptyBar5).Scan(&bar5Cnt); err != nil || bar5Cnt != 0 {
+		t.Fatalf("empty bar-5 order should be deleted on shrink, cnt=%d err=%v", bar5Cnt, err)
 	}
 }

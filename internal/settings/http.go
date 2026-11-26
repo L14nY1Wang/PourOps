@@ -52,6 +52,7 @@ func (s *Service) catalogTotal(ctx context.Context) int {
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/settings", guards.Boss(s.Page))
 	mux.HandleFunc("POST /admin/settings/general", guards.Boss(s.SaveGeneral))
+	mux.HandleFunc("POST /admin/settings/spots", guards.Boss(s.SaveSpots))
 	mux.HandleFunc("POST /admin/settings/webhook", guards.Boss(s.SaveWebhook))
 	mux.HandleFunc("POST /admin/settings/categories/add", guards.Boss(s.AddCategory))
 	mux.HandleFunc("POST /admin/settings/categories/delete", guards.Boss(s.DeleteCategory))
@@ -139,6 +140,56 @@ func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
 	}
 
 	platform.RedirectMsg(w, r, "/admin/settings", "门店与核算设置已保存并实时生效")
+}
+
+func parseSpotFields(r *http.Request, dst *StoreSettings) string {
+	barPtr, barErr := platform.ParseStrictInt(r.FormValue("bar_count"), "吧台数量", MinFixedSpots, MaxFixedSpots)
+	tablePtr, tableErr := platform.ParseStrictInt(r.FormValue("table_count"), "小桌数量", MinFixedSpots, MaxFixedSpots)
+	if barPtr != nil {
+		dst.BarCount = *barPtr
+	}
+	if tablePtr != nil {
+		dst.TableCount = *tablePtr
+	}
+	if barErr != nil {
+		return barErr.Error()
+	}
+	if barPtr == nil {
+		return "请填写吧台数量（0–50）"
+	}
+	if tableErr != nil {
+		return tableErr.Error()
+	}
+	if tablePtr == nil {
+		return "请填写小桌数量（0–50）"
+	}
+	return ""
+}
+
+func (s *Service) SaveSpots(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "表单格式不正确", http.StatusBadRequest)
+		return
+	}
+	draft := s.store.Get()
+	hasSecret := draft.WebhookSecret != ""
+
+	if errMsg := parseSpotFields(r, &draft); errMsg != "" {
+		s.renderFormError(w, r, http.StatusBadRequest, draft, hasSecret, errMsg)
+		return
+	}
+
+	if _, err := s.store.SaveSpots(r.Context(), draft.BarCount, draft.TableCount); err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			s.renderFormError(w, r, http.StatusBadRequest, draft, hasSecret, msg)
+			return
+		}
+		log.Printf("save spot settings: %v", err)
+		s.renderFormError(w, r, http.StatusInternalServerError, draft, hasSecret, "保存台位设置失败，请稍后重试")
+		return
+	}
+
+	platform.RedirectMsg(w, r, "/admin/settings", "点餐台固定台位数量已保存并实时生效")
 }
 
 func (s *Service) SaveWebhook(w http.ResponseWriter, r *http.Request) {

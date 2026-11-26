@@ -21,9 +21,9 @@ import (
 // ---------- 台位 ----------
 
 type Spot struct {
-	Key     string // bar-1 / table-3
-	Kind    string // bar | table
-	Label   string // 吧台 1 / 小桌 3
+	Key     string // bar-1 / table-3 / temp-1
+	Kind    string // bar | table | temp
+	Label   string // 吧台 1 / 小桌 3 / 临时 1
 	OrderID int64
 	Items   int
 	Total   int
@@ -42,12 +42,19 @@ func SpotLabel(key string) string {
 		return "吧台 " + num
 	case "table":
 		return "小桌 " + num
+	case "temp":
+		return "临时 " + num
 	}
 	return key
 }
 
-const maxSpotsPerKind = 50
-const maxOrderLineQty = 999
+const (
+	defaultBarSpots   = 3
+	defaultTableSpots = 4
+	defaultTempSpots  = 0
+	maxSpotsPerKind   = 50
+	maxOrderLineQty   = 999
+)
 
 func settingInt(ctx context.Context, pool *pgxpool.Pool, key string, def int) (int, error) {
 	var v string
@@ -62,59 +69,48 @@ func settingInt(ctx context.Context, pool *pgxpool.Pool, key string, def int) (i
 	if err != nil {
 		return def, nil
 	}
-	return n, nil
+	return max(0, min(n, maxSpotsPerKind)), nil
 }
 
-func spotDefault(key string) (kind string, def int, err error) {
-	switch key {
-	case "bar_count":
-		return "bar", 3, nil
-	case "table_count":
-		return "table", 4, nil
-	default:
-		return "", 0, platform.UserErr("未知台位类型")
-	}
+// AddTempSpot 添加一个临时台位：只改计数，最多 50 个，不预建账单。
+func AddTempSpot(ctx context.Context, pool *pgxpool.Pool) error {
+	return mutateTempCount(ctx, pool, +1)
 }
 
-// AddSpot 添加吧台或小桌位：只改计数，最多 50 个，不预建账单。
-func AddSpot(ctx context.Context, pool *pgxpool.Pool, key string) error {
-	return mutateSpotCount(ctx, pool, key, +1)
+// RemoveTempSpot 减少最后一个临时台位：允许减到 0；最后一个台位有消费记录或付款时阻止删除，空挂单自动清理。
+func RemoveTempSpot(ctx context.Context, pool *pgxpool.Pool) error {
+	return mutateTempCount(ctx, pool, -1)
 }
 
-// RemoveSpot 减少最后一个台位：至少保留 1 个，且最后一个台位不能有未结账单。
-func RemoveSpot(ctx context.Context, pool *pgxpool.Pool, key string) error {
-	return mutateSpotCount(ctx, pool, key, -1)
-}
-
-func mutateSpotCount(ctx context.Context, pool *pgxpool.Pool, key string, delta int) error {
-	kind, def, err := spotDefault(key)
-	if err != nil {
-		return err
-	}
+func mutateTempCount(ctx context.Context, pool *pgxpool.Pool, delta int) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	cur := def
-	var v string
-	err = tx.QueryRow(ctx, `select value from store_settings where key=$1 for update`, key).Scan(&v)
-	if err == nil {
-		if n, convErr := strconv.Atoi(strings.TrimSpace(v)); convErr == nil {
-			cur = n
-		}
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+
+	if _, err := tx.Exec(ctx, `insert into store_settings (key, value, updated_at)
+		values ('temp_count', '0', now()) on conflict (key) do nothing`); err != nil {
 		return err
+	}
+	cur := defaultTempSpots
+	var v string
+	err = tx.QueryRow(ctx, `select value from store_settings where key='temp_count' for update`).Scan(&v)
+	if err != nil {
+		return err
+	}
+	if n, convErr := strconv.Atoi(strings.TrimSpace(v)); convErr == nil {
+		cur = max(0, min(n, maxSpotsPerKind))
 	}
 	if delta > 0 {
 		if cur >= maxSpotsPerKind {
-			return platform.UserErr(fmt.Sprintf("台位数量已达上限（最多 %d 个）", maxSpotsPerKind))
+			return platform.UserErr(fmt.Sprintf("临时台位数量已达上限（最多 %d 个）", maxSpotsPerKind))
 		}
 	} else {
-		if cur <= 1 {
-			return platform.UserErr("至少保留 1 个台位")
+		if cur <= 0 {
+			return platform.UserErr("当前没有可减少的临时台位")
 		}
-		lastSpot := fmt.Sprintf("%s-%d", kind, cur)
+		lastSpot := fmt.Sprintf("temp-%d", cur)
 		var openOrderID int64
 		err = tx.QueryRow(ctx, `select id from orders where spot=$1 and closed_at is null for update`, lastSpot).Scan(&openOrderID)
 		if err == nil {
@@ -133,29 +129,39 @@ func mutateSpotCount(ctx context.Context, pool *pgxpool.Pool, key string, delta 
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `insert into store_settings (key, value, updated_at) values ($1, $2, now())
-		on conflict (key) do update set value = $2, updated_at = now()`, key, strconv.Itoa(cur+delta)); err != nil {
+	if _, err := tx.Exec(ctx, `insert into store_settings (key, value, updated_at) values ('temp_count', $1, now())
+		on conflict (key) do update set value = $1, updated_at = now()`, strconv.Itoa(cur+delta)); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// ListSpots 把吧台、小桌和各自未结账单凑成一张台位表。
+// ListSpots 把固定吧台、固定小桌、临时台位和各自未结账单凑成一张台位表。
 func ListSpots(ctx context.Context, pool *pgxpool.Pool) ([]Spot, error) {
-	bar, err := settingInt(ctx, pool, "bar_count", 3)
+	bar, err := settingInt(ctx, pool, "bar_count", defaultBarSpots)
 	if err != nil {
 		return nil, err
 	}
-	table, err := settingInt(ctx, pool, "table_count", 4)
+	table, err := settingInt(ctx, pool, "table_count", defaultTableSpots)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Spot, 0, bar+table)
+	temp, err := settingInt(ctx, pool, "temp_count", defaultTempSpots)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Spot, 0, bar+table+temp)
 	for i := 1; i <= bar; i++ {
-		out = append(out, Spot{Key: fmt.Sprintf("bar-%d", i), Kind: "bar", Label: SpotLabel(fmt.Sprintf("bar-%d", i))})
+		key := fmt.Sprintf("bar-%d", i)
+		out = append(out, Spot{Key: key, Kind: "bar", Label: SpotLabel(key)})
 	}
 	for i := 1; i <= table; i++ {
-		out = append(out, Spot{Key: fmt.Sprintf("table-%d", i), Kind: "table", Label: SpotLabel(fmt.Sprintf("table-%d", i))})
+		key := fmt.Sprintf("table-%d", i)
+		out = append(out, Spot{Key: key, Kind: "table", Label: SpotLabel(key)})
+	}
+	for i := 1; i <= temp; i++ {
+		key := fmt.Sprintf("temp-%d", i)
+		out = append(out, Spot{Key: key, Kind: "temp", Label: SpotLabel(key)})
 	}
 
 	rows, err := pool.Query(ctx, `
@@ -194,14 +200,18 @@ func ListSpots(ctx context.Context, pool *pgxpool.Pool) ([]Spot, error) {
 func EnsureOrder(ctx context.Context, pool *pgxpool.Pool, key string) (int64, error) {
 	kind, num, ok := strings.Cut(key, "-")
 	n, err := strconv.Atoi(num)
-	if !ok || err != nil || n < 1 || (kind != "bar" && kind != "table") {
+	if !ok || err != nil || n < 1 || key != kind+"-"+strconv.Itoa(n) {
 		return 0, platform.UserErr("没有这个台位")
 	}
-	def := 4
-	if kind == "bar" {
-		def = 3
-	}
-	if key != kind+"-"+strconv.Itoa(n) {
+	var def int
+	switch kind {
+	case "bar":
+		def = defaultBarSpots
+	case "table":
+		def = defaultTableSpots
+	case "temp":
+		def = defaultTempSpots
+	default:
 		return 0, platform.UserErr("没有这个台位")
 	}
 
@@ -215,8 +225,8 @@ func EnsureOrder(ctx context.Context, pool *pgxpool.Pool, key string) (int64, er
 	var rawLimit string
 	err = tx.QueryRow(ctx, `select value from store_settings where key=$1 for share`, kind+"_count").Scan(&rawLimit)
 	if err == nil {
-		if v, convErr := strconv.Atoi(strings.TrimSpace(rawLimit)); convErr == nil && v >= 1 {
-			limit = v
+		if v, convErr := strconv.Atoi(strings.TrimSpace(rawLimit)); convErr == nil && v >= 0 {
+			limit = min(v, maxSpotsPerKind)
 		}
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, err

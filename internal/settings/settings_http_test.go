@@ -286,4 +286,45 @@ func TestSettingsHTTPSaveGeneralAndWebhookIsolated(t *testing.T) {
 	if got := store.Get(); got.WebhookURL != "https://example.com/v2" || got.Brand != "北岸精酿" {
 		t.Fatalf("failed SaveWebhook should preserve existing state, got %+v", got)
 	}
+
+	// 6. SaveSpots 独立更新固定吧台/小桌数量，允许 0，拦截越界或空值
+	spotForm := url.Values{"bar_count": {"5"}, "table_count": {"6"}}
+	reqSpot := httptest.NewRequest(http.MethodPost, "/admin/settings/spots", strings.NewReader(spotForm.Encode()))
+	reqSpot.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recSpot := httptest.NewRecorder()
+	svc.SaveSpots(recSpot, reqSpot)
+	if _, errMsg := platform.ReadFlashCookies(recSpot.Result().Cookies()); recSpot.Code != http.StatusSeeOther || errMsg != "" {
+		t.Fatalf("SaveSpots status=%d err=%q", recSpot.Code, errMsg)
+	}
+	cfg = store.Get()
+	if cfg.BarCount != 5 || cfg.TableCount != 6 || cfg.Brand != "北岸精酿" || cfg.WebhookURL != "https://example.com/v2" {
+		t.Fatalf("SaveSpots mismatch or overwrote unrelated fields: %+v", cfg)
+	}
+
+	zeroForm := url.Values{"bar_count": {"0"}, "table_count": {"0"}}
+	reqZero := httptest.NewRequest(http.MethodPost, "/admin/settings/spots", strings.NewReader(zeroForm.Encode()))
+	reqZero.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recZero := httptest.NewRecorder()
+	svc.SaveSpots(recZero, reqZero)
+	if recZero.Code != http.StatusSeeOther || store.Get().BarCount != 0 || store.Get().TableCount != 0 {
+		t.Fatalf("SaveSpots(0, 0) status=%d got=%+v", recZero.Code, store.Get())
+	}
+
+	for _, bad := range []url.Values{
+		{"bar_count": {"-1"}, "table_count": {"4"}},
+		{"bar_count": {"51"}, "table_count": {"4"}},
+		{"bar_count": {""}, "table_count": {"4"}},
+		{"bar_count": {"3"}, "table_count": {"abc"}},
+	} {
+		reqBadSpot := httptest.NewRequest(http.MethodPost, "/admin/settings/spots", strings.NewReader(bad.Encode()))
+		reqBadSpot.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		recBadSpot := httptest.NewRecorder()
+		svc.SaveSpots(recBadSpot, reqBadSpot)
+		if recBadSpot.Code != http.StatusBadRequest {
+			t.Fatalf("SaveSpots(%v) status=%d, want 400", bad, recBadSpot.Code)
+		}
+	}
+	if store.Get().BarCount != 0 || store.Get().TableCount != 0 {
+		t.Fatalf("invalid SaveSpots should not mutate store, got %+v", store.Get())
+	}
 }

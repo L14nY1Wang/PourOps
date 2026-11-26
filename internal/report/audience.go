@@ -412,9 +412,14 @@ type SpotPreference struct {
 	TableCups    int64
 	TableTopCat  string
 	TableTopCups int64
+	TempCups     int64
+	TempTopCat   string
+	TempTopCups  int64
 }
 
-func (p SpotPreference) HasData() bool { return p.BarCups > 0 || p.TableCups > 0 }
+func (p SpotPreference) HasData() bool {
+	return p.BarCups > 0 || p.TableCups > 0 || p.TempCups > 0
+}
 
 func (p SpotPreference) SummaryText() string {
 	barCups := p.BarTopCups
@@ -425,15 +430,41 @@ func (p SpotPreference) SummaryText() string {
 	if tableCups == 0 {
 		tableCups = p.TableCups
 	}
-	switch {
-	case p.BarCups > 0 && p.TableCups > 0:
-		return fmt.Sprintf("吧台偏爱 %s（%d 杯）· 桌台偏爱 %s（%d 杯）", p.BarTopCat, barCups, p.TableTopCat, tableCups)
-	case p.BarCups > 0:
-		return fmt.Sprintf("吧台客群偏爱 %s（%d 杯）", p.BarTopCat, barCups)
-	case p.TableCups > 0:
-		return fmt.Sprintf("桌台客群偏爱 %s（%d 杯）", p.TableTopCat, tableCups)
-	default:
+	tempCups := p.TempTopCups
+	if tempCups == 0 {
+		tempCups = p.TempCups
+	}
+
+	active := 0
+	for _, n := range []int64{p.BarCups, p.TableCups, p.TempCups} {
+		if n > 0 {
+			active++
+		}
+	}
+	switch active {
+	case 0:
 		return "暂无 POS 台位饮用场景记录"
+	case 1:
+		switch {
+		case p.BarCups > 0:
+			return fmt.Sprintf("吧台客群偏爱 %s（%d 杯）", p.BarTopCat, barCups)
+		case p.TableCups > 0:
+			return fmt.Sprintf("桌台客群偏爱 %s（%d 杯）", p.TableTopCat, tableCups)
+		default:
+			return fmt.Sprintf("临时台位客群偏爱 %s（%d 杯）", p.TempTopCat, tempCups)
+		}
+	default:
+		parts := make([]string, 0, 3)
+		if p.BarCups > 0 {
+			parts = append(parts, fmt.Sprintf("吧台偏爱 %s（%d 杯）", p.BarTopCat, barCups))
+		}
+		if p.TableCups > 0 {
+			parts = append(parts, fmt.Sprintf("桌台偏爱 %s（%d 杯）", p.TableTopCat, tableCups))
+		}
+		if p.TempCups > 0 {
+			parts = append(parts, fmt.Sprintf("临时偏爱 %s（%d 杯）", p.TempTopCat, tempCups))
+		}
+		return strings.Join(parts, " · ")
 	}
 }
 
@@ -696,7 +727,9 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	}
 
 	spotRows, err := tx.Query(ctx, `
-		select case when lower(o.spot) like 'bar-%' then 'bar' else 'table' end as zone,
+		select case when lower(o.spot) like 'bar-%' then 'bar'
+		            when lower(o.spot) like 'temp-%' then 'temp'
+		            else 'table' end as zone,
 		       b.category,
 		       b.style,
 		       coalesce(sum(i.qty), 0)::bigint as cups
@@ -713,6 +746,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	}
 	barCats := make(map[string]int64)
 	tableCats := make(map[string]int64)
+	tempCats := make(map[string]int64)
 	for spotRows.Next() {
 		var zone, rawCat, style string
 		var cups int64
@@ -724,10 +758,14 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 			continue
 		}
 		cat := normalizeAudienceCategory(rawCat, style, allowedCategories)
-		if zone == "bar" {
+		switch zone {
+		case "bar":
 			out.Spots.BarCups += cups
 			barCats[cat] += cups
-		} else {
+		case "temp":
+			out.Spots.TempCups += cups
+			tempCats[cat] += cups
+		default:
 			out.Spots.TableCups += cups
 			tableCats[cat] += cups
 		}
@@ -738,6 +776,7 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	}
 	out.Spots.BarTopCat, out.Spots.BarTopCups = pickTopCategory(barCats)
 	out.Spots.TableTopCat, out.Spots.TableTopCups = pickTopCategory(tableCats)
+	out.Spots.TempTopCat, out.Spots.TempTopCups = pickTopCategory(tempCats)
 	return out, nil
 }
 
