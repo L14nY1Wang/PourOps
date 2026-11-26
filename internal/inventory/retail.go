@@ -36,10 +36,10 @@ func (it RetailItem) ProfitCents() int { return it.PriceCents - it.CostCents }
 func (it RetailItem) Profit() string   { return platform.MoneyText(it.ProfitCents()) }
 func (it RetailItem) StockValue() int  { return it.Stock * it.CostCents }
 func (it RetailItem) PriceInput() string {
-	return strconv.FormatFloat(float64(it.PriceCents)/100, 'f', -1, 64)
+	return platform.MoneyInput(it.PriceCents)
 }
 func (it RetailItem) CostInput() string {
-	return strconv.FormatFloat(float64(it.CostCents)/100, 'f', -1, 64)
+	return platform.MoneyInput(it.CostCents)
 }
 
 // LowStockItem 表示库存变动后跌入低库存/售罄阈值的商品快照，供事务提交后发布预警事件。
@@ -365,29 +365,42 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 		curAct    bool
 	}
 	snaps := make(map[int64]*itemSnap, len(ids))
-	for _, id := range ids {
+	rows, err := tx.Query(ctx, `select id, name, cost_cents, stock, active, archived_at is not null
+		from retail_items where id = any($1::bigint[]) order by id for update`, ids)
+	if err != nil {
+		return 0, nil, err
+	}
+	for rows.Next() {
+		var id int64
 		var s itemSnap
 		var archived bool
-		err := tx.QueryRow(ctx, `select name, cost_cents, stock, active, archived_at is not null
-			from retail_items where id=$1 for update`, id).Scan(&s.name, &s.cost, &s.origStock, &s.origAct, &archived)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, nil, platform.UserErr("「" + reqName[id] + "」不存在")
-		}
-		if err != nil {
+		if err := rows.Scan(&id, &s.name, &s.cost, &s.origStock, &s.origAct, &archived); err != nil {
+			rows.Close()
 			return 0, nil, err
 		}
 		if archived {
+			rows.Close()
 			return 0, nil, platform.UserErr("「" + s.name + "」已停用删除，不能售出")
 		}
 		if s.cost < 0 {
+			rows.Close()
 			return 0, nil, platform.UserErr("「" + s.name + "」成本不能为负")
 		}
 		if s.origStock < needQty[id] {
+			rows.Close()
 			return 0, nil, platform.UserErr("「" + reqName[id] + "」库存不够了")
 		}
 		s.curStock = s.origStock
 		s.curAct = s.origAct
 		snaps[id] = &s
+	}
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	for _, id := range ids {
+		if _, ok := snaps[id]; !ok {
+			return 0, nil, platform.UserErr("「" + reqName[id] + "」不存在")
+		}
 	}
 
 	type line struct {
@@ -445,76 +458,6 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 	return saleID, low, nil
 }
 
-// DeleteSale 仅用于测试/内部补偿：库存加回去、零售单删除（明细级联），流水与操作台账留痕。
-// 它不会撤销 payments 或订单收款，因此不得直接挂后台路由——否则会退掉库存却留下已收资金记录；
-// 生产环境的撤单必须先走支付冲正，再在同一事务里回滚零售库存。
-// 先锁订单行，并发撤销只有抢到锁的那次退库存，重复调用是空操作。
-func DeleteSale(ctx context.Context, pool *pgxpool.Pool, id int64) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	var saleID int64
-	var totalCents int
-	err = tx.QueryRow(ctx, `select id, total_cents from retail_sales where id=$1 for update`, id).Scan(&saleID, &totalCents)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil // 已经撤过了
-	}
-	if err != nil {
-		return err
-	}
-	rows, err := tx.Query(ctx, `select item_id, name, qty from retail_sale_items where sale_id=$1`, id)
-	if err != nil {
-		return err
-	}
-	type back struct {
-		id   *int64
-		name string
-		qty  int
-	}
-	var list []back
-	for rows.Next() {
-		var b back
-		if err := rows.Scan(&b.id, &b.name, &b.qty); err != nil {
-			rows.Close()
-			return err
-		}
-		list = append(list, b)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	subjectName := fmt.Sprintf("零售单 #%d", id)
-	if len(list) == 1 && list[0].name != "" {
-		subjectName = platform.RetailSubject(list[0].name)
-	} else if len(list) > 1 && list[0].name != "" {
-		subjectName = platform.RetailSubject(fmt.Sprintf("%s 等%d件", list[0].name, len(list)))
-	}
-	for _, b := range list {
-		if b.id == nil {
-			continue
-		}
-		if _, err := tx.Exec(ctx, `update retail_items set stock = stock + $2 where id=$1`, *b.id, b.qty); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `insert into retail_moves (item_id, delta, reason, ref_id) values ($1,$2,'撤销',$3)`,
-			*b.id, b.qty, id); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(ctx, `delete from retail_sales where id=$1`, id); err != nil {
-		return err
-	}
-	if err := platform.LogOperation(ctx, tx, platform.OpSaleVoid, subjectName,
-		fmt.Sprintf("撤销零售单 #%d · %s", id, platform.PriceText(totalCents))); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 // RetailStatsSummary 今日与本月零售营收/成本（按营业日 07:00–次日 07:00 划分，与经营概览同源）。
 func RetailStatsSummary(ctx context.Context, pool *pgxpool.Pool) (RetailStats, error) {
 	todayStart := platform.BusinessDayStart(time.Now())
@@ -527,7 +470,8 @@ func RetailStatsSummary(ctx context.Context, pool *pgxpool.Pool) (RetailStats, e
 		       coalesce(sum(cost_cents)  filter (where created_at >= $1 and created_at < $2), 0)::int,
 		       coalesce(sum(total_cents) filter (where created_at >= $3 and created_at < $2), 0)::int,
 		       coalesce(sum(cost_cents)  filter (where created_at >= $3 and created_at < $2), 0)::int
-		from retail_sales`, todayStart, tomorrowStart, monthStart).Scan(&st.TodayRev, &st.TodayCost, &st.MonthRev, &st.MonthCost)
+		from retail_sales
+		where created_at >= $3 and created_at < $2`, todayStart, tomorrowStart, monthStart).Scan(&st.TodayRev, &st.TodayCost, &st.MonthRev, &st.MonthCost)
 	return st, err
 }
 

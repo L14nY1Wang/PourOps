@@ -1,11 +1,16 @@
 package inventory
 
 import (
+	"errors"
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"pourops/internal/catalog"
 	"pourops/internal/event"
@@ -14,6 +19,8 @@ import (
 	"pourops/internal/ui"
 )
 
+const kegPageSize = 50
+
 type KegListPage struct {
 	ui.Layout
 	Kegs       []Keg
@@ -21,6 +28,39 @@ type KegListPage struct {
 	Status     string
 	Verdict    string
 	Pricing    settings.PricingConfig
+	Page       int
+	TotalPages int
+	PrevURL    string
+	NextURL    string
+}
+
+func kegListURL(status, verdict string, page int) string {
+	vals := url.Values{}
+	if status != "" && status != "all" {
+		vals.Set("status", status)
+	}
+	if verdict != "" && verdict != "all" {
+		vals.Set("verdict", verdict)
+	}
+	if page > 1 {
+		vals.Set("page", strconv.Itoa(page))
+	}
+	if len(vals) == 0 {
+		return "/admin/kegs"
+	}
+	return "/admin/kegs?" + vals.Encode()
+}
+
+func parseOptionalTimeInput(raw, label string) (*time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	t := platform.ParseLocalTime(raw)
+	if t == nil {
+		return nil, platform.UserErr(label + "格式不对")
+	}
+	return t, nil
 }
 
 func (p KegListPage) PricingCfg() settings.PricingConfig {
@@ -41,7 +81,7 @@ func (p KegDetailPage) PricingCfg() settings.PricingConfig {
 }
 
 func (p KegDetailPage) Econ() KegEconomics {
-	return p.Keg.EconomicsWithConfig(&p.Beer, p.PricingCfg())
+	return p.Keg.EconomicsWithConfig(p.PricingCfg())
 }
 
 func (p KegDetailPage) PricingRows() []CupPricingRow {
@@ -97,10 +137,29 @@ func (s *Service) KegList(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		if verdict != "all" && k.EconomicsWithConfig(nil, cfg).Verdict != verdict {
+		if verdict != "all" && k.EconomicsWithConfig(cfg).Verdict != verdict {
 			continue
 		}
 		filtered = append(filtered, k)
+	}
+
+	totalPages := max((len(filtered)+kegPageSize-1)/kegPageSize, 1)
+	page, _ := strconv.Atoi(strings.TrimSpace(q.Get("page")))
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+	start := (page - 1) * kegPageSize
+	end := min(start+kegPageSize, len(filtered))
+	paged := filtered[start:end]
+	var prevURL, nextURL string
+	if page > 1 {
+		prevURL = kegListURL(status, verdict, page-1)
+	}
+	if page < totalPages {
+		nextURL = kegListURL(status, verdict, page+1)
 	}
 
 	s.renderer.Render(w, r, "admin/kegs.html", &KegListPage{
@@ -108,11 +167,15 @@ func (s *Service) KegList(w http.ResponseWriter, r *http.Request) {
 			Title: "桶装盈亏",
 			Nav:   "kegs",
 		},
-		Kegs:       filtered,
+		Kegs:       paged,
 		KegSummary: SummarizeKegsWithConfig(filtered, cfg),
 		Status:     status,
 		Verdict:    verdict,
 		Pricing:    cfg,
+		Page:       page,
+		TotalPages: totalPages,
+		PrevURL:    prevURL,
+		NextURL:    nextURL,
 	})
 }
 
@@ -120,7 +183,12 @@ func (s *Service) KegEdit(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	k, err := GetKeg(r.Context(), s.pool, id)
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("keg edit (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	beers, err := catalog.ListBeers(r.Context(), s.pool, false)
@@ -139,14 +207,17 @@ func (s *Service) KegEdit(w http.ResponseWriter, r *http.Request) {
 func (s *Service) KegSave(w http.ResponseWriter, r *http.Request) {
 	capPtr, capErr := platform.ParseStrictInt(r.FormValue("capacity_ml"), "桶容量", 1, math.MaxInt32)
 	costCents, costErr := platform.MoneyCents(r.FormValue("cost"))
+	placedAt, placedErr := parseOptionalTimeInput(r.FormValue("placed_at"), "入库时间")
+	tappedAt, tappedErr := parseOptionalTimeInput(r.FormValue("tapped_at"), "开桶时间")
+	finishedAt, finishedErr := parseOptionalTimeInput(r.FormValue("finished_at"), "结桶时间")
 	k := Keg{
 		BeerID:     int64(platform.IntValue(r.FormValue("beer_id"))),
 		KegNo:      strings.TrimSpace(r.FormValue("keg_no")),
 		CapacityML: 0,
 		CostCents:  costCents,
-		PlacedAt:   platform.ParseLocalTime(r.FormValue("placed_at")),
-		TappedAt:   platform.ParseLocalTime(r.FormValue("tapped_at")),
-		FinishedAt: platform.ParseLocalTime(r.FormValue("finished_at")),
+		PlacedAt:   placedAt,
+		TappedAt:   tappedAt,
+		FinishedAt: finishedAt,
 		Note:       strings.TrimSpace(r.FormValue("note")),
 	}
 	if capPtr != nil {
@@ -179,6 +250,18 @@ func (s *Service) KegSave(w http.ResponseWriter, r *http.Request) {
 		renderFail(http.StatusBadRequest, costErr.Error())
 		return
 	}
+	if placedErr != nil {
+		renderFail(http.StatusBadRequest, placedErr.Error())
+		return
+	}
+	if tappedErr != nil {
+		renderFail(http.StatusBadRequest, tappedErr.Error())
+		return
+	}
+	if finishedErr != nil {
+		renderFail(http.StatusBadRequest, finishedErr.Error())
+		return
+	}
 	res, err := SaveKegResultFn(r.Context(), s.pool, k)
 	if err != nil {
 		if msg, ok := platform.UserErrorMessage(err); ok {
@@ -190,13 +273,30 @@ func (s *Service) KegSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	subject := platform.BeerSubject(res.Brewery, res.BeerName)
-	switch res.OpKind {
-	case platform.OpTap:
+	switch {
+	case res.OpKind == platform.OpTap:
 		s.publish(r, event.EventScreenChanged, subject, map[string]any{"action": "keg.tapped", "beer_id": res.BeerID, "keg_id": res.KegID})
 		s.publish(r, event.EventBeerTapped, subject, map[string]any{"beer_id": res.BeerID, "keg_id": res.KegID, "opened_new": true})
-	case platform.OpUntap:
+	case res.OpKind == platform.OpUntap:
 		s.publish(r, event.EventScreenChanged, subject, map[string]any{"action": "keg.untapped", "beer_id": res.BeerID, "keg_id": res.KegID})
-		s.publish(r, event.EventKegFinished, subject, map[string]any{"beer_id": res.BeerID, "keg_id": res.KegID})
+		payload := map[string]any{"beer_id": res.BeerID, "keg_id": res.KegID}
+		if savedKeg, err := GetKeg(r.Context(), s.pool, res.KegID); err != nil {
+			log.Printf("keg save finished load (%d): %v", res.KegID, err)
+		} else {
+			econ := savedKeg.EconomicsWithConfig(s.currentPricing())
+			payload = map[string]any{
+				"keg_id":        savedKeg.ID,
+				"beer_id":       savedKeg.BeerID,
+				"revenue_cents": savedKeg.RevenueCents,
+				"cost_cents":    savedKeg.CostCents,
+				"profit_cents":  savedKeg.ProfitCents(),
+				"verdict":       econ.Verdict,
+				"yield_pct":     econ.ActualYieldPct,
+			}
+		}
+		s.publish(r, event.EventKegFinished, subject, payload)
+	case res.ScreenChanged:
+		s.publish(r, event.EventScreenChanged, subject, map[string]any{"action": "keg.screen_off", "beer_id": res.BeerID, "keg_id": res.KegID})
 	}
 	platform.RedirectMsg(w, r, "/admin/kegs/"+strconv.FormatInt(res.KegID, 10), "已保存")
 }
@@ -205,7 +305,12 @@ func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	k, err := GetKeg(r.Context(), s.pool, id)
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("keg detail (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	pours, err := ListPours(r.Context(), s.pool, id)
@@ -214,7 +319,10 @@ func (s *Service) KegDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
-	beer, _ := catalog.GetBeer(r.Context(), s.pool, k.BeerID)
+	beer, err := catalog.GetBeer(r.Context(), s.pool, k.BeerID)
+	if err != nil {
+		log.Printf("keg detail get beer (%d): %v", k.BeerID, err)
+	}
 	cfg := s.currentPricing()
 	s.renderer.Render(w, r, "admin/keg.html", &KegDetailPage{
 		Layout: ui.Layout{

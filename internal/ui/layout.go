@@ -46,6 +46,15 @@ func (u UserView) RoleName() string { return RoleLabel(u.Role) }
 func (u UserView) IsBoss() bool     { return u.Role == RoleBoss }
 func (u UserView) CanBackend() bool { return u.Role == RoleBoss || u.Role == RoleManager }
 
+// Initial 按 Unicode 字符提取头像首字母，避免中文用户名按字节截断产生乱码。
+func (u UserView) Initial() string {
+	s := strings.TrimSpace(u.Username)
+	for _, r := range s {
+		return string(r)
+	}
+	return "?"
+}
+
 func (u UserView) Landing() string {
 	if u.CanBackend() {
 		return "/admin/"

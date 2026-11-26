@@ -118,8 +118,6 @@ button, a, input, select, textarea {
 
 .num,
 .stat-value,
-.data-number,
-.data-date,
 .mono-num {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
@@ -140,7 +138,7 @@ h1, h2, h3, h4 {
   letter-spacing: -.01em;
 }
 
-.text-muted, .text-secondary {
+.text-muted {
   color: var(--muted) !important;
 }
 
@@ -148,7 +146,7 @@ h1, h2, h3, h4 {
   color: var(--foreground) !important;
 }
 
-.text-primary, .text-info {
+.text-primary {
   color: var(--accent) !important;
 }
 

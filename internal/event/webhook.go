@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -86,9 +87,10 @@ type WebhookDispatcher struct {
 	client       *http.Client
 	retryBackoff time.Duration
 
-	queue chan Event
-	stop  chan struct{}
-	done  chan struct{}
+	queue        chan Event
+	workerCtx    context.Context
+	cancelWorker context.CancelFunc
+	done         chan struct{}
 
 	mu         sync.Mutex
 	closed     bool
@@ -118,12 +120,14 @@ func NewWebhookDispatcher(cfg WebhookConfigProvider, client *http.Client) *Webho
 	if client == nil {
 		client = newSafeWebhookHTTPClient()
 	}
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	d := &WebhookDispatcher{
 		cfg:          cfg,
 		client:       client,
 		retryBackoff: webhookRetryBackoff,
 		queue:        make(chan Event, webhookQueueSize),
-		stop:         make(chan struct{}),
+		workerCtx:    workerCtx,
+		cancelWorker: cancelWorker,
 		done:         make(chan struct{}),
 	}
 	go d.worker()
@@ -176,7 +180,11 @@ func (d *WebhookDispatcher) worker() {
 			log.Printf("webhook breaker open: skipped %s (%s)", ev.Type, ev.ID)
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), webhookHTTPTimeout*2)
+		parentCtx := d.workerCtx
+		if parentCtx == nil {
+			parentCtx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parentCtx, webhookHTTPTimeout*2)
 		if err := d.deliverWithRetry(ctx, ev); err != nil {
 			log.Printf("webhook deliver %s (%s): %v", ev.Type, ev.ID, err)
 			d.recordOutcome(false)
@@ -216,8 +224,14 @@ func (d *WebhookDispatcher) Close(ctx context.Context) error {
 
 	select {
 	case <-d.done:
+		if d.cancelWorker != nil {
+			d.cancelWorker()
+		}
 		return nil
 	case <-ctx.Done():
+		if d.cancelWorker != nil {
+			d.cancelWorker()
+		}
 		return ctx.Err()
 	}
 }
@@ -299,8 +313,10 @@ func (d *WebhookDispatcher) deliverOnce(ctx context.Context, cfg WebhookConfig, 
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		if msg, ok := platform.UserErrorMessage(err); ok {
-			return platform.UserErr(msg)
+		// 提取内层 UserError.Msg，避免把 net/http *url.Error 包裹的含秘钥查询参数 URL 写进错误横幅或 Cookie。
+		var ue platform.UserError
+		if errors.As(err, &ue) {
+			return ue
 		}
 		log.Printf("webhook request (%s): %v", cfg.URL, err)
 		return platform.UserErr("无法连接到 Webhook 地址，请检查网络或目标地址")

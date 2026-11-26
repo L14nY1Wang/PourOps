@@ -69,19 +69,6 @@ func (s StoreSettings) Pricing() PricingConfig {
 	}.Normalized()
 }
 
-func (s StoreSettings) HasWebhookEvent(typ event.EventType) bool {
-	if typ == event.EventWebhookTest {
-		return true
-	}
-	want := string(typ)
-	for _, ev := range s.WebhookEvents {
-		if ev == want {
-			return true
-		}
-	}
-	return false
-}
-
 // SettingsStore 在进程内存缓存当前门店参数，并同步持久化到 Postgres store_settings 表。
 type SettingsStore struct {
 	pool         *pgxpool.Pool
@@ -288,59 +275,6 @@ func normalizeWebhook(rawURL, rawSecret string, rawEvents []string) (string, str
 		}
 	}
 	return urlStr, secret, cleanEvents, nil
-}
-
-// SaveCombined 在 writeMu 锁保护下合并保存常规设置与 Webhook 配置，避免并发覆盖分类或现有密钥/事件。
-func (s *SettingsStore) SaveCombined(ctx context.Context, rawBrand string, sellablePct, marginPct int, rawURL, rawSecret string, clearSecret bool, rawEvents []string, hasEventsField bool) (StoreSettings, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-
-	s.mu.RLock()
-	curCats := slices.Clone(s.cur.BeerCategories)
-	effectiveSecret := s.cur.WebhookSecret
-	effectiveEvents := slices.Clone(s.cur.WebhookEvents)
-	s.mu.RUnlock()
-
-	if len(curCats) == 0 {
-		curCats = slices.Clone(platform.DefaultBeerCategories)
-	}
-	if clearSecret {
-		effectiveSecret = ""
-	} else if trimmed := strings.TrimSpace(rawSecret); trimmed != "" {
-		effectiveSecret = trimmed
-	}
-	if hasEventsField {
-		effectiveEvents = rawEvents
-	}
-
-	brand, sellable, margin, err := s.normalizeGeneral(rawBrand, sellablePct, marginPct)
-	if err != nil {
-		return StoreSettings{}, err
-	}
-	urlStr, secret, cleanEvents, err := normalizeWebhook(rawURL, effectiveSecret, effectiveEvents)
-	if err != nil {
-		return StoreSettings{}, err
-	}
-	if err := s.upsertPairs(ctx, map[string]string{
-		"brand":                brand,
-		"default_sellable_pct": strconv.Itoa(sellable),
-		"default_margin_pct":   strconv.Itoa(margin),
-		"webhook_url":          urlStr,
-		"webhook_secret":       secret,
-		"webhook_events":       strings.Join(cleanEvents, ","),
-	}); err != nil {
-		return StoreSettings{}, err
-	}
-	s.mu.Lock()
-	s.cur.Brand = brand
-	s.cur.DefaultSellablePct = sellable
-	s.cur.DefaultMarginPct = margin
-	s.cur.BeerCategories = slices.Clone(curCats)
-	s.cur.WebhookURL = urlStr
-	s.cur.WebhookSecret = secret
-	s.cur.WebhookEvents = slices.Clone(cleanEvents)
-	s.mu.Unlock()
-	return s.Get(), nil
 }
 
 // SaveGeneral 仅更新门店名称与桶装默认核算参数，不影响酒款分类和 Webhook 配置。

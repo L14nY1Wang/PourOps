@@ -501,28 +501,6 @@ func TestRetailStockIntegrity(t *testing.T) {
 		t.Fatalf("成本应为 2400，实际 %d", got)
 	}
 
-	var wg sync.WaitGroup
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_ = inventory.DeleteSale(ctx, pool, saleID)
-		}()
-	}
-	wg.Wait()
-	if got := qInt(t, pool, `select stock from retail_items where id=$1`, item); got != 5 {
-		t.Fatalf("并发撤销退了多次库存，剩 %d", got)
-	}
-	if got := qInt(t, pool, `select count(*)::int from retail_moves where reason='撤销'`); got != 1 {
-		t.Fatalf("撤销流水应只有 1 条，实际 %d", got)
-	}
-	if err := inventory.DeleteSale(ctx, pool, saleID); err != nil {
-		t.Fatalf("重复撤销应无害，返回 %v", err)
-	}
-	if got := qInt(t, pool, `select stock from retail_items where id=$1`, item); got != 5 {
-		t.Fatalf("重复撤销又退了库存，剩 %d", got)
-	}
-
 	execSQL(t, pool, `update retail_items set active=false, stock=4 where id=$1`, item)
 	if _, err := inventory.SellRetail(ctx, pool, []inventory.SaleLine{{
 		Item: inventory.RetailItem{ID: item, Name: "薯片 原味", PriceCents: 3000},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -40,7 +41,7 @@ func (e jiuheHTTPError) Error() string { return fmt.Sprintf("HTTP %d", int(e)) }
 // errJiuheCoolingDown 是上游失败冷却期内返回的错误，不发起任何网络请求。
 var errJiuheCoolingDown = errors.New("在线 UT 库暂时不可用")
 
-var reKegCap = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(ml|l|升)`)
+var reKegCap = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)\s*(ml|l|升)(?:[^a-z]|$)`)
 
 type jiuheCacheEntry[T any] struct {
 	value     T
@@ -51,20 +52,29 @@ type JiuheCache struct {
 	mu     sync.Mutex
 	search map[string]jiuheCacheEntry[[]Candidate]
 	detail map[int64]jiuheCacheEntry[Detail]
+	now    func() time.Time
 }
 
 func NewJiuheCache() *JiuheCache {
 	return &JiuheCache{
 		search: make(map[string]jiuheCacheEntry[[]Candidate]),
 		detail: make(map[int64]jiuheCacheEntry[Detail]),
+		now:    time.Now,
 	}
+}
+
+func (c *JiuheCache) clock() time.Time {
+	if c != nil && c.now != nil {
+		return c.now()
+	}
+	return time.Now()
 }
 
 func (c *JiuheCache) getSearch(key string) ([]Candidate, bool) {
 	if c == nil {
 		return nil, false
 	}
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ent, ok := c.search[key]
@@ -84,7 +94,7 @@ func (c *JiuheCache) setSearch(key string, items []Candidate) {
 	if c == nil {
 		return
 	}
-	now := time.Now()
+	now := c.clock()
 	cp := make([]Candidate, len(items))
 	copy(cp, items)
 
@@ -98,7 +108,7 @@ func (c *JiuheCache) getDetail(id int64) (Detail, bool) {
 	if c == nil {
 		return Detail{}, false
 	}
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ent, ok := c.detail[id]
@@ -116,7 +126,7 @@ func (c *JiuheCache) setDetail(id int64, d Detail) {
 	if c == nil {
 		return
 	}
-	now := time.Now()
+	now := c.clock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	pruneOldest(c.detail, now, jiuheCacheMaxEntries)
@@ -157,9 +167,27 @@ type JiuheProvider struct {
 	cooldown time.Time
 }
 
+func newSafeJiuheHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: jiuheHTTPTimeout}
+	tr := &http.Transport{
+		Proxy:       nil,
+		DialContext: platform.NewSafeDialContext(dialer, func() bool { return false }),
+	}
+	return &http.Client{
+		Timeout:   jiuheHTTPTimeout,
+		Transport: tr,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 3 {
+				return errors.New("重定向次数过多")
+			}
+			return platform.ValidateOutboundParsedURL(req.URL, "远端酒款检索地址", false)
+		},
+	}
+}
+
 func NewJiuheProvider(baseURL string, client *http.Client) *JiuheProvider {
 	if client == nil {
-		client = &http.Client{Timeout: jiuheHTTPTimeout}
+		client = newSafeJiuheHTTPClient()
 	}
 	return &JiuheProvider{
 		baseURL: strings.TrimSpace(baseURL),
@@ -208,7 +236,7 @@ func isJiuheTransient(err error) bool {
 	}
 	var status jiuheHTTPError
 	if errors.As(err, &status) {
-		return int(status) >= 500
+		return int(status) == http.StatusTooManyRequests || int(status) >= 500
 	}
 	return true
 }
@@ -252,7 +280,7 @@ func (p *JiuheProvider) httpClient() *http.Client {
 	if p.client != nil {
 		return p.client
 	}
-	return &http.Client{Timeout: jiuheHTTPTimeout}
+	return newSafeJiuheHTTPClient()
 }
 
 func (p *JiuheProvider) fetchJSON(ctx context.Context, targetURL string, dst any) error {
@@ -658,6 +686,13 @@ func ParseKegCapacityML(label string) int {
 		return 0
 	}
 	unit := strings.ToLower(m[2])
+	limit := 1000.0
+	if unit == "ml" {
+		limit = 1_000_000.0
+	}
+	if val > limit {
+		return 0
+	}
 	if unit == "ml" {
 		return int(math.Round(val))
 	}

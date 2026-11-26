@@ -22,20 +22,25 @@ func TestSettingsStorePersistenceAndValidation(t *testing.T) {
 		t.Fatalf("default pricing = %+v", cfg)
 	}
 
-	if _, err := store.SaveCombined(ctx, "PourOps", 40, 50, "", "", false, nil, false); err == nil {
+	if _, err := store.SaveGeneral(ctx, "PourOps", 40, 50); err == nil {
 		t.Fatal("should reject sellable < 50")
 	}
-	if _, err := store.SaveCombined(ctx, "PourOps", 80, 50, "http://169.254.169.254/latest/meta-data", "", false, nil, false); err == nil {
+	if _, err := store.SaveWebhook(ctx, "http://169.254.169.254/latest/meta-data", "", false, nil); err == nil {
 		t.Fatal("should block metadata SSRF URL")
 	}
 
-	saved, err := store.SaveCombined(ctx,
-		"北岸精酿", 85, 55,
-		"https://example.com/hook", "my-secret", false,
-		[]string{string(event.EventOrderPaid), string(event.EventKegFinished)}, true,
+	savedGen, err := store.SaveGeneral(ctx, "北岸精酿", 85, 55)
+	if err != nil {
+		t.Fatalf("SaveGeneral valid settings: %v", err)
+	}
+	if savedGen.Brand != "北岸精酿" || savedGen.DefaultSellablePct != 85 || savedGen.DefaultMarginPct != 55 {
+		t.Fatalf("savedGen = %+v", savedGen)
+	}
+	saved, err := store.SaveWebhook(ctx, "https://example.com/hook", "my-secret", false,
+		[]string{string(event.EventOrderPaid), string(event.EventKegFinished)},
 	)
 	if err != nil {
-		t.Fatalf("Save valid settings: %v", err)
+		t.Fatalf("SaveWebhook valid settings: %v", err)
 	}
 	if saved.Brand != "北岸精酿" || saved.DefaultSellablePct != 85 || saved.DefaultMarginPct != 55 {
 		t.Fatalf("saved = %+v", saved)

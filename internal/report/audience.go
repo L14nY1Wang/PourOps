@@ -406,22 +406,32 @@ func (c CupSizePreference) DominantLabel() string {
 }
 
 type SpotPreference struct {
-	BarCups     int64
-	BarTopCat   string
-	TableCups   int64
-	TableTopCat string
+	BarCups      int64
+	BarTopCat    string
+	BarTopCups   int64
+	TableCups    int64
+	TableTopCat  string
+	TableTopCups int64
 }
 
 func (p SpotPreference) HasData() bool { return p.BarCups > 0 || p.TableCups > 0 }
 
 func (p SpotPreference) SummaryText() string {
+	barCups := p.BarTopCups
+	if barCups == 0 {
+		barCups = p.BarCups
+	}
+	tableCups := p.TableTopCups
+	if tableCups == 0 {
+		tableCups = p.TableCups
+	}
 	switch {
 	case p.BarCups > 0 && p.TableCups > 0:
-		return fmt.Sprintf("吧台偏爱 %s（%d 杯）· 桌台偏爱 %s（%d 杯）", p.BarTopCat, p.BarCups, p.TableTopCat, p.TableCups)
+		return fmt.Sprintf("吧台偏爱 %s（%d 杯）· 桌台偏爱 %s（%d 杯）", p.BarTopCat, barCups, p.TableTopCat, tableCups)
 	case p.BarCups > 0:
-		return fmt.Sprintf("吧台客群偏爱 %s（%d 杯）", p.BarTopCat, p.BarCups)
+		return fmt.Sprintf("吧台客群偏爱 %s（%d 杯）", p.BarTopCat, barCups)
 	case p.TableCups > 0:
-		return fmt.Sprintf("桌台客群偏爱 %s（%d 杯）", p.TableTopCat, p.TableCups)
+		return fmt.Sprintf("桌台客群偏爱 %s（%d 杯）", p.TableTopCat, tableCups)
 	default:
 		return "暂无 POS 台位饮用场景记录"
 	}
@@ -726,8 +736,8 @@ func LoadAudienceInsights(ctx context.Context, tx pgx.Tx, start, end time.Time, 
 	if err := spotRows.Err(); err != nil {
 		return out, err
 	}
-	out.Spots.BarTopCat = pickTopCategory(barCats)
-	out.Spots.TableTopCat = pickTopCategory(tableCats)
+	out.Spots.BarTopCat, out.Spots.BarTopCups = pickTopCategory(barCats)
+	out.Spots.TableTopCat, out.Spots.TableTopCups = pickTopCategory(tableCats)
 	return out, nil
 }
 
@@ -742,7 +752,7 @@ func cmpInt64Desc(a, b int64) int {
 	}
 }
 
-func pickTopCategory(m map[string]int64) string {
+func pickTopCategory(m map[string]int64) (string, int64) {
 	bestCat := ""
 	var bestCups int64
 	for cat, cups := range m {
@@ -751,5 +761,5 @@ func pickTopCategory(m map[string]int64) string {
 			bestCups = cups
 		}
 	}
-	return bestCat
+	return bestCat, bestCups
 }

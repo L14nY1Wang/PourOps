@@ -50,8 +50,12 @@ func IsSecureRequest(r *http.Request) bool {
 		return true
 	}
 	if TrustProxy() {
-		proto := strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]
-		return strings.EqualFold(strings.TrimSpace(proto), "https")
+		parts := strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			if proto := strings.TrimSpace(parts[i]); proto != "" {
+				return strings.EqualFold(proto, "https")
+			}
+		}
 	}
 	return false
 }

@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"pourops/internal/catalog"
 	"pourops/internal/event"
 	"pourops/internal/platform"
@@ -98,10 +100,6 @@ type BeerFormPage struct {
 	Pricing   settings.PricingConfig
 }
 
-func (p BeerFormPage) PricingCfg() settings.PricingConfig {
-	return p.Pricing.Normalized()
-}
-
 type PurchasePage struct {
 	ui.Layout
 	Beer      catalog.Beer
@@ -109,10 +107,6 @@ type PurchasePage struct {
 	KegCount  int
 	CostInput string
 	Pricing   settings.PricingConfig
-}
-
-func (p PurchasePage) PricingCfg() settings.PricingConfig {
-	return p.Pricing.Normalized()
 }
 
 func (s *Service) BeerList(w http.ResponseWriter, r *http.Request) {
@@ -364,10 +358,12 @@ func (s *Service) UntapBeerHandler(w http.ResponseWriter, r *http.Request) {
 	subject := ""
 	var finishedPayload map[string]any
 	if kegID > 0 {
-		if k, err := GetKeg(r.Context(), s.pool, kegID); err == nil {
+		if k, err := GetKeg(r.Context(), s.pool, kegID); err != nil {
+			log.Printf("untap load keg (%d): %v", kegID, err)
+		} else {
 			msg = k.UntapSummaryTextWithConfig(pricing)
 			subject = platform.BeerSubject(k.Brewery, k.BeerName)
-			econ := k.EconomicsWithConfig(nil, pricing)
+			econ := k.EconomicsWithConfig(pricing)
 			finishedPayload = map[string]any{
 				"keg_id":        k.ID,
 				"beer_id":       k.BeerID,
@@ -394,7 +390,12 @@ func (s *Service) EditBeer(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	b, err := catalog.GetBeer(r.Context(), s.pool, id)
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("edit beer (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	keg, costInput := LatestBeerKegSpec(r.Context(), s.pool, b)

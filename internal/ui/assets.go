@@ -17,7 +17,6 @@ const AdminBundlePath = "/static/css/admin.bundle.css"
 // AssetManifest 对内嵌静态资源计算内容指纹，并把 static/css/*.css 内存拼成单束 CSS。
 // 其余静态文件由内置 FileServer 原样输出。
 type AssetManifest struct {
-	staticRoot  fs.FS
 	adminBundle []byte
 	bundleHash  string
 	urls        map[string]string // "/static/js/foo.js" -> "/static/js/foo.js?v=<hash>"
@@ -49,7 +48,6 @@ func (d noDirFS) Open(name string) (fs.File, error) {
 // NewAssetManifest 基于以 static 为根的 fs.FS 构建清单。
 func NewAssetManifest(staticRoot fs.FS) (*AssetManifest, error) {
 	m := &AssetManifest{
-		staticRoot: staticRoot,
 		urls:       make(map[string]string),
 		fileHashes: make(map[string]string),
 		fileServer: http.StripPrefix("/static/", http.FileServer(http.FS(noDirFS{staticRoot}))),

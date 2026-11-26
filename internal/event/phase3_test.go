@@ -2,10 +2,12 @@ package event
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -118,7 +120,6 @@ func TestWebhookDispatcherCircuitBreaker(t *testing.T) {
 		client:       client,
 		retryBackoff: time.Millisecond,
 		queue:        make(chan Event, webhookQueueSize),
-		stop:         make(chan struct{}),
 		done:         make(chan struct{}),
 	}
 	go d.worker()
@@ -154,5 +155,72 @@ func TestWebhookDispatcherCircuitBreaker(t *testing.T) {
 	d.mu.Unlock()
 	if consec != 0 || !openUntil.IsZero() {
 		t.Fatalf("expected circuit breaker reset after success; consec=%d openUntil=%v", consec, openUntil)
+	}
+}
+
+func TestWebhookDispatcherCloseTimeoutAndTokenNoLeak(t *testing.T) {
+	cfg := staticWebhookConfig{
+		Brand:  "PourOps",
+		URL:    "https://example.com/hook?token=secret123",
+		Events: []string{string(EventOrderPaid)},
+	}
+	dLeak := &WebhookDispatcher{
+		cfg: cfg,
+		client: &http.Client{Transport: rtFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &url.Error{Op: "Post", URL: "https://example.com/hook?token=secret123", Err: errors.New("dial timeout")}
+		})},
+		retryBackoff: time.Millisecond,
+	}
+	err := dLeak.deliverOnce(context.Background(), WebhookConfig{Brand: "PourOps", URL: cfg.URL, Events: cfg.Events}, Event{Type: EventOrderPaid})
+	if err == nil {
+		t.Fatal("expected deliverOnce network error")
+	}
+	if strings.Contains(err.Error(), "secret123") {
+		t.Fatalf("deliverOnce leaked URL query token in error: %v", err)
+	}
+
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	workerCtx, cancelWorker := context.WithCancel(context.Background())
+	dHang := &WebhookDispatcher{
+		cfg: cfg,
+		client: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
+			select {
+			case <-started:
+			default:
+				close(started)
+			}
+			<-r.Context().Done()
+			select {
+			case <-canceled:
+			default:
+				close(canceled)
+			}
+			return nil, r.Context().Err()
+		})},
+		retryBackoff: time.Millisecond,
+		queue:        make(chan Event, 4),
+		done:         make(chan struct{}),
+		workerCtx:    workerCtx,
+		cancelWorker: cancelWorker,
+	}
+	go dHang.worker()
+	dHang.Enqueue(Event{ID: "hang-1", Type: EventOrderPaid})
+	<-started
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := dHang.Close(closeCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected Close to return DeadlineExceeded on hung request, got: %v", err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not cancel in-flight webhook delivery")
+	}
+	select {
+	case <-dHang.done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not exit after Close canceled in-flight delivery")
 	}
 }

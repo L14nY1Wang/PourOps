@@ -11,7 +11,7 @@ import (
 	"pourops/migrations"
 )
 
-func TestSaveCombinedPreservesCategoriesAndWebhookFields(t *testing.T) {
+func TestSaveModulesPreserveCategoriesAndWebhookFields(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
 	ctx := context.Background()
 	store := NewSettingsStore(pool, "PourOps")
@@ -25,58 +25,55 @@ func TestSaveCombinedPreservesCategoriesAndWebhookFields(t *testing.T) {
 	}
 	wantCatCount := len(cats)
 
-	saved, err := store.SaveCombined(
-		ctx,
-		"NewBrand",
-		85,
-		60,
-		"https://example.com/hook",
-		"sec-init",
-		false,
-		[]string{string(event.EventOrderPaid)},
-		true,
-	)
+	savedGen, err := store.SaveGeneral(ctx, "NewBrand", 85, 60)
 	if err != nil {
-		t.Fatalf("SaveCombined initial: %v", err)
+		t.Fatalf("SaveGeneral initial: %v", err)
 	}
-	if saved.Brand != "NewBrand" || saved.DefaultSellablePct != 85 || saved.DefaultMarginPct != 60 {
+	saved, err := store.SaveWebhook(ctx, "https://example.com/hook", "sec-init", false, []string{string(event.EventOrderPaid)})
+	if err != nil {
+		t.Fatalf("SaveWebhook initial: %v", err)
+	}
+	if savedGen.Brand != "NewBrand" || saved.DefaultSellablePct != 85 || saved.DefaultMarginPct != 60 {
 		t.Fatalf("unexpected general settings: %+v", saved)
 	}
 	if saved.WebhookSecret != "sec-init" || len(saved.WebhookEvents) != 1 || saved.WebhookEvents[0] != string(event.EventOrderPaid) {
 		t.Fatalf("unexpected webhook settings: %+v", saved)
 	}
 	if got := len(store.BeerCategories()); got != wantCatCount {
-		t.Fatalf("categories overwritten by SaveCombined: got %d, want %d", got, wantCatCount)
+		t.Fatalf("categories overwritten by SaveGeneral/SaveWebhook: got %d, want %d", got, wantCatCount)
 	}
 
-	// 空 secret 且 hasEventsField=false 时保留现有密钥与订阅事件
-	updated, err := store.SaveCombined(ctx, "NewBrand2", 80, 55, "https://example.com/hook", "", false, nil, false)
+	// 仅改常规参数与空白 secret 时保留现有密钥与订阅事件
+	if _, err := store.SaveGeneral(ctx, "NewBrand2", 80, 55); err != nil {
+		t.Fatalf("SaveGeneral preserve: %v", err)
+	}
+	updated, err := store.SaveWebhook(ctx, "https://example.com/hook", "", false, []string{string(event.EventOrderPaid)})
 	if err != nil {
-		t.Fatalf("SaveCombined preserve: %v", err)
+		t.Fatalf("SaveWebhook preserve: %v", err)
 	}
 	if updated.WebhookSecret != "sec-init" || len(updated.WebhookEvents) != 1 {
 		t.Fatalf("expected secret and events preserved, got secret=%q events=%v", updated.WebhookSecret, updated.WebhookEvents)
 	}
 
-	// clearSecret=true 且 hasEventsField=true 传空切片时清空密钥与事件
-	cleared, err := store.SaveCombined(ctx, "NewBrand2", 80, 55, "https://example.com/hook", "", true, nil, true)
+	// clearSecret=true 且空事件列表时清空密钥与事件
+	cleared, err := store.SaveWebhook(ctx, "https://example.com/hook", "", true, nil)
 	if err != nil {
-		t.Fatalf("SaveCombined clear: %v", err)
+		t.Fatalf("SaveWebhook clear: %v", err)
 	}
 	if cleared.WebhookSecret != "" || len(cleared.WebhookEvents) != 0 {
 		t.Fatalf("expected secret and events cleared, got secret=%q events=%v", cleared.WebhookSecret, cleared.WebhookEvents)
 	}
 
 	// 非法 URL 拒绝且不破坏现有品牌
-	if _, err := store.SaveCombined(ctx, "BadBrand", 80, 55, "http://127.0.0.1:9999/hook", "", false, nil, false); err == nil {
+	if _, err := store.SaveWebhook(ctx, "http://127.0.0.1:9999/hook", "", false, nil); err == nil {
 		t.Fatalf("expected loopback webhook URL rejected")
 	}
 	if got := store.Brand(); got != "NewBrand2" {
-		t.Fatalf("brand mutated on failed SaveCombined: got %q", got)
+		t.Fatalf("brand mutated on failed SaveWebhook: got %q", got)
 	}
 }
 
-func TestSaveCombinedConcurrentWithCategories(t *testing.T) {
+func TestSaveGeneralConcurrentWithCategories(t *testing.T) {
 	pool := platform.NewTestPool(t, migrations.FS)
 	ctx := context.Background()
 	store := NewSettingsStore(pool, "PourOps")
@@ -90,7 +87,7 @@ func TestSaveCombinedConcurrentWithCategories(t *testing.T) {
 		wg.Add(2)
 		go func(n int) {
 			defer wg.Done()
-			_, err := store.SaveCombined(ctx, "PourOps", 80, 50+n, "", "", false, nil, false)
+			_, err := store.SaveGeneral(ctx, "PourOps", 80, 50+n)
 			errCh <- err
 		}(i)
 		go func(n int) {
@@ -127,7 +124,7 @@ func TestSaveCombinedConcurrentWithCategories(t *testing.T) {
 			}
 		}
 		if !found {
-			t.Fatalf("lost category %q after concurrent SaveCombined; cats=%v", want, cats)
+			t.Fatalf("lost category %q after concurrent SaveGeneral; cats=%v", want, cats)
 		}
 	}
 }

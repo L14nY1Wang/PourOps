@@ -48,6 +48,7 @@ type User struct {
 func (u User) RoleName() string { return ui.RoleLabel(u.Role) }
 func (u User) IsBoss() bool     { return u.Role == RoleBoss }
 func (u User) CanBackend() bool { return u.Role == RoleBoss || u.Role == RoleManager }
+func (u User) Initial() string  { return ui.UserView{Username: u.Username}.Initial() }
 
 func (u User) Landing() string {
 	if u.CanBackend() {
@@ -168,6 +169,9 @@ func SaveUser(ctx context.Context, pool *pgxpool.Pool, u User, password string) 
 		if len(password) < 6 {
 			return 0, platform.UserErr("密码至少 6 位")
 		}
+		if len(password) > 1024 {
+			return 0, platform.UserErr("密码过长")
+		}
 		var id int64
 		err := pool.QueryRow(ctx, `insert into users (username, password_hash, role, active) values ($1,$2,$3,$4) returning id`,
 			u.Username, HashPassword(password), u.Role, u.Active).Scan(&id)
@@ -179,6 +183,9 @@ func SaveUser(ctx context.Context, pool *pgxpool.Pool, u User, password string) 
 	}
 	if password != "" && len(password) < 6 {
 		return 0, platform.UserErr("密码至少 6 位")
+	}
+	if len(password) > 1024 {
+		return 0, platform.UserErr("密码过长")
 	}
 	// 资料和密码合成一条 update：用户名冲突等失败时密码不会先被改掉。
 	hash := ""
@@ -279,13 +286,8 @@ func clientIPKey(r *http.Request) string {
 		return "unknown"
 	}
 	if platform.TrustProxy() {
-		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
-			if addr, err := netip.ParseAddr(xri); err == nil {
-				return normalizeIPKey(addr)
-			}
-		}
 		if xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); xff != "" {
-			// 反代把真实来路追加在 XFF 最右侧；从右向左取首个合法 IP，防止客户端伪造最左头绕过限速。
+			// 反代把真实来路追加在 XFF 最右侧；从右向左取首个合法 IP，优先于可由客户端透传的 X-Real-IP。
 			parts := strings.Split(xff, ",")
 			for i := len(parts) - 1; i >= 0; i-- {
 				if cand := strings.TrimSpace(parts[i]); cand != "" {
@@ -293,6 +295,11 @@ func clientIPKey(r *http.Request) string {
 						return normalizeIPKey(addr)
 					}
 				}
+			}
+		}
+		if xri := strings.TrimSpace(r.Header.Get("X-Real-IP")); xri != "" {
+			if addr, err := netip.ParseAddr(xri); err == nil {
+				return normalizeIPKey(addr)
 			}
 		}
 	}
@@ -520,7 +527,7 @@ func (s *Service) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 func (s *Service) RequireBoss(next http.HandlerFunc) http.HandlerFunc {
 	return s.RequireAuth(func(w http.ResponseWriter, r *http.Request) {
 		if u := s.CurrentUser(r); u == nil || !u.IsBoss() {
-			platform.RedirectErr(w, r, "/admin/", "只有 BOSS 能管账号")
+			platform.RedirectErr(w, r, "/admin/", "只有 BOSS 有权限执行此操作")
 			return
 		}
 		next(w, r)
@@ -624,7 +631,7 @@ func (s *Service) Login(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if name == "" || len(name) > 64 || pw == "" || len(pw) > 1024 {
+	if name == "" || utf8.RuneCountInString(name) > 32 || pw == "" || len(pw) > 1024 {
 		s.limiter.recordFailure(ipKey)
 		if name != "" {
 			s.acctLimiter.recordFailure(acctKey)
@@ -904,7 +911,3 @@ func (s *Service) UserDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	platform.RedirectMsg(w, r, "/admin/users", "账号已删除")
 }
-
-// LookupUserForTest 仅用于包内或关联测试验证。
-var _ = errors.New
-var _ = pgx.ErrNoRows

@@ -589,3 +589,33 @@ func TestCatalogImportRejectsOverlongBeerTexts(t *testing.T) {
 		t.Fatal("PrepareCatalogBeerWithCategories 应强制校验酒名长度")
 	}
 }
+
+func TestCSVExportEscapesCategoryFormulaAndZIPRejectsBadIBU(t *testing.T) {
+	var buf bytes.Buffer
+	if err := encodeCatalogCSVWithCategories(&buf, []CatalogBeer{{
+		Brewery:  "安全厂",
+		Name:     "配方酒",
+		Category: "=CMD()",
+	}}, append(append([]string(nil), platform.DefaultBeerCategories...), "=CMD()")); err != nil {
+		t.Fatalf("encodeCatalogCSVWithCategories: %v", err)
+	}
+	if !strings.Contains(buf.String(), "'=CMD()") {
+		t.Fatalf("CSV category formula was not escaped: %s", buf.String())
+	}
+
+	if _, err := ParseCatalogCSVWithCategories([]byte("酒名,IBU\n测试酒,1001\n"), platform.DefaultBeerCategories); err == nil {
+		t.Fatal("CSV 超出范围 IBU=1001 应被拒绝")
+	}
+	if _, err := ParseCatalogJSONWithCategories([]byte(`{"items":[{"name":"测试酒","ibu":1001}]}`), platform.DefaultBeerCategories); err == nil {
+		t.Fatal("JSON 超出范围 IBU=1001 应被拒绝")
+	}
+
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	fw, _ := zw.Create("catalog.json")
+	_, _ = fw.Write([]byte(`{"items":[{"name":"坏IBU","ibu":1001}]}`))
+	_ = zw.Close()
+	if _, err := (ZIPCodec{}).Decode(zbuf.Bytes()); err == nil {
+		t.Fatal("ZIP 内非法 IBU=1001 应被拒绝")
+	}
+}

@@ -19,7 +19,7 @@
         <tr>
           <td>
             <div class="user-cell">
-              <span class="user-cell-avatar{{if .IsBoss}} user-cell-avatar--boss{{end}}" aria-hidden="true">{{printf "%.1s" .Username}}</span>
+              <span class="user-cell-avatar{{if .IsBoss}} user-cell-avatar--boss{{end}}" aria-hidden="true">{{.Initial}}</span>
               <strong>{{.Username}}</strong>
             </div>
           </td>

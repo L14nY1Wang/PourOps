@@ -198,7 +198,7 @@
 {{end}}
 
 {{define "scripts"}}
-<script src="/static/vendor/chart.umd.js"></script>
+<script src="{{asset "/static/vendor/chart.umd.js"}}"></script>
 <script>
 (() => {
   if (!window.Chart) return;
@@ -259,7 +259,7 @@
                 boxPadding: 4,
                 padding: 10,
                 cornerRadius: 10,
-                callbacks: {label: c => ` ${c.dataset.label}：${money(c.parsed.y)}`},
+                callbacks: {label: c => ` ${c.dataset.label}：${signedMoney(c.parsed.y)}`},
               },
             },
             scales: {

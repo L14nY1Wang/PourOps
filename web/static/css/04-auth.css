@@ -280,13 +280,21 @@
 .recovery-codes {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px 22px;
+  list-style-position: inside;
+  gap: 8px 12px;
   margin: 14px 0 16px;
-  padding-left: 18px;
+  padding-left: 0;
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: .02em;
   overflow-wrap: anywhere;
+}
+
+.recovery-codes li {
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: var(--field-background);
+  border: 1px solid var(--separator);
 }
 
 .setup-secret {
@@ -312,8 +320,43 @@
 }
 
 .security-card h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   margin: 0 0 4px;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
+  letter-spacing: -.01em;
+}
+
+.security-card h2 .badge {
+  font-size: 10px;
+  letter-spacing: .02em;
+}
+
+.security-card .form-grid {
+  margin-top: 14px;
+}
+
+.security-card .form-actions {
+  margin-top: 16px;
+}
+
+@media (max-width: 767px) {
+  .security-card {
+    padding: 16px;
+  }
+
+  .recovery-codes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .setup-secret {
+    font-size: 15px;
+    letter-spacing: .08em;
+  }
 }
 

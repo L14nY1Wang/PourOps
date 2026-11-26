@@ -213,19 +213,28 @@ func (s *PosterStore) SaveBytes(data []byte) (string, error) {
 	return PosterURLPrefix + name, nil
 }
 
-// saveBytesDedup 以图片内容 SHA-256 前 16 字节命名并复用已有文件，额外返回本次是否新建，供导入失败回滚清理。
-func (s *PosterStore) saveBytesDedup(data []byte) (string, bool, error) {
+// prepareDedupPoster 校验图片并计算 SHA-256 去重文件名与 URL，但不写盘，便于先持咨询锁再落盘。
+func (s *PosterStore) prepareDedupPoster(data []byte) (string, string, error) {
 	ext, err := s.preparePosterData(data)
 	if err != nil {
-		return "", false, err
+		return "", "", err
 	}
 	sum := sha256.Sum256(data)
 	name := hex.EncodeToString(sum[:16]) + ext
+	return name, PosterURLPrefix + name, nil
+}
+
+// saveBytesDedup 额外返回本次是否新建文件，供导入失败回滚时只删除自己创建的文件。
+func (s *PosterStore) saveBytesDedup(data []byte) (string, bool, error) {
+	name, posterURL, err := s.prepareDedupPoster(data)
+	if err != nil {
+		return "", false, err
+	}
 	created, err := s.persistPoster(name, data, true)
 	if err != nil {
 		return "", false, err
 	}
-	return PosterURLPrefix + name, created, nil
+	return posterURL, created, nil
 }
 
 // preparePosterData 校验图片内容：非空、≤5MB、魔数合法，且尺寸不超过防炸弹上限。
@@ -406,7 +415,7 @@ func (s *PosterStore) SaveFromURL(ctx context.Context, rawURL string) (string, e
 		return "", platform.UserErr("酒标图片地址格式不正确")
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; PourOps/1.0)")
-	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,image/*,*/*;q=0.8")
+	req.Header.Set("Accept", "image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.1")
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -480,10 +489,6 @@ func (s *PosterStore) Delete(posterURL string) error {
 		return nil
 	}
 	return err
-}
-
-func (s *PosterStore) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.ServePoster(w, r)
 }
 
 func (s *PosterStore) ServePoster(w http.ResponseWriter, r *http.Request) {
@@ -562,7 +567,7 @@ func CleanupUnusedPosters(ctx context.Context, pool *pgxpool.Pool, store *Poster
 		return
 	}
 	// 客户端断开（ctx 取消）不应把孤儿文件留在磁盘上：脱钩取消信号并限时完成清理。
-	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	seen := make(map[string]struct{}, len(candidates))
 	for _, raw := range candidates {

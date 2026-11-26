@@ -15,9 +15,8 @@ type PaymentRequest struct {
 
 // PaymentResult 是收银渠道扩展点确认记账后的返回信息。
 type PaymentResult struct {
-	Provider    string
-	Reference   string
-	DisplayNote string
+	Provider  string
+	Reference string
 }
 
 // PaymentGateway 是 POS 结账扩展点（编译期接入微信/支付宝/线下核销等渠道）。
@@ -34,8 +33,7 @@ func (ManualGateway) Name() string { return "manual" }
 
 func (ManualGateway) Settle(context.Context, PaymentRequest) (PaymentResult, error) {
 	return PaymentResult{
-		Provider:    "manual",
-		DisplayNote: "人工确认 · 无在线支付",
+		Provider: "manual",
 	}, nil
 }
 

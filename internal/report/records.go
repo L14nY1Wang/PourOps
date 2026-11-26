@@ -278,25 +278,43 @@ func beginReadOnlyTimeoutTx(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, er
 	return tx, nil
 }
 
-const recordCursorListSelect = `
+func recordCursorListQuery(status string, beforeID int64) (string, []any) {
+	conds := make([]string, 0, 2)
+	args := make([]any, 0, 2)
+	switch status {
+	case "":
+	case "settled":
+		conds = append(conds, "o.closed_at is not null")
+	case "partial":
+		conds = append(conds, "o.closed_at is null and exists (select 1 from payments p where p.order_id = o.id)")
+	default:
+		conds = append(conds, "o.closed_at is null and not exists (select 1 from payments p where p.order_id = o.id)")
+	}
+	if beforeID > 0 {
+		args = append(args, beforeID)
+		conds = append(conds, fmt.Sprintf("o.id < $%d", len(args)))
+	}
+	whereClause := ""
+	if len(conds) > 0 {
+		whereClause = "where " + strings.Join(conds, "\n\t\t  and ")
+	}
+	args = append(args, recordPageSize+1)
+	limitParam := fmt.Sprintf("$%d", len(args))
+	q := `
 	with page as (
 		select o.id, o.spot, o.opened_at, o.closed_at
 		from orders o
-		where ($2::bigint = 0 or o.id < $2)
-		  and case $1
-			when '' then true
-			when 'settled' then o.closed_at is not null
-			when 'partial' then o.closed_at is null and exists (select 1 from payments p where p.order_id = o.id)
-			else o.closed_at is null and not exists (select 1 from payments p where p.order_id = o.id)
-		end
+		` + whereClause + `
 		order by o.id desc
-		limit $3
+		limit ` + limitParam + `
 	)
 	select o.id, o.spot, o.opened_at, o.closed_at,` + recordOrderCols + `
 	from page o
 	left join lateral (` + recordItemsAgg + `) s on true
 	left join lateral (` + recordPaysAgg + `) p on true
 	order by o.id desc`
+	return q, args
+}
 
 func ListRecordOrdersCursor(ctx context.Context, pool *pgxpool.Pool, status string, beforeID int64) ([]RecordOrder, bool, error) {
 	tx, err := beginReadOnlyTimeoutTx(ctx, pool)
@@ -304,7 +322,8 @@ func ListRecordOrdersCursor(ctx context.Context, pool *pgxpool.Pool, status stri
 		return nil, false, err
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, recordCursorListSelect, status, beforeID, recordPageSize+1)
+	query, args := recordCursorListQuery(status, beforeID)
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, false, err
 	}

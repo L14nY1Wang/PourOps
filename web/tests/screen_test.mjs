@@ -142,6 +142,7 @@ function boot({ routes = {}, cache = null, breakCache = false, search = '', widt
     document,
     window: { addEventListener() {}, innerWidth: width, innerHeight: height },
     location: { search },
+    URL,
     URLSearchParams,
     fetch,
     localStorage,
@@ -524,4 +525,75 @@ const menu = (n, extra = () => ({})) => ({
   assert.equal(r.timers[r.timers.length - 1].ms, 5000, '连接成功后重置退避');
 }
 
-console.log('web/templates/screen/screen.html: 13 组回归通过');
+// 14. 屏蔽跨域 ?src= 与 ?events=；仅缓存 /api/screen/playlist 且未变更时不重写缓存。
+{
+  const r = boot({
+    events: true,
+    search: '?src=https://evil.example/menu.json&events=//evil.example/ev',
+    routes: {
+      '/api/screen/playlist': { brand: 'SAFE', items: [{ name: '本地酒', abv: 5 }] },
+    },
+  });
+  await r.flush();
+  assert.deepEqual(r.calls, ['/api/screen/playlist'], '跨域 ?src= 必须被忽略');
+  assert.deepEqual(r.esUrls, ['/api/screen/events'], '跨域 ?events= 必须被忽略并回退默认 /api/screen/events');
+}
+{
+  let sets = 0;
+  let call = 0;
+  const here2 = dirname(fileURLToPath(import.meta.url));
+  const html2 = readFileSync(join(here2, '../templates/screen/screen.html'), 'utf8');
+  const code2 = html2.match(/<script>([\s\S]*?)<\/script>/)[1];
+  const ids = new Map();
+  const mk = id => { const n = new Node('div'); n.id = id; ids.set(id, n); return n; };
+  const board = mk('board'), brand = mk('brand'), clock = mk('clock'), count = mk('count');
+  const hint = new Node('div'); hint.className = 'hint';
+  const classes = new Set();
+  const body = new Node('body');
+  body.classList = { add: c => classes.add(c), remove: c => classes.delete(c), contains: c => classes.has(c), toggle: (c, on) => (on === undefined ? !classes.has(c) : !!on) ? (classes.add(c), true) : (classes.delete(c), false) };
+  const store = new Map();
+  const esList = [];
+  class ES { constructor(u) { this.url = u; esList.push(this); } close() {} }
+  const sandbox = {
+    document: { body, documentElement: { requestFullscreen() {} }, createElement: t => new Node(t), createTextNode: t => { const n = new Node('#text'); n.textContent = t; return n; }, createDocumentFragment: () => { const f = new Node('#fragment'); f.fragment = true; return f; }, getElementById: id => ids.get(id) || null, querySelector: s => s === '.hint' ? hint : null, addEventListener() {} },
+    window: { addEventListener() {}, innerWidth: 1920, innerHeight: 1080, EventSource: ES },
+    EventSource: ES,
+    location: { search: '?src=/custom.json' },
+    URL,
+    URLSearchParams,
+    fetch: url => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(url === '/custom.json' ? { brand: 'CUSTOM', items: [] } : { brand: 'API', items: [{ name: `酒${call}` }] }) }),
+    localStorage: { getItem: k => store.get(k) || null, setItem: (k, v) => { sets++; store.set(k, v); } },
+    Image: class { set src(_) {} decode() { return Promise.resolve(); } },
+    setInterval: () => 0, setTimeout, clearTimeout,
+    getComputedStyle: () => ({ fontSize: '16px', rowGap: '0px' }),
+  };
+  vm.createContext(sandbox);
+  new vm.Script(code2).runInContext(sandbox);
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(sets, 0, '自定义 ?src=/custom.json 不应污染 /api/screen/playlist 本地缓存');
+
+  const r2 = boot({
+    events: true,
+    fakeTimers: true,
+    routes: {
+      '/api/screen/playlist': () => {
+        call++;
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ brand: 'PourOps', items: [{ name: call <= 2 ? 'A' : 'B' }] }) });
+      },
+    },
+  });
+  await r2.flush();
+  const rawSet = r2.store.set.bind(r2.store);
+  let writeCount = 0;
+  r2.store.set = (k, v) => { writeCount++; return rawSet(k, v); };
+  r2.esInstances[0].onmessage();
+  r2.runTimers();
+  await r2.flush();
+  assert.equal(writeCount, 0, '酒单内容未变化时不应重写 localStorage');
+  r2.esInstances[0].onmessage();
+  r2.runTimers();
+  await r2.flush();
+  assert.equal(writeCount, 1, '酒单变化后应更新 localStorage');
+}
+
+console.log('web/templates/screen/screen.html: 14 组回归通过');

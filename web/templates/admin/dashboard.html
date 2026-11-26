@@ -208,7 +208,7 @@
   <ul>
     <li>统计日期按酒吧营业日划分（北京时间当日 07:00 至次日 07:00，例如 01-11 统计 01-11 07:00 至 01-12 07:00）。</li>
     <li>销售走势图表与按日趋势明细已归入工作空间<a href="/admin/analytics">数据分析</a>页面。</li>
-    <li>POS 实收按支付流水统计，同一张订单在区间内拆分付款只算一张，未付款不计。</li>
+    <li>POS 实收按支付流水统计，同一张订单拆分付款时有收款订单数计 1 单、支付笔数按实际付款次数累计，未付款不计。</li>
     <li>毛利＝营业额 − 商品成本，<strong>不是净利润</strong>（未扣人工、房租、水电、损耗）。</li>
     <li>库存状态与告警为当前快照（在售酒桶已售超 50% 或零售库存 ≤ 3 件），不随上方时间筛选变化。</li>
     <li>明细见<a href="/admin/records">销售订单记录</a>与<a href="/admin/records/operations">营运流水</a>。</li>
@@ -221,7 +221,7 @@
 {{end}}
 
 {{define "scripts"}}
-<script src="/static/vendor/chart.umd.js"></script>
+<script src="{{asset "/static/vendor/chart.umd.js"}}"></script>
 <script>
 (() => {
   if (!window.Chart) return;

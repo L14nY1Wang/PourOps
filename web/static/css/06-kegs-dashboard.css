@@ -247,6 +247,14 @@
   font-variant-numeric: tabular-nums;
 }
 
+.dashboard-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
 .dashboard-bottom {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
@@ -582,6 +590,7 @@
     display: block;
   }
 
+  .dashboard-main,
   .dashboard-bottom {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -740,14 +749,6 @@
 
   .overview-notes {
     padding: 16px;
-  }
-
-  .security-card {
-    padding: 16px;
-  }
-
-  .recovery-codes {
-    grid-template-columns: minmax(0, 1fr);
   }
 
   .auth-layout .app-topbar {

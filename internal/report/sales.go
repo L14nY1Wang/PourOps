@@ -188,8 +188,15 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 			from (
 				select (s.created_at at time zone 'UTC' + interval '1 hour')::date as day,
 				       s.total_cents, s.cost_cents,
-				       (select coalesce(sum(i.qty), 0) from retail_sale_items i where i.sale_id = s.id) as qty
+				       coalesce(rq.qty, 0) as qty
 				from retail_sales s
+				left join (
+					select i.sale_id, sum(i.qty)::bigint as qty
+					from retail_sale_items i
+					join retail_sales s2 on s2.id = i.sale_id
+					where s2.created_at >= $1 and s2.created_at < $2
+					group by i.sale_id
+				) rq on rq.sale_id = s.id
 				where s.created_at >= $1 and s.created_at < $2
 			) d
 			group by 1
@@ -298,7 +305,7 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 	rows, err = tx.Query(ctx, `
 		with draft as (
 			select 'beer:' || k.beer_id as grp,
-			       b.brewery || ' · ' || b.name as name,
+			       case when btrim(b.brewery) <> '' then b.brewery || ' · ' || b.name else b.name end as name,
 			       '杯'::text as unit,
 			       sum(p.cups)::bigint as qty,
 			       sum(p.amount_cents)::bigint as revenue,

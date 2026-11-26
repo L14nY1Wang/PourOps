@@ -152,6 +152,10 @@ func GetBeer(ctx context.Context, pool *pgxpool.Pool, id int64) (Beer, error) {
 }
 
 func FindBeerForUpdate(ctx context.Context, tx pgx.Tx, brewery, name string) (Beer, error) {
+	// 首单并发进货时行尚不存在，先按规范化「厂牌 + 酒名」加事务级咨询锁避免插入两条重复酒款。
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('beer:' || lower(btrim($1)) || E'\x1f' || lower(btrim($2))))`, brewery, name); err != nil {
+		return Beer{}, err
+	}
 	return scanBeer(tx.QueryRow(ctx, `select `+beerCols+` from beers
 		where lower(btrim(brewery)) = lower(btrim($1))
 		  and lower(btrim(name))    = lower(btrim($2))

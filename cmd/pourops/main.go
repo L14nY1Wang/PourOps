@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,7 +33,10 @@ func main() {
 	if platform.Env("SESSION_SECRET", "") != "" && len(secret) < 32 {
 		log.Fatalf("SESSION_SECRET 长度至少需要 32 字节")
 	}
-	jiuheBaseURL := platform.Env("JIUHE_API_BASE", lookup.DefaultJiuheBaseURL)
+	jiuheBaseURL := lookup.DefaultJiuheBaseURL
+	if envBase, ok := os.LookupEnv("JIUHE_API_BASE"); ok {
+		jiuheBaseURL = envBase
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -65,7 +69,10 @@ func main() {
 		log.Fatalf("初始化酒标存储失败: %v", err)
 	}
 	bus.RegisterCloser(posterStore.Close)
+	var startupWG sync.WaitGroup
+	startupWG.Add(1)
 	go func() {
+		defer startupWG.Done()
 		locCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		if n := catalog.LocalizeAllPosters(locCtx, pool, posterStore); n > 0 {
@@ -119,5 +126,14 @@ func main() {
 	defer busCancel()
 	if err := bus.Close(busCtx); err != nil {
 		log.Printf("事件总线队列排空异常: %v", err)
+	}
+	waitDone := make(chan struct{})
+	go func() {
+		startupWG.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
 	}
 }

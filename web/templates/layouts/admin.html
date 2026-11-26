@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#f3f6fa">
 <title>{{.Title}} - {{if .Brand}}{{.Brand}}{{else}}PourOps{{end}}</title>
 <link rel="icon" href="{{asset "/static/brand/pourops.svg"}}" type="image/svg+xml">
-<link rel="stylesheet" href="/static/vendor/bootstrap.min.css">
-<link rel="stylesheet" href="/static/vendor/bootstrap-icons.min.css">
+<link rel="stylesheet" href="{{asset "/static/vendor/bootstrap.min.css"}}">
+<link rel="stylesheet" href="{{asset "/static/vendor/bootstrap-icons.min.css"}}">
 <link rel="stylesheet" href="{{asset "/static/css/admin.bundle.css"}}">
 {{block "styles" .}}{{end}}
 <script src="{{asset "/static/js/theme.js"}}"></script>
@@ -74,7 +74,7 @@
       {{if .Me}}
       <div class="dropdown">
         <button class="account-button" type="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="账号菜单：{{.Me.Username}}">
-          <span class="user-avatar" aria-hidden="true">{{printf "%.1s" .Me.Username}}</span>
+          <span class="user-avatar" aria-hidden="true">{{.Me.Initial}}</span>
           <span class="account-name">{{.Me.Username}}</span>
           <span class="account-role">{{.Me.RoleName}}</span>
           <i class="bi bi-chevron-down" aria-hidden="true"></i>
@@ -99,7 +99,7 @@
   </main>
 </div>
 
-<script src="/static/vendor/bootstrap.bundle.min.js"></script>
+<script src="{{asset "/static/vendor/bootstrap.bundle.min.js"}}"></script>
 <script src="{{asset "/static/js/admin.js"}}"></script>
 {{block "scripts" .}}{{end}}
 </body>

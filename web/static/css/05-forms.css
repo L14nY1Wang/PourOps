@@ -300,11 +300,7 @@
   }
 }
 
-/* ---------- 历史酒单导入卡与风味词标签 ---------- */
-.catalog-import-card {
-  background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--field-background) 65%, var(--surface)));
-}
-
+/* ---------- 历史酒单导入卡 ---------- */
 .catalog-import-form {
   display: flex;
   flex-wrap: wrap;
@@ -376,24 +372,6 @@
 .catalog-import-controls .catalog-mode-select {
   flex: 0 1 225px;
   min-width: 205px;
-}
-
-.catalog-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 5px;
-}
-
-.catalog-tags span {
-  display: inline-block;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--separator);
-  background: var(--field-background);
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.5;
 }
 
 @media (max-width: 900px) {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -283,5 +284,48 @@ func TestOutboundSSRFAndEnvBool(t *testing.T) {
 	}
 	if err := platform.ValidateOutboundURL("https://cdn.example/a.png", "测试地址", false); err != nil {
 		t.Errorf("valid public URL rejected: %v", err)
+	}
+}
+
+func TestIsSecureRequestAndParseBeerFormOrder(t *testing.T) {
+	reqTLS := httptest.NewRequest(http.MethodGet, "https://bar.local/", nil)
+	reqTLS.TLS = &tls.ConnectionState{}
+	if !platform.IsSecureRequest(reqTLS) {
+		t.Fatal("direct TLS request should be secure")
+	}
+
+	reqSpoofLeft := httptest.NewRequest(http.MethodGet, "http://bar.local/", nil)
+	reqSpoofLeft.Header.Set("X-Forwarded-Proto", "https")
+	if platform.IsSecureRequest(reqSpoofLeft) {
+		t.Fatal("X-Forwarded-Proto should be ignored when TRUST_PROXY is unset")
+	}
+
+	t.Setenv("TRUST_PROXY", "1")
+	reqSpoofLeft.Header.Set("X-Forwarded-Proto", "https, http")
+	if platform.IsSecureRequest(reqSpoofLeft) {
+		t.Fatal("rightmost X-Forwarded-Proto=http should override spoofed leftmost https")
+	}
+
+	reqRightHTTPS := httptest.NewRequest(http.MethodGet, "http://bar.local/", nil)
+	reqRightHTTPS.Header.Set("X-Forwarded-Proto", "http, https")
+	if !platform.IsSecureRequest(reqRightHTTPS) {
+		t.Fatal("rightmost X-Forwarded-Proto=https should be treated as secure")
+	}
+
+	form := url.Values{
+		"brewery":   {strings.Repeat("厂", 101)},
+		"name":      {"酒款"},
+		"category":  {"IPA"},
+		"abv":       {"6.5"},
+		"price_330": {"45"},
+	}
+	reqForm := httptest.NewRequest(http.MethodPost, "/admin/beers", strings.NewReader(form.Encode()))
+	reqForm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	in, err := platform.ParseBeerFormWithCategories(reqForm, platform.DefaultBeerCategories)
+	if err == nil {
+		t.Fatal("expected ValidateBeerTexts error for oversized brewery")
+	}
+	if in.ABV == nil || *in.ABV != 6.5 || in.Price330 != 4500 {
+		t.Fatalf("numeric inputs must still be populated on text error: %+v", in)
 	}
 }

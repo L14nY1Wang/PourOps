@@ -51,7 +51,6 @@ func (s *Service) catalogTotal(ctx context.Context) int {
 
 func (s *Service) RegisterRoutes(mux *http.ServeMux, guards ui.Guards) {
 	mux.HandleFunc("GET /admin/settings", guards.Boss(s.Page))
-	mux.HandleFunc("POST /admin/settings", guards.Boss(s.Save))
 	mux.HandleFunc("POST /admin/settings/general", guards.Boss(s.SaveGeneral))
 	mux.HandleFunc("POST /admin/settings/webhook", guards.Boss(s.SaveWebhook))
 	mux.HandleFunc("POST /admin/settings/categories/add", guards.Boss(s.AddCategory))
@@ -80,8 +79,8 @@ func (s *Service) Page(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Service) renderFormError(w http.ResponseWriter, r *http.Request, cfg StoreSettings, hasSecret bool, errMsg string) {
-	s.renderer.RenderStatus(w, r, http.StatusBadRequest, "admin/settings.html", &SettingsPage{
+func (s *Service) renderFormError(w http.ResponseWriter, r *http.Request, status int, cfg StoreSettings, hasSecret bool, errMsg string) {
+	s.renderer.RenderStatus(w, r, status, "admin/settings.html", &SettingsPage{
 		Layout:         ui.Layout{Title: "系统设置", Nav: "settings", Err: errMsg},
 		Settings:       cfg,
 		EventOptions:   event.WebhookEventOptions,
@@ -115,47 +114,6 @@ func parsePricingFields(r *http.Request, dst *StoreSettings) string {
 	return ""
 }
 
-func saveErrorMessage(err error, fallback string) string {
-	if msg, ok := platform.UserErrorMessage(err); ok {
-		return msg
-	}
-	return fallback
-}
-
-func (s *Service) Save(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "表单格式不正确", http.StatusBadRequest)
-		return
-	}
-	existing := s.store.Get()
-	_, hasEventsField := r.PostForm["webhook_events"]
-	if !hasEventsField && len(r.Form["webhook_events"]) > 0 {
-		hasEventsField = true
-	}
-	next := StoreSettings{
-		Brand:          strings.TrimSpace(r.FormValue("brand")),
-		BeerCategories: existing.BeerCategories,
-		WebhookURL:     strings.TrimSpace(r.FormValue("webhook_url")),
-		WebhookSecret:  existing.WebhookSecret,
-		WebhookEvents:  r.Form["webhook_events"],
-	}
-	clearSecret := r.FormValue("clear_webhook_secret") != ""
-	rawSecret := r.FormValue("webhook_secret")
-
-	if errMsg := parsePricingFields(r, &next); errMsg != "" {
-		s.renderFormError(w, r, next, existing.WebhookSecret != "", errMsg)
-		return
-	}
-
-	if _, err := s.store.SaveCombined(r.Context(), next.Brand, next.DefaultSellablePct, next.DefaultMarginPct,
-		next.WebhookURL, rawSecret, clearSecret, next.WebhookEvents, hasEventsField); err != nil {
-		s.renderFormError(w, r, next, existing.WebhookSecret != "", saveErrorMessage(err, "保存系统设置失败，请稍后重试"))
-		return
-	}
-
-	platform.RedirectMsg(w, r, "/admin/settings", "系统设置已保存并实时生效")
-}
-
 func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "表单格式不正确", http.StatusBadRequest)
@@ -166,12 +124,17 @@ func (s *Service) SaveGeneral(w http.ResponseWriter, r *http.Request) {
 	draft.Brand = strings.TrimSpace(r.FormValue("brand"))
 
 	if errMsg := parsePricingFields(r, &draft); errMsg != "" {
-		s.renderFormError(w, r, draft, hasSecret, errMsg)
+		s.renderFormError(w, r, http.StatusBadRequest, draft, hasSecret, errMsg)
 		return
 	}
 
 	if _, err := s.store.SaveGeneral(r.Context(), draft.Brand, draft.DefaultSellablePct, draft.DefaultMarginPct); err != nil {
-		s.renderFormError(w, r, draft, hasSecret, saveErrorMessage(err, "保存门店与核算设置失败，请稍后重试"))
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			s.renderFormError(w, r, http.StatusBadRequest, draft, hasSecret, msg)
+			return
+		}
+		log.Printf("save general settings: %v", err)
+		s.renderFormError(w, r, http.StatusInternalServerError, draft, hasSecret, "保存门店与核算设置失败，请稍后重试")
 		return
 	}
 
@@ -189,7 +152,12 @@ func (s *Service) SaveWebhook(w http.ResponseWriter, r *http.Request) {
 	draft.WebhookEvents = r.Form["webhook_events"]
 
 	if _, err := s.store.SaveWebhook(r.Context(), draft.WebhookURL, r.FormValue("webhook_secret"), r.FormValue("clear_webhook_secret") != "", draft.WebhookEvents); err != nil {
-		s.renderFormError(w, r, draft, hasSecret, saveErrorMessage(err, "保存 Webhook 设置失败，请稍后重试"))
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			s.renderFormError(w, r, http.StatusBadRequest, draft, hasSecret, msg)
+			return
+		}
+		log.Printf("save webhook settings: %v", err)
+		s.renderFormError(w, r, http.StatusInternalServerError, draft, hasSecret, "保存 Webhook 设置失败，请稍后重试")
 		return
 	}
 

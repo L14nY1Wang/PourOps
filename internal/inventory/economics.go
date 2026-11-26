@@ -253,7 +253,6 @@ type KegEconomics struct {
 }
 
 func (e KegEconomics) LossPct() int          { return max(100-e.SellablePct, 0) }
-func (e KegEconomics) HasProfit() bool       { return e.ProfitCents >= 0 }
 func (e KegEconomics) ProfitText() string    { return platform.MoneyText(e.ProfitCents) }
 func (e KegEconomics) CostText() string      { return platform.PriceText(e.CostCents) }
 func (e KegEconomics) RevenueText() string   { return platform.PriceText(e.RevenueCents) }
@@ -262,7 +261,12 @@ func (e KegEconomics) BreakEvenGapText() string {
 	return platform.PriceText(e.BreakEvenGapCents)
 }
 func (e KegEconomics) TargetGapText() string { return platform.PriceText(e.TargetGapCents) }
-func (e KegEconomics) MarginText() string    { return MarginPctText(e.RevenueCents, e.CostCents) }
+func (e KegEconomics) MarginText() string {
+	if !e.HasCost {
+		return "—"
+	}
+	return MarginPctText(e.RevenueCents, e.CostCents)
+}
 
 func (e KegEconomics) VerdictPillClass() string {
 	switch e.VerdictTone {
@@ -279,7 +283,7 @@ func (e KegEconomics) VerdictPillClass() string {
 	}
 }
 
-func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) KegEconomics {
+func (k Keg) EconomicsWithConfig(cfg settings.PricingConfig) KegEconomics {
 	cfg = cfg.Normalized()
 	sml := SellableMLWithConfig(k.CapacityML, cfg)
 	lml := LossBudgetMLWithConfig(k.CapacityML, cfg)
@@ -328,8 +332,6 @@ func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) Ke
 		e.TargetMet = k.RevenueCents >= targetRev
 	}
 
-	_ = b // 预留与酒款定价联动扩展
-
 	if k.CostCents <= 0 {
 		e.Verdict = "no_cost"
 		e.VerdictLabel = "未填成本"
@@ -340,6 +342,10 @@ func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) Ke
 	}
 
 	lowYield := k.CapacityML > 0 && int64(k.SoldML)*100 < int64(k.CapacityML)*int64(cfg.SellablePct)
+	yieldLabel := fmt.Sprintf("%d%%", actualYield)
+	if lowYield && actualYield >= cfg.SellablePct {
+		yieldLabel = fmt.Sprintf("%.1f%%", float64(k.SoldML)*100/float64(k.CapacityML))
+	}
 	// 实售均价是否低于目标毛利率均价：Revenue/SoldML < TargetRev/SellableML
 	lowMarginPrice := k.SoldML > 0 && sml > 0 && int64(k.RevenueCents)*int64(sml) < int64(targetRev)*int64(k.SoldML)
 	// 实售均价是否低于可售出酒成本均价：Revenue/SoldML < Cost/SellableML
@@ -361,9 +367,9 @@ func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) Ke
 			var cause string
 			switch {
 			case lowYield && lowMarginPrice:
-				cause = fmt.Sprintf("主因出酒率仅 %d%%（低于 %d%% 假设）且实售均价低于 %d%% 毛利线。", actualYield, cfg.SellablePct, cfg.MarginPct)
+				cause = fmt.Sprintf("主因出酒率仅 %s（低于 %d%% 假设）且实售均价低于 %d%% 毛利线。", yieldLabel, cfg.SellablePct, cfg.MarginPct)
 			case lowYield:
-				cause = fmt.Sprintf("主因出酒率仅 %d%%（低于 %d%% 目标，打酒损耗或漏记偏高）。", actualYield, cfg.SellablePct)
+				cause = fmt.Sprintf("主因出酒率仅 %s（低于 %d%% 目标，打酒损耗或漏记偏高）。", yieldLabel, cfg.SellablePct)
 			case lowMarginPrice:
 				cause = fmt.Sprintf("出酒率已达标，主因优惠/实售均价低于 %d%% 毛利推荐价。", cfg.MarginPct)
 			default:
@@ -386,9 +392,9 @@ func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) Ke
 			case k.SoldML == 0:
 				cause = "本桶下架前无售出记录，未能收回任何成本。"
 			case lowYield && belowCostPrice:
-				cause = fmt.Sprintf("出酒率仅 %d%%（低于 %d%%）且实售均价低于成本线。", actualYield, cfg.SellablePct)
+				cause = fmt.Sprintf("出酒率仅 %s（低于 %d%%）且实售均价低于成本线。", yieldLabel, cfg.SellablePct)
 			case lowYield:
-				cause = fmt.Sprintf("主因出酒率仅 %d%%（预期 %d%%），管路损耗/漏记或提前下架导致未回本。", actualYield, cfg.SellablePct)
+				cause = fmt.Sprintf("主因出酒率仅 %s（预期 %d%%），管路损耗/漏记或提前下架导致未回本。", yieldLabel, cfg.SellablePct)
 			case belowCostPrice:
 				cause = fmt.Sprintf("实售均价低于 %d%% 出酒成本线，建议按 %d%% 推荐价上调单杯售价。", cfg.SellablePct, cfg.MarginPct)
 			default:
@@ -433,13 +439,13 @@ func (k Keg) EconomicsWithConfig(b *catalog.Beer, cfg settings.PricingConfig) Ke
 	return e
 }
 
-func (k Keg) Economics(b *catalog.Beer) KegEconomics {
-	return k.EconomicsWithConfig(b, settings.DefaultPricingConfig())
+func (k Keg) Economics() KegEconomics {
+	return k.EconomicsWithConfig(settings.DefaultPricingConfig())
 }
 
 func (k Keg) UntapSummaryTextWithConfig(cfg settings.PricingConfig) string {
 	cfg = cfg.Normalized()
-	e := k.EconomicsWithConfig(nil, cfg)
+	e := k.EconomicsWithConfig(cfg)
 	switch e.Verdict {
 	case "no_cost":
 		return fmt.Sprintf("已下架：本桶累计营收 %s（已售 %dml），未填成本可点进酒桶页补填核算",
@@ -500,8 +506,6 @@ func (s KegSummary) AvgFinishedYieldText() string {
 	return fmt.Sprintf("%d%%", s.AvgFinishedYieldPct)
 }
 
-func (k Keg) SummaryEconomics() KegEconomics { return k.Economics(nil) }
-
 func SummarizeKegsWithConfig(kegs []Keg, cfg settings.PricingConfig) KegSummary {
 	cfg = cfg.Normalized()
 	var sum KegSummary
@@ -520,7 +524,7 @@ func SummarizeKegsWithConfig(kegs []Keg, cfg settings.PricingConfig) KegSummary 
 			sum.StockCostCents += k.CostCents
 		}
 
-		e := k.EconomicsWithConfig(nil, cfg)
+		e := k.EconomicsWithConfig(cfg)
 		switch {
 		case k.FinishedAt != nil:
 			sum.FinishedCount++

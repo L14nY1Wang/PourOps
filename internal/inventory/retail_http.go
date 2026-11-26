@@ -1,11 +1,14 @@
 package inventory
 
 import (
+	"errors"
 	"log"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
 
 	"pourops/internal/event"
 	"pourops/internal/platform"
@@ -20,7 +23,6 @@ type RetailListPage struct {
 	Q          string
 	Cat        string
 	LowOnly    bool
-	ActiveOnly bool
 }
 
 type RetailFormPage struct {
@@ -45,7 +47,11 @@ func (s *Service) publishLowStock(r *http.Request, low *LowStockItem) {
 
 func (s *Service) RetailList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	items, err := SearchRetail(r.Context(), s.pool, q.Get("q"), q.Get("cat"), q.Get("low") != "", q.Get("active") != "")
+	searchQ := strings.TrimSpace(q.Get("q"))
+	cat := q.Get("cat")
+	lowOnly := q.Get("low") == "1"
+	activeOnly := q.Get("active") == "1"
+	items, err := SearchRetail(r.Context(), s.pool, searchQ, cat, lowOnly, activeOnly)
 	if err != nil {
 		log.Printf("retail list search: %v", err)
 		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
@@ -57,11 +63,14 @@ func (s *Service) RetailList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
-	all, err := ListRetail(r.Context(), s.pool)
-	if err != nil {
-		log.Printf("retail list all: %v", err)
-		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
-		return
+	all := items
+	if searchQ != "" || cat != "" || lowOnly || activeOnly {
+		all, err = ListRetail(r.Context(), s.pool)
+		if err != nil {
+			log.Printf("retail list all: %v", err)
+			http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
+			return
+		}
 	}
 	var value, lowCount int
 	for _, it := range all {
@@ -81,9 +90,8 @@ func (s *Service) RetailList(w http.ResponseWriter, r *http.Request) {
 		Stats:      stats,
 		RetailCats: RetailCategories,
 		Q:          q.Get("q"),
-		Cat:        q.Get("cat"),
-		LowOnly:    q.Get("low") != "",
-		ActiveOnly: q.Get("active") != "",
+		Cat:        cat,
+		LowOnly:    lowOnly,
 	})
 }
 
@@ -99,7 +107,12 @@ func (s *Service) RetailEdit(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	it, err := GetRetail(r.Context(), s.pool, id)
 	if err != nil {
-		http.NotFound(w, r)
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		log.Printf("retail edit (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	moves, err := ListMoves(r.Context(), s.pool, id, 12)
@@ -166,6 +179,9 @@ func (s *Service) RetailSave(w http.ResponseWriter, r *http.Request) {
 		return
 	case stockErr != nil:
 		renderFail(http.StatusBadRequest, stockErr.Error())
+		return
+	case stockPtr == nil:
+		renderFail(http.StatusBadRequest, "库存不能为空")
 		return
 	}
 	_, low, err := SaveRetailWithExpected(r.Context(), s.pool, it, expectedStock)

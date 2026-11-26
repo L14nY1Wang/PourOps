@@ -425,3 +425,54 @@ func TestImportRollbackPreservesSharedPosterAndDeletesOrphan(t *testing.T) {
 		t.Fatalf("回滚后未被引用的新建酒标 %s 应被清理", orphanURL)
 	}
 }
+
+func TestUpsertCatalogNormalizesCategoryAndConcurrentDedup(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	if err := UpsertCatalogFromBeerFull(ctx, pool, Beer{
+		Brewery:  "规范厂",
+		Name:     "遗留分类酒",
+		Category: "hop",
+	}, DefaultCapacityML, 100000, false, false, platform.DefaultBeerCategories); err != nil {
+		t.Fatalf("UpsertCatalogFromBeerFull: %v", err)
+	}
+	var gotCat string
+	if err := pool.QueryRow(ctx, `select category from beer_catalog where brewery='规范厂' and name='遗留分类酒'`).Scan(&gotCat); err != nil {
+		t.Fatal(err)
+	}
+	if gotCat != "IPA" {
+		t.Fatalf("legacy category should normalize to IPA, got %q", gotCat)
+	}
+
+	sharedImg := samplePNGBytes()
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := ImportCatalogBeersWithPosters(ctx, pool, store, []ImportItem{{
+				Beer:   CatalogBeer{Brewery: "并发厂", Name: "同名酒款", Category: "IPA", CapacityML: DefaultCapacityML},
+				Mask:   ImportFieldMask{Brewery: true, Category: true, CapacityML: true},
+				Poster: &PosterPayload{Filename: "same.png", Data: sharedImg},
+			}}, "merge", platform.DefaultBeerCategories)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent ImportCatalogBeersWithPosters failed: %v", err)
+		}
+	}
+	var cnt int
+	if err := pool.QueryRow(ctx, `select count(*)::int from beer_catalog where brewery='并发厂' and name='同名酒款'`).Scan(&cnt); err != nil || cnt != 1 {
+		t.Fatalf("concurrent import should keep 1 catalog row, got %d (err=%v)", cnt, err)
+	}
+}

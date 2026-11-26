@@ -183,10 +183,6 @@ func ParseCategoryWithAllowed(raw string, allowed []string, extraAllowed ...stri
 	return "", UserErrf("不支持的酒款分类 %q（可在系统设置中添加分类）", v)
 }
 
-func ParseCategory(raw string) (string, error) {
-	return ParseCategoryWithAllowed(raw, DefaultBeerCategories)
-}
-
 // styleCategoryRules 将中英文风格描述映射到精酿风格分类，按从具体到通用顺序匹配。
 var styleCategoryRules = []struct {
 	Category string
@@ -266,15 +262,6 @@ func InferCategory(style string, available []string) string {
 		}
 	}
 	return DefaultBeerCategories[0]
-}
-
-// MatchTone 与 ToneOf 保留供默认分类自动推断调用，均使用当前新版精酿风格分类名。
-func MatchTone(style string) string {
-	return MatchCategory(style, DefaultBeerCategories)
-}
-
-func ToneOf(style string) string {
-	return InferCategory(style, DefaultBeerCategories)
 }
 
 // ValidRemotePosterURL 仅允许无控制字符与反斜杠的 http(s):// 外链，用于过滤远端检索返回的酒标地址。
@@ -371,8 +358,6 @@ func ClampRange(v, lo, hi int) int {
 	return v
 }
 
-func TwoDigit(n int) string { return fmt.Sprintf("%02d", n) }
-
 func ParseLocalTime(v string) *time.Time {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -405,30 +390,6 @@ func DateTimeText(t *time.Time) string {
 		return "—"
 	}
 	return t.In(ReportZone).Format("2006-01-02 15:04")
-}
-
-func OptFloat(v string) *float64 {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return nil
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
-		return nil
-	}
-	return &f
-}
-
-func OptInt(v string) *int {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n < 0 || n > math.MaxInt32 {
-		return nil
-	}
-	return &n
 }
 
 func IntValue(v string) int {
@@ -532,11 +493,6 @@ func MoneyText64(cents int64) string {
 	return fmt.Sprintf("%s¥ %d.%02d", neg, u/100, u%100)
 }
 
-func PriceCents(v string) int {
-	cents, _ := MoneyCents(v)
-	return cents
-}
-
 func ParseStrictFloat(raw, label string, minVal, maxVal float64, allowPercent bool) (*float64, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -598,10 +554,6 @@ func ParseSortOrder(raw string) (int, error) {
 		return 0, nil
 	}
 	return *n, nil
-}
-
-func ValidateBeerFields(name, category, posterURL string, abv, ut *float64, ibu, utCount *int, p150, p330, p500, sortOrder int) (string, error) {
-	return ValidateBeerFieldsWithCategories(name, category, posterURL, abv, ut, ibu, utCount, p150, p330, p500, sortOrder, DefaultBeerCategories)
 }
 
 // ValidateBeerFieldsWithCategories 按指定分类白名单校验酒款与历史酒单共有字段。
@@ -687,10 +639,6 @@ type BeerFormInput struct {
 	Tags      []string
 }
 
-func ParseBeerForm(r *http.Request) (BeerFormInput, error) {
-	return ParseBeerFormWithCategories(r, DefaultBeerCategories)
-}
-
 // ParseBeerFormWithCategories 使用当前动态酒款分类白名单解析并校验酒款表单。
 func ParseBeerFormWithCategories(r *http.Request, allowed []string, extraAllowed ...string) (BeerFormInput, error) {
 	in := BeerFormInput{
@@ -700,9 +648,6 @@ func ParseBeerFormWithCategories(r *http.Request, allowed []string, extraAllowed
 		Category:  strings.TrimSpace(r.FormValue("category")),
 		PosterURL: strings.TrimSpace(r.FormValue("poster_url")),
 		Tags:      SplitList(r.FormValue("tags")),
-	}
-	if err := ValidateBeerTexts(in.Brewery, in.Name, in.Style, in.Category, in.PosterURL, in.Tags); err != nil {
-		return BeerFormInput{}, err
 	}
 	abv, abvErr := ParseStrictFloat(r.FormValue("abv"), "ABV", 0, 100, true)
 	if abvErr == nil {
@@ -733,6 +678,9 @@ func ParseBeerFormWithCategories(r *http.Request, allowed []string, extraAllowed
 		in.Price500 = p500
 	}
 
+	if err := ValidateBeerTexts(in.Brewery, in.Name, in.Style, in.Category, in.PosterURL, in.Tags); err != nil {
+		return in, err
+	}
 	if in.Name == "" {
 		return in, UserErr("酒款名称不能为空")
 	}

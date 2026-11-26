@@ -2,6 +2,7 @@ package pos
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pourops/internal/event"
@@ -20,7 +22,6 @@ import (
 type PosPage struct {
 	ui.Layout
 	Spots      []Spot
-	TableCount int
 	PosBeers   []PosBeer
 	PosItems   []inventory.RetailItem
 	Order      *OrderView
@@ -103,11 +104,6 @@ func (s *Service) PosSpots(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Title = "点餐"
 	data.Spots = spots
-	for _, sp := range spots {
-		if sp.Kind == "table" {
-			data.TableCount++
-		}
-	}
 	s.renderer.RenderShell(w, r, "pos/pos.html", "pos", data)
 }
 
@@ -160,10 +156,16 @@ func (s *Service) PosOpen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) PosOrder(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	o, err := LoadOrder(r.Context(), s.pool, id)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "找不到这张账单", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		log.Printf("pos order (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	data, err := s.posMenu(r)
@@ -186,57 +188,24 @@ func (s *Service) PosAddItem(w http.ResponseWriter, r *http.Request) {
 	back := fmt.Sprintf("/pos/order/%d", orderID)
 	refID, _ := strconv.ParseInt(r.FormValue("ref"), 10, 64)
 
+	var err error
 	switch r.FormValue("kind") {
 	case "beer":
 		ml, _ := strconv.Atoi(r.FormValue("ml"))
-		var name string
-		var price int
-		err := s.pool.QueryRow(r.Context(), `
-			select b.brewery || ' · ' || b.name,
-				case $2::int when 150 then coalesce(b.price_150, 0)
-					when 330 then coalesce(b.price_330, 0)
-					when 500 then coalesce(b.price_500, 0)
-					else 0 end
-			from kegs k join beers b on b.id = k.beer_id
-			where k.id=$1 and b.on_screen and k.tapped_at is not null and k.finished_at is null`, refID, ml).Scan(&name, &price)
-		if err != nil {
-			platform.RedirectErr(w, r, back, "这桶酒不在售")
-			return
-		}
-		if price <= 0 {
-			platform.RedirectErr(w, r, back, "这桶酒没开这个杯型")
-			return
-		}
-		if err := AddOrderItem(r.Context(), s.pool, orderID, "beer", refID, name, price, ml); err != nil {
-			if msg, ok := platform.UserErrorMessage(err); ok {
-				platform.RedirectErr(w, r, back, msg)
-				return
-			}
-			log.Printf("pos add beer (%d): %v", orderID, err)
-			platform.RedirectErr(w, r, back, "加购失败，请稍后重试")
-			return
-		}
+		err = AddBeerOrderItem(r.Context(), s.pool, orderID, refID, ml)
 	case "retail":
-		it, err := inventory.GetRetail(r.Context(), s.pool, refID)
-		if err != nil || !it.Active || it.Stock < 1 {
-			platform.RedirectErr(w, r, back, "这件商品不能卖了")
-			return
-		}
-		name := it.Name
-		if it.Spec != "" {
-			name += " " + it.Spec
-		}
-		if err := AddOrderItem(r.Context(), s.pool, orderID, "retail", refID, name, it.PriceCents, 0); err != nil {
-			if msg, ok := platform.UserErrorMessage(err); ok {
-				platform.RedirectErr(w, r, back, msg)
-				return
-			}
-			log.Printf("pos add retail (%d): %v", orderID, err)
-			platform.RedirectErr(w, r, back, "加购失败，请稍后重试")
-			return
-		}
+		err = AddRetailOrderItem(r.Context(), s.pool, orderID, refID)
 	default:
 		platform.RedirectErr(w, r, back, "不认识的商品")
+		return
+	}
+	if err != nil {
+		if msg, ok := platform.UserErrorMessage(err); ok {
+			platform.RedirectErr(w, r, back, msg)
+			return
+		}
+		log.Printf("pos add item (%d): %v", orderID, err)
+		platform.RedirectErr(w, r, back, "加购失败，请稍后重试")
 		return
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
@@ -352,10 +321,16 @@ func (s *Service) PosPay(w http.ResponseWriter, r *http.Request) {
 func (s *Service) PosPayPage(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	p, err := LoadPayment(r.Context(), s.pool, id)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "找不到这笔账", http.StatusNotFound)
 		return
 	}
+	if err != nil {
+		log.Printf("pos pay page (%d): %v", id, err)
+		http.Error(w, "加载失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	s.renderer.RenderShell(w, r, "pos/pos_pay.html", "pos_pay", &PayPage{
 		Layout: ui.Layout{Title: "收款"},
 		Pay:    &p,

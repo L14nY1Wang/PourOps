@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -262,5 +263,108 @@ func TestRetailSaveFailPreservesExpectedStockAndKegCostInput(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, `name="expected_stock" value="10"`) {
 		t.Fatalf("重绘失败表单应保留 expected_stock=10，未在新表单值 15 上覆写: %s", body)
+	}
+}
+
+func TestKegSaveScreenOffPaginationInvalidTimeAndRetailEmptyStock(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := platform.WithActor(context.Background(), "boss")
+	renderer := ui.MustRenderer(web.TemplatesFS, nil, func() string { return "PourOps" })
+	svc := NewService(pool, renderer, settings.NewSettingsStore(nil, "PourOps"), nil, nil)
+
+	beerID := invSeedBeer(t, pool, "编辑撤屏酒")
+	if err := TapBeer(ctx, pool, beerID, "01", 20000, 100000); err != nil {
+		t.Fatal(err)
+	}
+	activeKegID := invKegID(t, pool, beerID, true)
+	k, err := GetKeg(ctx, pool, activeKegID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 在未结账 POS 订单占用时，禁止清空 TappedAt 回退为未开桶。
+	var orderID int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot) values ('bar-1') returning id`).Scan(&orderID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml, qty)
+		values ($1, 'beer', $2, '编辑撤屏酒', 4500, 330, 1)`, orderID, activeKegID); err != nil {
+		t.Fatal(err)
+	}
+	k.TappedAt = nil
+	if _, err := SaveKegResultFn(ctx, pool, k); err == nil {
+		t.Fatal("有未结账 POS 订单时不应允许清空开桶时间")
+	}
+	if _, err := pool.Exec(ctx, `delete from order_items where order_id=$1`, orderID); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := SaveKegResultFn(ctx, pool, k)
+	if err != nil {
+		t.Fatalf("无占单清空开桶时间失败: %v", err)
+	}
+	if !res.ScreenChanged {
+		t.Fatal("唯一在售桶撤回未开桶应标记 ScreenChanged=true")
+	}
+	var onScreen bool
+	if err := pool.QueryRow(ctx, `select on_screen from beers where id=$1`, beerID).Scan(&onScreen); err != nil || onScreen {
+		t.Fatalf("唯一在售桶撤回未开桶后 beers.on_screen 应为 false (onScreen=%v err=%v)", onScreen, err)
+	}
+
+	// KegSave 非法 placed_at 应返回 400。
+	badTimeForm := url.Values{
+		"beer_id":     {strconv.FormatInt(beerID, 10)},
+		"capacity_ml": {"20000"},
+		"cost":        {"1000"},
+		"placed_at":   {"not-a-date"},
+	}
+	reqBadTime := httptest.NewRequest(http.MethodPost, "/admin/kegs", strings.NewReader(badTimeForm.Encode()))
+	reqBadTime.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recBadTime := httptest.NewRecorder()
+	svc.KegSave(recBadTime, reqBadTime)
+	if recBadTime.Code != http.StatusBadRequest || !strings.Contains(recBadTime.Body.String(), "入库时间格式不对") {
+		t.Fatalf("KegSave invalid placed_at = %d %q", recBadTime.Code, recBadTime.Body.String())
+	}
+
+	// 零售表单提交空 stock 应报错而不是静默置 0 下架。
+	itemID, _, err := SaveRetail(ctx, pool, RetailItem{Name: "不许清空库存", Category: "罐装", PriceCents: 3000, CostCents: 1500, Stock: 5, Active: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyStockForm := url.Values{
+		"id":             {strconv.FormatInt(itemID, 10)},
+		"expected_stock": {"5"},
+		"name":           {"不许清空库存"},
+		"category":       {"罐装"},
+		"price":          {"30"},
+		"cost":           {"15"},
+		"stock":          {""},
+		"active":         {"1"},
+	}
+	reqEmptyStock := httptest.NewRequest(http.MethodPost, "/admin/retail", strings.NewReader(emptyStockForm.Encode()))
+	reqEmptyStock.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recEmptyStock := httptest.NewRecorder()
+	svc.RetailSave(recEmptyStock, reqEmptyStock)
+	if recEmptyStock.Code != http.StatusBadRequest || !strings.Contains(recEmptyStock.Body.String(), "库存不能为空") {
+		t.Fatalf("empty stock should return 400, got %d", recEmptyStock.Code)
+	}
+	afterRetail, err := GetRetail(ctx, pool, itemID)
+	if err != nil || afterRetail.Stock != 5 || !afterRetail.Active {
+		t.Fatalf("empty stock submission corrupted retail item: %+v err=%v", afterRetail, err)
+	}
+
+	// 桶装分页：插入 54 桶（合计 55 桶），验证第 1 页 50 条和第 2 页 5 条。
+	if err := PurchaseKegs(ctx, pool, beerID, 54, 20000, 100000); err != nil {
+		t.Fatal(err)
+	}
+	recP1 := httptest.NewRecorder()
+	svc.KegList(recP1, httptest.NewRequest(http.MethodGet, "/admin/kegs", nil))
+	if recP1.Code != http.StatusOK || !strings.Contains(recP1.Body.String(), "第 1 / 2 页（共 55 桶）") || !strings.Contains(recP1.Body.String(), "下一页") {
+		t.Fatalf("KegList page 1 missing pagination, code=%d", recP1.Code)
+	}
+	recP2 := httptest.NewRecorder()
+	svc.KegList(recP2, httptest.NewRequest(http.MethodGet, "/admin/kegs?page=2", nil))
+	if recP2.Code != http.StatusOK || !strings.Contains(recP2.Body.String(), "第 2 / 2 页（共 55 桶）") || !strings.Contains(recP2.Body.String(), "上一页") {
+		t.Fatalf("KegList page 2 missing pagination, code=%d", recP2.Code)
 	}
 }

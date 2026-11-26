@@ -186,7 +186,10 @@ func (s *Service) Events(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write(msg); err != nil {
 			return false
 		}
-		flusher.Flush()
+		if err := rc.Flush(); err != nil {
+			return false
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
 		return true
 	}
 

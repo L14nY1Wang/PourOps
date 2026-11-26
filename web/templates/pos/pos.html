@@ -417,7 +417,7 @@
     {{if .Order}}<a class="btn ghost small top-spots" href="/pos/">台位</a>{{end}}
     {{if .Me}}
       <span class="who">
-        <span class="who-avatar" aria-hidden="true">{{printf "%.1s" .Me.Username}}</span>
+        <span class="who-avatar" aria-hidden="true">{{.Me.Initial}}</span>
         <span class="who-txt"><b>{{.Me.Username}}</b><i>{{.Me.RoleName}}</i></span>
       </span>
       <a class="btn ghost small top-safety" href="/account/security">安全</a>

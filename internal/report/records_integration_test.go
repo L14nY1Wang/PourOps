@@ -240,3 +240,72 @@ func TestRecordZeroPaymentAndUnlinkedHistoricalRow(t *testing.T) {
 		t.Fatalf("历史行不应凭空多出一笔结账: %+v", checkouts)
 	}
 }
+
+func TestListRecordOrdersCursorStaticStatusFilters(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := context.Background()
+
+	openOrder, err := pos.EnsureOrder(ctx, pool, "bar-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rID := seedRetail(t, pool, 1500, 500, 10)
+	if err := pos.AddOrderItem(ctx, pool, openOrder, "retail", rID, "豆子", 1500, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	partialOrder, err := pos.EnsureOrder(ctx, pool, "bar-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rID2 := seedRetail(t, pool, 1800, 500, 10)
+	if err := pos.AddOrderItem(ctx, pool, partialOrder, "retail", rID, "杯子", 1500, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := pos.AddOrderItem(ctx, pool, partialOrder, "retail", rID2, "垫子", 1800, 0); err != nil {
+		t.Fatal(err)
+	}
+	var pLine1 int64
+	if err := pool.QueryRow(ctx, `select id from order_items where order_id=$1 order by id limit 1`, partialOrder).Scan(&pLine1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pos.PayItems(ctx, pool, partialOrder, []int64{pLine1}); err != nil {
+		t.Fatal(err)
+	}
+
+	settledOrder, err := pos.EnsureOrder(ctx, pool, "table-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pos.AddOrderItem(ctx, pool, settledOrder, "retail", rID, "全结", 1500, 0); err != nil {
+		t.Fatal(err)
+	}
+	var sLine int64
+	if err := pool.QueryRow(ctx, `select id from order_items where order_id=$1`, settledOrder).Scan(&sLine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pos.PayItems(ctx, pool, settledOrder, []int64{sLine}); err != nil {
+		t.Fatal(err)
+	}
+
+	allRows, _, err := ListRecordOrdersCursor(ctx, pool, "", 0)
+	if err != nil || len(allRows) != 3 {
+		t.Fatalf("all status rows = %d err=%v", len(allRows), err)
+	}
+	settledRows, _, err := ListRecordOrdersCursor(ctx, pool, "settled", 0)
+	if err != nil || len(settledRows) != 1 || settledRows[0].ID != settledOrder {
+		t.Fatalf("settled status = %+v err=%v", settledRows, err)
+	}
+	partialRows, _, err := ListRecordOrdersCursor(ctx, pool, "partial", 0)
+	if err != nil || len(partialRows) != 1 || partialRows[0].ID != partialOrder {
+		t.Fatalf("partial status = %+v err=%v", partialRows, err)
+	}
+	openRows, _, err := ListRecordOrdersCursor(ctx, pool, "open", 0)
+	if err != nil || len(openRows) != 1 || openRows[0].ID != openOrder {
+		t.Fatalf("open status = %+v err=%v", openRows, err)
+	}
+	beforeRows, _, err := ListRecordOrdersCursor(ctx, pool, "", settledOrder)
+	if err != nil || len(beforeRows) != 2 || beforeRows[0].ID != partialOrder {
+		t.Fatalf("beforeID cursor rows = %+v err=%v", beforeRows, err)
+	}
+}

@@ -48,7 +48,7 @@
           {{range .RetailCats}}
           <a class="filter-pill{{if eq . $.Cat}} active{{end}}" href="/admin/retail?cat={{.}}{{if $.LowOnly}}&low=1{{end}}">{{.}}</a>
           {{end}}
-          <a class="filter-pill filter-pill--warn{{if .LowOnly}} active{{end}}" href="/admin/retail?low={{if .LowOnly}}0{{else}}1{{end}}{{if .Cat}}&cat={{.Cat}}{{end}}"><i class="bi bi-exclamation-circle" aria-hidden="true"></i>低库存</a>
+          <a class="filter-pill filter-pill--warn{{if .LowOnly}} active{{end}}" href="/admin/retail{{if not .LowOnly}}?low=1{{if .Cat}}&cat={{.Cat}}{{end}}{{else}}{{if .Cat}}?cat={{.Cat}}{{end}}{{end}}"><i class="bi bi-exclamation-circle" aria-hidden="true"></i>低库存</a>
         </nav>
         {{if or .Q .Cat .LowOnly}}<a class="button button--tertiary button--sm" href="/admin/retail">清空筛选</a>{{end}}
       </div>

@@ -93,21 +93,34 @@ func (s *Service) LookupBeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	results := s.searchConcurrent(ctx, q, 6, 10)
 	items := make([]Candidate, 0, 16)
-	var warnings []string
-	for _, res := range s.searchConcurrent(ctx, q, 6, 10) {
+	var failedProviders int
+	var catalogErr error
+	var remoteWarnings []string
+	for _, res := range results {
 		if res.err != nil {
+			failedProviders++
 			log.Printf("beer lookup %s (%q): %v", res.provider.Name(), q, res.err)
-			if res.provider.Name() != "catalog" {
-				warnings = append(warnings, res.provider.Name())
+			if res.provider.Name() == "catalog" {
+				catalogErr = res.err
+			} else {
+				remoteWarnings = append(remoteWarnings, res.provider.Name())
 			}
 			continue
 		}
 		items = append(items, res.items...)
 	}
+	if catalogErr != nil && failedProviders == len(results) {
+		http.Error(w, "查询酒款失败，请稍后重试", http.StatusInternalServerError)
+		return
+	}
 
 	var warning string
-	if len(warnings) > 0 {
+	switch {
+	case catalogErr != nil && len(remoteWarnings) == 0:
+		warning = "本店历史酒单查询失败，仅展示在线 UT 库结果"
+	case len(remoteWarnings) > 0:
 		if len(items) > 0 {
 			warning = "在线 UT 库暂时不可用，已展示本店历史酒单结果"
 		} else {

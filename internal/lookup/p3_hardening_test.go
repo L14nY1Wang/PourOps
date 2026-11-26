@@ -267,3 +267,100 @@ func TestJiuheRejectsRelativePosterURL(t *testing.T) {
 		t.Fatalf("详情页站内酒标地址应被清空，实际 %q", d.PosterURL)
 	}
 }
+
+type stubErrProvider struct {
+	name  string
+	items []Candidate
+	err   error
+}
+
+func (p stubErrProvider) Name() string             { return p.name }
+func (p stubErrProvider) Label() string            { return p.name }
+func (p stubErrProvider) Enabled() bool            { return true }
+func (p stubErrProvider) SupportsEmptyQuery() bool { return false }
+func (p stubErrProvider) Search(context.Context, string, int) ([]Candidate, error) {
+	return p.items, p.err
+}
+func (p stubErrProvider) Detail(context.Context, string) (Detail, error) {
+	return Detail{}, p.err
+}
+
+func TestParseKegCapacityRateLimitCacheClockAndLookupErrors(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{"30L", 30000},
+		{"30L桶", 30000},
+		{"500ml", 500},
+		{"30la", 0},
+		{"2000L", 0},
+	} {
+		if got := ParseKegCapacityML(tc.raw); got != tc.want {
+			t.Errorf("ParseKegCapacityML(%q) = %d, want %d", tc.raw, got, tc.want)
+		}
+	}
+
+	// HTTP 429 应计为瞬时失败并触发冷却熔断，第 3 次请求直接跳过上游拨号。
+	var tries atomic.Int32
+	jp := NewJiuheProvider("https://mock.jiuhe.test/api", &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		tries.Add(1)
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("rate limit"))}, nil
+	})})
+	for range jiuheFailThreshold {
+		if _, err := jp.Search(context.Background(), "限流", 5); err == nil {
+			t.Fatal("expected 429 search error")
+		}
+	}
+	if _, err := jp.Search(context.Background(), "限流3", 5); !errors.Is(err, errJiuheCoolingDown) {
+		t.Fatalf("expected cooldown error after %d 429s, got %v", jiuheFailThreshold, err)
+	}
+	if tries.Load() != jiuheFailThreshold {
+		t.Fatalf("expected cooldown to skip 3rd HTTP dial, tries=%d want %d", tries.Load(), jiuheFailThreshold)
+	}
+
+	// JiuheCache 注入时钟推进超过 TTL 后应失效。
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	now := base
+	cache := &JiuheCache{
+		search: make(map[string]jiuheCacheEntry[[]Candidate]),
+		detail: make(map[int64]jiuheCacheEntry[Detail]),
+		now:    func() time.Time { return now },
+	}
+	cache.setSearch("k", []Candidate{{Source: "jiuhe", Name: "缓存酒"}})
+	if got, ok := cache.getSearch("k"); !ok || len(got) != 1 {
+		t.Fatalf("expected immediate cache hit, got ok=%v len=%d", ok, len(got))
+	}
+	now = base.Add(24 * time.Hour)
+	if _, ok := cache.getSearch("k"); ok {
+		t.Fatal("expected cache miss after injected clock passed TTL")
+	}
+
+	// 所有检索源都失败时返回 500；仅本地失败而远端成功时返回 200 并附带 warning。
+	svcAllFail := NewService(
+		stubErrProvider{name: "catalog", err: errors.New("db down")},
+		stubErrProvider{name: "jiuhe", err: errors.New("upstream down")},
+	)
+	recAll := httptest.NewRecorder()
+	svcAllFail.LookupBeers(recAll, httptest.NewRequest(http.MethodGet, "/api/beers/lookup?q=ipa", nil))
+	if recAll.Code != http.StatusInternalServerError {
+		t.Fatalf("all providers failing should return 500, got %d", recAll.Code)
+	}
+
+	svcCatWarn := NewService(
+		stubErrProvider{name: "catalog", err: errors.New("db down")},
+		stubErrProvider{name: "jiuhe", items: []Candidate{{Source: "jiuhe", Name: "远端酒"}}},
+	)
+	recWarn := httptest.NewRecorder()
+	svcCatWarn.LookupBeers(recWarn, httptest.NewRequest(http.MethodGet, "/api/beers/lookup?q=ipa", nil))
+	if recWarn.Code != http.StatusOK {
+		t.Fatalf("catalog fail + remote ok should return 200, got %d", recWarn.Code)
+	}
+	var resp Response
+	if err := json.NewDecoder(recWarn.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Items) != 1 || resp.Warning == "" {
+		t.Fatalf("expected 1 remote item and catalog warning, got %+v", resp)
+	}
+}

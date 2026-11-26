@@ -13,7 +13,9 @@ import (
 
 	"pourops/internal/inventory"
 	"pourops/internal/platform"
+	"pourops/internal/ui"
 	"pourops/migrations"
+	"pourops/web"
 )
 
 // TestPreUntapOrderCheckoutAndPostUntapRejected 验证 P1-1：换桶结桶前已加购的挂单仍可核销，结桶后新加购不能核销到旧桶，且记录成本快照。
@@ -241,5 +243,74 @@ func (slowPrinter) Print(ctx context.Context, _ Receipt) error {
 		return ctx.Err()
 	case <-time.After(100 * time.Millisecond):
 		return nil
+	}
+}
+
+func TestPosSpotEmptyDeleteStaleIdempotencyAndNoStore(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := platform.WithActor(context.Background(), "staff")
+
+	// 默认 bar_count=3：bar-3 仅有空挂单时允许缩减台位并清理空单。
+	emptyOrder, err := EnsureOrder(ctx, pool, "bar-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSpot(ctx, pool, "bar_count"); err != nil {
+		t.Fatalf("empty open order on last spot should be deletable: %v", err)
+	}
+	var cnt int
+	if err := pool.QueryRow(ctx, `select count(*)::int from orders where id=$1`, emptyOrder).Scan(&cnt); err != nil || cnt != 0 {
+		t.Fatalf("empty open order should be deleted, cnt=%d err=%v", cnt, err)
+	}
+
+	// bar-2 上有未付明细时禁止缩减台位。
+	nonEmptyOrder, err := EnsureOrder(ctx, pool, "bar-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rID := seedRetail(t, pool, 1500, 600, 10)
+	if err := AddOrderItem(ctx, pool, nonEmptyOrder, "retail", rID, "花生", 1500, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveSpot(ctx, pool, "bar_count"); err == nil {
+		t.Fatal("non-empty open order on last spot must block RemoveSpot")
+	}
+
+	// 若先结了一行（幂等键 k1），随后选中的条目集合仍包含未付项时，同一幂等键不能静默返回成功。
+	if err := AddOrderItem(ctx, pool, nonEmptyOrder, "retail", rID, "可乐", 1200, 0); err != nil {
+		t.Fatal(err)
+	}
+	ids := unpaidIDs(t, pool, nonEmptyOrder)
+	res1, err := PayItemsWithOptions(ctx, pool, ManualGateway{}, nonEmptyOrder, []int64{ids[0]}, PayOptions{
+		Method:         "cash",
+		IdempotencyKey: "k1",
+	})
+	if err != nil {
+		t.Fatalf("first pay failed: %v", err)
+	}
+	if _, err := PayItemsWithOptions(ctx, pool, ManualGateway{}, nonEmptyOrder, []int64{ids[0], ids[1]}, PayOptions{
+		Method:         "cash",
+		IdempotencyKey: "k1",
+	}); err == nil || !strings.Contains(err.Error(), "页面状态已过期") {
+		t.Fatalf("stale idempotency key with unpaid items selected should fail, got %v", err)
+	}
+
+	// POS 订单与小票页响应必须携带 Cache-Control: no-store。
+	renderer := ui.MustRenderer(web.TemplatesFS, nil, func() string { return "PourOps" })
+	svc := NewService(pool, renderer, nil, ManualGateway{}, NoopPrinter{})
+	reqOrder := httptest.NewRequest(http.MethodGet, "/pos/order/"+strconv.FormatInt(nonEmptyOrder, 10), nil)
+	reqOrder.SetPathValue("id", strconv.FormatInt(nonEmptyOrder, 10))
+	recOrder := httptest.NewRecorder()
+	svc.PosOrder(recOrder, reqOrder)
+	if recOrder.Code != http.StatusOK || recOrder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("PosOrder code=%d cache=%q", recOrder.Code, recOrder.Header().Get("Cache-Control"))
+	}
+
+	reqPay := httptest.NewRequest(http.MethodGet, "/pos/pay/"+strconv.FormatInt(res1.PaymentID, 10), nil)
+	reqPay.SetPathValue("id", strconv.FormatInt(res1.PaymentID, 10))
+	recPay := httptest.NewRecorder()
+	svc.PosPayPage(recPay, reqPay)
+	if recPay.Code != http.StatusOK || recPay.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("PosPayPage code=%d cache=%q", recPay.Code, recPay.Header().Get("Cache-Control"))
 	}
 }

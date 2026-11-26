@@ -3,8 +3,6 @@ package lookup
 import (
 	"context"
 	"errors"
-	"strings"
-	"unicode"
 
 	"pourops/internal/platform"
 )
@@ -60,17 +58,4 @@ type Provider interface {
 	SupportsEmptyQuery() bool
 	Search(ctx context.Context, q string, limit int) ([]Candidate, error)
 	Detail(ctx context.Context, id string) (Detail, error)
-}
-
-func dedupKey(c Candidate) string {
-	norm := func(s string) string {
-		var b strings.Builder
-		for _, r := range strings.ToLower(strings.TrimSpace(s)) {
-			if unicode.IsLetter(r) || unicode.IsDigit(r) {
-				b.WriteRune(r)
-			}
-		}
-		return b.String()
-	}
-	return norm(c.Brewery) + "|" + norm(c.Name)
 }

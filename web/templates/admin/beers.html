@@ -54,7 +54,7 @@
             </td>
             <td class="wrap-cell">
               {{with .Keg}}
-                {{$e := .EconomicsWithConfig nil $cfg}}
+                {{$e := .EconomicsWithConfig $cfg}}
                 <div class="d-flex flex-wrap align-items-center gap-2">
                   <span class="badge bg-success">在售</span>
                   <span class="verdict-pill {{$e.VerdictPillClass}}">{{$e.VerdictLabel}}</span>
@@ -75,7 +75,7 @@
                   {{if .Stock}}<span class="text-muted small">库存 <strong>{{.Stock}}</strong> 桶待上架</span>{{end}}
                 </div>
                 {{with $row.LastKeg}}
-                {{$le := .EconomicsWithConfig nil $cfg}}
+                {{$le := .EconomicsWithConfig $cfg}}
                 <div class="text-muted small mt-1 d-flex flex-wrap align-items-center gap-1">
                   <span>上次结桶</span>
                   <span class="verdict-pill {{$le.VerdictPillClass}}">{{$le.VerdictLabel}}</span>

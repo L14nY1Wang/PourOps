@@ -43,9 +43,6 @@ type CatalogBeer struct {
 	UpdatedAt  time.Time
 }
 
-func (c CatalogBeer) ABVText() string       { return platform.StatText(c.ABV, "%", 1) }
-func (c CatalogBeer) IBUText() string       { return platform.StatText(c.IBU, "", 0) }
-func (c CatalogBeer) UTText() string        { return platform.StatText(c.UT, "", 2) }
 func (c CatalogBeer) ABVInput() string      { return platform.NumText(c.ABV, 1) }
 func (c CatalogBeer) IBUInput() string      { return platform.NumText(c.IBU, 0) }
 func (c CatalogBeer) UTInput() string       { return platform.NumText(c.UT, 2) }
@@ -56,24 +53,6 @@ func (c CatalogBeer) CostInput() string     { return platform.MoneyInput(c.CostC
 func (c CatalogBeer) Price150Input() string { return platform.MoneyInput(c.Price150) }
 func (c CatalogBeer) Price330Input() string { return platform.MoneyInput(c.Price330) }
 func (c CatalogBeer) Price500Input() string { return platform.MoneyInput(c.Price500) }
-
-func (c CatalogBeer) CostText() string {
-	if c.CostCents <= 0 {
-		return "—"
-	}
-	return platform.PriceText(c.CostCents)
-}
-
-func (c CatalogBeer) UpdatedText() string {
-	if c.UpdatedAt.IsZero() {
-		return "—"
-	}
-	return c.UpdatedAt.In(platform.ReportZone).Format("2006-01-02 15:04")
-}
-
-func (c CatalogBeer) Cups() []Cup {
-	return Beer{Price150: c.Price150, Price330: c.Price330, Price500: c.Price500}.Cups()
-}
 
 const catalogCols = `id, brewery, name, style, category, abv, ibu, ut_rating, ut_count,
 	tags, poster_url, capacity_ml, cost_cents, price_150, price_330, price_500,
@@ -127,11 +106,6 @@ func CountCatalogBeers(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 
 func GetCatalogBeer(ctx context.Context, pool *pgxpool.Pool, id int64) (CatalogBeer, error) {
 	return scanCatalogBeer(pool.QueryRow(ctx, `select `+catalogCols+` from beer_catalog where id=$1`, id))
-}
-
-// PrepareCatalogBeer 使用默认分类表校验并规范化历史酒款。
-func PrepareCatalogBeer(c CatalogBeer) (CatalogBeer, error) {
-	return PrepareCatalogBeerWithCategories(c, platform.DefaultBeerCategories)
 }
 
 // PrepareCatalogBeerWithCategories 统一裁剪文本、校验文字长度与数值字段、补全分类与容量；
@@ -245,6 +219,10 @@ func UpsertCatalogFromBeerFull(ctx context.Context, q platform.Querier, b Beer, 
 	cat := strings.TrimSpace(b.Category)
 	if cat == "" {
 		cat = platform.InferCategory(style, allowed)
+	} else if matched, err := platform.ParseCategoryWithAllowed(cat, allowed); err == nil && matched != "" {
+		cat = matched
+	} else {
+		cat = platform.CategoryLabel(cat)
 	}
 	poster := strings.TrimSpace(b.PosterURL)
 	if !platform.ValidPosterURL(poster) {
@@ -313,19 +291,16 @@ type ImportFieldMask struct {
 }
 
 type ImportItem struct {
-	Beer   CatalogBeer
-	Mask   ImportFieldMask
-	Poster *PosterPayload
+	Beer       CatalogBeer
+	Mask       ImportFieldMask
+	Poster     *PosterPayload
+	PosterFile string
 }
 
 type ImportResult struct {
 	Inserted int
 	Updated  int
 	Skipped  int
-}
-
-func ApplyCatalogMerge(dst CatalogBeer, src ImportItem) CatalogBeer {
-	return ApplyCatalogMergeWithCategories(dst, src, platform.DefaultBeerCategories)
 }
 
 func ApplyCatalogMergeWithCategories(dst CatalogBeer, src ImportItem, allowed []string) CatalogBeer {
@@ -446,6 +421,11 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 		}
 	}
 
+	type pendingPoster struct {
+		name string
+		data []byte
+	}
+	pendingPosters := make(map[string]pendingPoster)
 	var createdFiles []string
 	createdSet := make(map[string]bool)
 	committed := false
@@ -460,14 +440,12 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 			it := &work[i]
 			switch {
 			case it.Poster != nil && len(it.Poster.Data) > 0:
-				savedURL, created, err := store.saveBytesDedup(it.Poster.Data)
+				name, savedURL, err := store.prepareDedupPoster(it.Poster.Data)
 				if err != nil {
 					return ImportResult{}, err
 				}
-				// 只有本次真正写入的新文件才计入回滚删除清单，避免误删已存在的去重文件。
-				if created {
-					createdFiles = append(createdFiles, savedURL)
-					createdSet[savedURL] = true
+				if _, dup := pendingPosters[savedURL]; !dup {
+					pendingPosters[savedURL] = pendingPoster{name: name, data: it.Poster.Data}
 				}
 				it.Beer.PosterURL = savedURL
 				it.Mask.PosterURL = true
@@ -483,6 +461,38 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 	}
 	defer tx.Rollback(ctx)
 
+	// 先按 URL 升序拿全量酒标咨询锁，再落盘新文件并更新 beer_catalog，与 SaveBeer/CleanupUnusedPosters 保持同一锁序。
+	lockSet := make(map[string]struct{})
+	for _, it := range work {
+		if IsLocalPosterURL(it.Beer.PosterURL) {
+			lockSet[strings.TrimSpace(it.Beer.PosterURL)] = struct{}{}
+		}
+	}
+	lockURLs := make([]string, 0, len(lockSet))
+	for u := range lockSet {
+		lockURLs = append(lockURLs, u)
+	}
+	slices.Sort(lockURLs)
+	for _, u := range lockURLs {
+		if err := LockPosterURLTx(ctx, tx, u); err != nil {
+			return ImportResult{}, err
+		}
+	}
+	if store != nil {
+		for _, u := range lockURLs {
+			if p, ok := pendingPosters[u]; ok {
+				created, err := store.persistPoster(p.name, p.data, true)
+				if err != nil {
+					return ImportResult{}, err
+				}
+				if created {
+					createdFiles = append(createdFiles, u)
+					createdSet[u] = true
+				}
+			}
+		}
+	}
+
 	var res ImportResult
 	var cleanupCandidates []string
 	var remotePosterURLs []string
@@ -494,9 +504,6 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 			}
 			c, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(CatalogBeer{CapacityML: DefaultCapacityML, Tags: []string{}}, resolvedIt, allowed), allowed)
 			if err != nil {
-				return ImportResult{}, err
-			}
-			if err := LockPosterURLTx(ctx, tx, c.PosterURL); err != nil {
 				return ImportResult{}, err
 			}
 			tag, err := insertCatalogDoNothingTx(ctx, tx, c)
@@ -527,9 +534,6 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 			if perr != nil {
 				return ImportResult{}, perr
 			}
-			if err := LockPosterURLTx(ctx, tx, c.PosterURL); err != nil {
-				return ImportResult{}, err
-			}
 			tag, ierr := insertCatalogDoNothingTx(ctx, tx, c)
 			if ierr != nil {
 				return ImportResult{}, ierr
@@ -556,9 +560,6 @@ func ImportCatalogBeersWithPosters(ctx context.Context, pool *pgxpool.Pool, stor
 		}
 		merged, err := PrepareCatalogBeerWithCategories(ApplyCatalogMergeWithCategories(existing, resolvedIt, allowed), allowed, existing.Category)
 		if err != nil {
-			return ImportResult{}, err
-		}
-		if err := LockPosterURLTx(ctx, tx, merged.PosterURL); err != nil {
 			return ImportResult{}, err
 		}
 		if _, err := tx.Exec(ctx, `update beer_catalog set

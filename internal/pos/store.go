@@ -115,12 +115,22 @@ func mutateSpotCount(ctx context.Context, pool *pgxpool.Pool, key string, delta 
 			return platform.UserErr("至少保留 1 个台位")
 		}
 		lastSpot := fmt.Sprintf("%s-%d", kind, cur)
-		var hasOpen bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from orders where spot=$1 and closed_at is null)`, lastSpot).Scan(&hasOpen); err != nil {
+		var openOrderID int64
+		err = tx.QueryRow(ctx, `select id from orders where spot=$1 and closed_at is null for update`, lastSpot).Scan(&openOrderID)
+		if err == nil {
+			var busy bool
+			if err := tx.QueryRow(ctx, `select exists(select 1 from order_items where order_id=$1)
+				or exists(select 1 from payments where order_id=$1)`, openOrderID).Scan(&busy); err != nil {
+				return err
+			}
+			if busy {
+				return platform.UserErr(fmt.Sprintf("%s 还有未结账单，先结清再删除台位", SpotLabel(lastSpot)))
+			}
+			if _, err := tx.Exec(ctx, `delete from orders where id=$1`, openOrderID); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
 			return err
-		}
-		if hasOpen {
-			return platform.UserErr(fmt.Sprintf("%s 还有未结账单，先结清再删除台位", SpotLabel(lastSpot)))
 		}
 	}
 	if _, err := tx.Exec(ctx, `insert into store_settings (key, value, updated_at) values ($1, $2, now())
@@ -150,7 +160,7 @@ func ListSpots(ctx context.Context, pool *pgxpool.Pool) ([]Spot, error) {
 
 	rows, err := pool.Query(ctx, `
 		select o.spot, o.id,
-		       count(i.id) filter (where i.paid_at is null),
+		       coalesce(sum(i.qty) filter (where i.paid_at is null), 0)::int,
 		       coalesce(sum(i.unit_cents::bigint * i.qty::bigint) filter (where i.paid_at is null), 0)::bigint
 		from orders o left join order_items i on i.order_id = o.id
 		where o.closed_at is null
@@ -191,13 +201,6 @@ func EnsureOrder(ctx context.Context, pool *pgxpool.Pool, key string) (int64, er
 	if kind == "bar" {
 		def = 3
 	}
-	limit, err := settingInt(ctx, pool, kind+"_count", def)
-	if err != nil {
-		return 0, err
-	}
-	if n > limit {
-		return 0, platform.UserErr("没有这个台位")
-	}
 	if key != kind+"-"+strconv.Itoa(n) {
 		return 0, platform.UserErr("没有这个台位")
 	}
@@ -207,6 +210,21 @@ func EnsureOrder(ctx context.Context, pool *pgxpool.Pool, key string) (int64, er
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+
+	limit := def
+	var rawLimit string
+	err = tx.QueryRow(ctx, `select value from store_settings where key=$1 for share`, kind+"_count").Scan(&rawLimit)
+	if err == nil {
+		if v, convErr := strconv.Atoi(strings.TrimSpace(rawLimit)); convErr == nil && v >= 1 {
+			limit = v
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+	if n > limit {
+		return 0, platform.UserErr("没有这个台位")
+	}
+
 	var id int64
 	err = tx.QueryRow(ctx, `select id from orders where spot=$1 and closed_at is null`, key).Scan(&id)
 	if err == nil {
@@ -290,7 +308,6 @@ func (o OrderView) UnpaidGroups() []ItemGroup {
 }
 
 func (o OrderView) TotalText() string { return platform.PriceText(o.Total) }
-func (o OrderView) Empty() bool       { return len(o.Unpaid) == 0 && len(o.Paid) == 0 }
 
 func LoadOrder(ctx context.Context, pool *pgxpool.Pool, id int64) (OrderView, error) {
 	var o OrderView
@@ -332,6 +349,28 @@ func lockOpenOrder(ctx context.Context, tx pgx.Tx, orderID int64) (string, error
 	return spotKey, err
 }
 
+func upsertOrderItemTx(ctx context.Context, tx pgx.Tx, orderID int64, kind string, refID int64, name string, price, ml int) error {
+	var existingQty int
+	err := tx.QueryRow(ctx, `select qty from order_items
+		where order_id=$1 and paid_at is null and kind=$2 and ref_id=$3 and unit_cents=$4 and ml=$5
+		for update`, orderID, kind, refID, price, ml).Scan(&existingQty)
+	if err == nil {
+		if existingQty >= maxOrderLineQty {
+			return platform.UserErr(fmt.Sprintf("单行数量最多 %d 份", maxOrderLineQty))
+		}
+		_, err := tx.Exec(ctx, `update order_items set qty = qty + 1
+			where order_id=$1 and paid_at is null and kind=$2 and ref_id=$3 and unit_cents=$4 and ml=$5`,
+			orderID, kind, refID, price, ml)
+		return err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	_, err = tx.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml)
+		values ($1, $2, $3, $4, $5, $6)`, orderID, kind, refID, name, price, ml)
+	return err
+}
+
 // AddOrderItem 点一下加一件；同样的未结商品合并数量，上限 999。
 func AddOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID int64, kind string, refID int64, name string, price, ml int) error {
 	if price < 0 || ml < 0 {
@@ -345,26 +384,73 @@ func AddOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID int64, kind s
 	if _, err := lockOpenOrder(ctx, tx, orderID); err != nil {
 		return err
 	}
-	var existingQty int
-	err = tx.QueryRow(ctx, `select qty from order_items
-		where order_id=$1 and paid_at is null and kind=$2 and ref_id=$3 and unit_cents=$4 and ml=$5
-		for update`, orderID, kind, refID, price, ml).Scan(&existingQty)
-	if err == nil {
-		if existingQty >= maxOrderLineQty {
-			return platform.UserErr(fmt.Sprintf("单行数量最多 %d 份", maxOrderLineQty))
-		}
-		if _, err := tx.Exec(ctx, `update order_items set qty = qty + 1
-			where order_id=$1 and paid_at is null and kind=$2 and ref_id=$3 and unit_cents=$4 and ml=$5`,
-			orderID, kind, refID, price, ml); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err := upsertOrderItemTx(ctx, tx, orderID, kind, refID, name, price, ml); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml)
-		values ($1, $2, $3, $4, $5, $6)`, orderID, kind, refID, name, price, ml); err != nil {
+	return tx.Commit(ctx)
+}
+
+// AddBeerOrderItem 在同一事务里加购在售桶装啤酒（持有开单锁与 FOR SHARE 桶/酒锁，消除加购与下架竞态）。
+func AddBeerOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID, kegID int64, ml int) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockOpenOrder(ctx, tx, orderID); err != nil {
+		return err
+	}
+	var name string
+	var price int
+	err = tx.QueryRow(ctx, `
+		select case when btrim(b.brewery) <> '' then btrim(b.brewery) || ' · ' || b.name else b.name end,
+			case $2::int when 150 then coalesce(b.price_150, 0)
+				when 330 then coalesce(b.price_330, 0)
+				when 500 then coalesce(b.price_500, 0)
+				else 0 end
+		from kegs k join beers b on b.id = k.beer_id
+		where k.id=$1 and b.on_screen and k.tapped_at is not null and k.finished_at is null
+		for share of k, b`, kegID, ml).Scan(&name, &price)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return platform.UserErr("这桶酒不在售")
+	}
+	if err != nil {
+		return err
+	}
+	if price <= 0 {
+		return platform.UserErr("这桶酒没开这个杯型")
+	}
+	if err := upsertOrderItemTx(ctx, tx, orderID, "beer", kegID, name, price, ml); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// AddRetailOrderItem 在同一事务里加购在架零售商品（持有开单锁与 FOR SHARE 商品锁）。
+func AddRetailOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID, retailID int64) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockOpenOrder(ctx, tx, orderID); err != nil {
+		return err
+	}
+	var name, spec string
+	var price, stock int
+	var active, archived bool
+	err = tx.QueryRow(ctx, `select name, spec, price_cents, stock, active, archived_at is not null
+		from retail_items where id=$1 for share`, retailID).Scan(&name, &spec, &price, &stock, &active, &archived)
+	if errors.Is(err, pgx.ErrNoRows) || archived || !active || stock < 1 {
+		return platform.UserErr("这件商品不能卖了")
+	}
+	if err != nil {
+		return err
+	}
+	if spec != "" {
+		name += " " + spec
+	}
+	if err := upsertOrderItemTx(ctx, tx, orderID, "retail", retailID, name, price, 0); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -413,14 +499,40 @@ func MoreOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID, itemID int6
 	if _, err := lockOpenOrder(ctx, tx, orderID); err != nil {
 		return err
 	}
+	var kind string
+	var refID int64
 	var qty int
-	err = tx.QueryRow(ctx, `select qty from order_items where id=$1 and order_id=$2 and paid_at is null for update`,
-		itemID, orderID).Scan(&qty)
+	err = tx.QueryRow(ctx, `select kind, ref_id, qty from order_items where id=$1 and order_id=$2 and paid_at is null for update`,
+		itemID, orderID).Scan(&kind, &refID, &qty)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return tx.Commit(ctx)
 	}
 	if err != nil {
 		return err
+	}
+	switch kind {
+	case "beer":
+		var sellable bool
+		if err := tx.QueryRow(ctx, `select exists(
+			select 1 from kegs k join beers b on b.id = k.beer_id
+			where k.id=$1 and b.on_screen and k.tapped_at is not null and k.finished_at is null
+		)`, refID).Scan(&sellable); err != nil {
+			return err
+		}
+		if !sellable {
+			return platform.UserErr("这桶酒已停售或已换桶，请从右侧菜单重新点单")
+		}
+	case "retail":
+		var sellable bool
+		if err := tx.QueryRow(ctx, `select exists(
+			select 1 from retail_items
+			where id=$1 and archived_at is null and active and stock > $2
+		)`, refID, qty).Scan(&sellable); err != nil {
+			return err
+		}
+		if !sellable {
+			return platform.UserErr("这件商品已下架或库存不足")
+		}
 	}
 	if qty >= maxOrderLineQty {
 		return platform.UserErr(fmt.Sprintf("单行数量最多 %d 份", maxOrderLineQty))
@@ -543,6 +655,17 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 			from payments where order_id=$1 and idempotency_key=$2`, orderID, idemKey).
 			Scan(&existingPayID, &existingAmt, &existingCnt, &existingMethod)
 		if err == nil {
+			if len(uniqIDs) > 0 {
+				var hasSelectedUnpaid bool
+				if uerr := tx.QueryRow(ctx, `select exists(
+					select 1 from order_items where order_id=$1 and paid_at is null and id = any($2::bigint[])
+				)`, orderID, uniqIDs).Scan(&hasSelectedUnpaid); uerr != nil {
+					return PayResult{}, uerr
+				}
+				if hasSelectedUnpaid {
+					return PayResult{}, platform.UserErr("页面状态已过期，请刷新账单后再结账")
+				}
+			}
 			if err := tx.Commit(ctx); err != nil {
 				return PayResult{}, err
 			}
@@ -645,22 +768,11 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		return PayResult{}, platform.UserErr("账单金额已变动，请刷新核对后再收款")
 	}
 
-	// 按固定顺序先锁所有涉及的酒桶与零售商品行，避免多台单并发交叉结账产生死锁。
+	// 按固定顺序先锁所有涉及的酒桶，零售 SKU 在 SellRetailTx 内按 ID 升序统一加锁。
 	sort.Slice(kegLockIDs, func(i, j int) bool { return kegLockIDs[i] < kegLockIDs[j] })
-	sort.Slice(retailLockIDs, func(i, j int) bool { return retailLockIDs[i] < retailLockIDs[j] })
 	kegSnaps, err := inventory.LockKegsForOrderTx(ctx, tx, kegLockIDs)
 	if err != nil {
 		return PayResult{}, err
-	}
-	if len(retailLockIDs) > 0 {
-		lockRows, err := tx.Query(ctx, `select id from retail_items where id = any($1::bigint[]) order by id for update`, retailLockIDs)
-		if err != nil {
-			return PayResult{}, err
-		}
-		lockRows.Close()
-		if err := lockRows.Err(); err != nil {
-			return PayResult{}, err
-		}
 	}
 
 	for _, l := range lines {

@@ -572,3 +572,30 @@ func TestPosterStoreCloseCancelsAsyncLocalize(t *testing.T) {
 		t.Fatalf("重复 Close 应幂等: %v", err)
 	}
 }
+
+func TestPosterSaveFromURLOmitsAVIFAcceptHeader(t *testing.T) {
+	store, err := NewPosterStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotAccept string
+	store.SetHTTPClientForTest(&http.Client{Transport: posterRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotAccept = r.Header.Get("Accept")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"image/png"}},
+			Body:       io.NopCloser(bytes.NewReader(samplePNGBytes())),
+		}, nil
+	})}, false)
+
+	localURL, err := store.SaveFromURL(context.Background(), "https://cdn.example/beer.png")
+	if err != nil {
+		t.Fatalf("SaveFromURL: %v", err)
+	}
+	if localURL == "" {
+		t.Fatal("expected non-empty local poster URL")
+	}
+	if strings.Contains(strings.ToLower(gotAccept), "image/avif") {
+		t.Fatalf("Accept header should omit unsupported image/avif, got %q", gotAccept)
+	}
+}

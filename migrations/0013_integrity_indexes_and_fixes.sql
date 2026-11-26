@@ -10,7 +10,7 @@ UPDATE retail_items SET category = '罐装' WHERE btrim(category) = '';
 UPDATE beers
 SET category = '酸艾尔'
 WHERE btrim(category) = '酸小麦'
-  AND lower(style) ~ '(lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤)'
+  AND lower(style) ~ '(lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤|酸)'
   AND lower(style) !~ '(berliner|gose|酸小麦|柏林|古斯)'
   AND NOT EXISTS (
       SELECT 1 FROM store_settings ss
@@ -20,20 +20,24 @@ WHERE btrim(category) = '酸小麦'
 UPDATE beer_catalog
 SET category = '酸艾尔'
 WHERE btrim(category) = '酸小麦'
-  AND lower(style) ~ '(lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤)'
+  AND lower(style) ~ '(lambic|gueuze|geuze|sour|wild|flanders|oude|brett|酸艾尔|兰比克|贵兹|野菌|法兰德斯|酸啤|酸)'
   AND lower(style) !~ '(berliner|gose|酸小麦|柏林|古斯)'
   AND NOT EXISTS (
       SELECT 1 FROM store_settings ss
       WHERE ss.key = 'beer_categories' AND ss.value NOT LIKE '%"酸艾尔"%'
   );
 
--- 若门店分类配置未主动启用 波特 / 修道院，则统一收敛到预设分类 世涛
+-- 若门店分类配置未主动启用 波特 / 修道院，且预设分类 世涛 存在，则统一收敛到 世涛
 UPDATE beers
 SET category = '世涛'
 WHERE btrim(category) IN ('波特', '修道院')
   AND NOT EXISTS (
       SELECT 1 FROM store_settings ss
-      WHERE ss.key = 'beer_categories' AND ss.value LIKE '%' || btrim(beers.category) || '%'
+      WHERE ss.key = 'beer_categories' AND ss.value LIKE '%"' || btrim(beers.category) || '"%'
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM store_settings ss
+      WHERE ss.key = 'beer_categories' AND ss.value NOT LIKE '%"世涛"%'
   );
 
 UPDATE beer_catalog
@@ -41,7 +45,11 @@ SET category = '世涛'
 WHERE btrim(category) IN ('波特', '修道院')
   AND NOT EXISTS (
       SELECT 1 FROM store_settings ss
-      WHERE ss.key = 'beer_categories' AND ss.value LIKE '%' || btrim(beer_catalog.category) || '%'
+      WHERE ss.key = 'beer_categories' AND ss.value LIKE '%"' || btrim(beer_catalog.category) || '"%'
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM store_settings ss
+      WHERE ss.key = 'beer_categories' AND ss.value NOT LIKE '%"世涛"%'
   );
 
 DO $$
@@ -162,6 +170,10 @@ BEGIN
         ALTER TABLE beer_catalog VALIDATE CONSTRAINT beer_catalog_nonneg;
     END IF;
 
+    UPDATE kegs
+    SET tapped_at = COALESCE(placed_at, finished_at)
+    WHERE finished_at IS NOT NULL AND tapped_at IS NULL;
+
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kegs_valid_bounds' AND conrelid = 'kegs'::regclass) THEN
         ALTER TABLE kegs ADD CONSTRAINT kegs_valid_bounds CHECK (
             capacity_ml > 0 AND cost_cents >= 0
@@ -244,3 +256,5 @@ CREATE INDEX IF NOT EXISTS payments_created_at_idx ON payments (created_at DESC)
 CREATE INDEX IF NOT EXISTS retail_sales_created_at_idx ON retail_sales (created_at DESC);
 CREATE INDEX IF NOT EXISTS kegs_beer_idx ON kegs (beer_id, finished_at, placed_at);
 CREATE INDEX IF NOT EXISTS operation_events_kind_time_idx ON operation_events (kind, occurred_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS beers_poster_url_idx ON beers (poster_url) WHERE poster_url <> '';
+CREATE INDEX IF NOT EXISTS beer_catalog_poster_url_idx ON beer_catalog (poster_url) WHERE poster_url <> '';

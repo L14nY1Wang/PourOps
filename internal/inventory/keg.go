@@ -89,11 +89,12 @@ func GetKeg(ctx context.Context, pool *pgxpool.Pool, id int64) (Keg, error) {
 // 先按 id 升序锁 beers 行（和 TapBeer/UntapBeerResult 同序），再锁桶行，
 // 所以后台手工把一桶填成「在售」也要过单在售桶的检查。
 type SaveKegResult struct {
-	KegID    int64
-	BeerID   int64
-	Brewery  string
-	BeerName string
-	OpKind   string
+	KegID         int64
+	BeerID        int64
+	Brewery       string
+	BeerName      string
+	OpKind        string
+	ScreenChanged bool
 }
 
 func SaveKeg(ctx context.Context, pool *pgxpool.Pool, k Keg) (int64, error) {
@@ -180,6 +181,15 @@ func SaveKegResultFn(ctx context.Context, pool *pgxpool.Pool, k Keg) (SaveKegRes
 		if k.BeerID != oldBeerID && (hasPours || oldTapped) {
 			return SaveKegResult{}, platform.UserErr("已开桶或有售出记录的酒桶不能更换所属酒款")
 		}
+		if oldTapped && !oldFinished && k.TappedAt == nil {
+			var hasUnpaidOrder bool
+			if err := tx.QueryRow(ctx, `select exists(select 1 from order_items where kind='beer' and ref_id=$1 and paid_at is null)`, k.ID).Scan(&hasUnpaidOrder); err != nil {
+				return SaveKegResult{}, err
+			}
+			if hasUnpaidOrder {
+				return SaveKegResult{}, platform.UserErr("该酒桶还有未结账 POS 订单占用，先清理订单")
+			}
+		}
 		if hasPours && k.TappedAt == nil {
 			return SaveKegResult{}, platform.UserErr("已有售出记录的酒桶不能改回未开桶状态")
 		}
@@ -254,10 +264,26 @@ func SaveKegResultFn(ctx context.Context, pool *pgxpool.Pool, k Keg) (SaveKegRes
 			return SaveKegResult{}, err
 		}
 	}
+	screenChanged := false
+	if oldTapped && !oldFinished && (k.FinishedAt != nil || k.TappedAt == nil) {
+		tag, err := tx.Exec(ctx, `update beers set on_screen=false, updated_at=now()
+			where id=$1 and on_screen and not exists(
+				select 1 from kegs where beer_id=$1 and tapped_at is not null and finished_at is null
+			)`, k.BeerID)
+		if err != nil {
+			return SaveKegResult{}, err
+		}
+		if tag.RowsAffected() > 0 {
+			if err := platform.LogOperation(ctx, tx, platform.OpScreenOff, platform.BeerSubject(brewery, name), "编辑桶停售撤屏"); err != nil {
+				return SaveKegResult{}, err
+			}
+			screenChanged = true
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return SaveKegResult{}, err
 	}
-	return SaveKegResult{KegID: k.ID, BeerID: k.BeerID, Brewery: brewery, BeerName: name, OpKind: opKind}, nil
+	return SaveKegResult{KegID: k.ID, BeerID: k.BeerID, Brewery: brewery, BeerName: name, OpKind: opKind, ScreenChanged: screenChanged}, nil
 }
 
 func DeleteKeg(ctx context.Context, pool *pgxpool.Pool, id int64) error {
@@ -446,12 +472,6 @@ func validateKegPourTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, am
 		return KegOrderSnap{}, err
 	}
 	return snap, nil
-}
-
-// CheckKegForOrderTx 校验 POS 订单中的酒水条目在当前事务里可被核销，并按需锁住酒桶行。
-func CheckKegForOrderTx(ctx context.Context, tx pgx.Tx, kegID int64, cups, ml, amountCents int, orderedAt time.Time) error {
-	_, err := validateKegPourTx(ctx, tx, kegID, cups, ml, amountCents, "pos", &orderedAt)
-	return err
 }
 
 func insertPourValidatedTx(ctx context.Context, tx pgx.Tx, snap KegOrderSnap, cups, ml, amountCents int, source string, paymentID *int64) (bool, error) {

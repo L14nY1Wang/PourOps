@@ -30,8 +30,8 @@ func TestToneOf(t *testing.T) {
 		"未知风格":                    "拉格",
 	}
 	for style, want := range cases {
-		if got := ToneOf(style); got != want {
-			t.Errorf("ToneOf(%q) = %q, want %q", style, got, want)
+		if got := InferCategory(style, DefaultBeerCategories); got != want {
+			t.Errorf("InferCategory(%q) = %q, want %q", style, got, want)
 		}
 	}
 }
@@ -117,8 +117,8 @@ func TestMoneyCentsAndStrictBeerValidation(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_ = req.ParseForm()
-	if _, err := ParseBeerForm(req); err == nil {
-		t.Fatal("ParseBeerForm should reject ABV > 100")
+	if _, err := ParseBeerFormWithCategories(req, DefaultBeerCategories); err == nil {
+		t.Fatal("ParseBeerFormWithCategories should reject ABV > 100")
 	}
 
 	if n, err := ParseSortOrder("-2147483647"); err != nil || n != -math.MaxInt32 {
@@ -129,25 +129,19 @@ func TestMoneyCentsAndStrictBeerValidation(t *testing.T) {
 	reqBadIBU := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(ibuBadForm.Encode()))
 	reqBadIBU.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_ = reqBadIBU.ParseForm()
-	if _, err := ParseBeerForm(reqBadIBU); err == nil {
-		t.Fatal("ParseBeerForm should reject IBU > 1000")
+	if _, err := ParseBeerFormWithCategories(reqBadIBU, DefaultBeerCategories); err == nil {
+		t.Fatal("ParseBeerFormWithCategories should reject IBU > 1000")
 	}
 	ibuOkForm := url.Values{"name": {"高苦度酒"}, "ibu": {"1000"}}
 	reqOkIBU := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(ibuOkForm.Encode()))
 	reqOkIBU.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	_ = reqOkIBU.ParseForm()
-	if got, err := ParseBeerForm(reqOkIBU); err != nil || got.IBU == nil || *got.IBU != 1000 {
-		t.Fatalf("ParseBeerForm(ibu=1000) = %+v, err=%v", got, err)
+	if got, err := ParseBeerFormWithCategories(reqOkIBU, DefaultBeerCategories); err != nil || got.IBU == nil || *got.IBU != 1000 {
+		t.Fatalf("ParseBeerFormWithCategories(ibu=1000) = %+v, err=%v", got, err)
 	}
 }
 
-func TestPriceCentsAndText(t *testing.T) {
-	cases := map[string]int{"45": 4500, "45.5": 4550, "¥ 45": 4500, "￥168": 16800, "": 0, "abc": 0}
-	for in, want := range cases {
-		if got := PriceCents(in); got != want {
-			t.Errorf("PriceCents(%q) = %d, want %d", in, got, want)
-		}
-	}
+func TestPriceTextFormatting(t *testing.T) {
 	if got := PriceText(4500); got != "¥ 45" {
 		t.Errorf("PriceText(4500) = %q", got)
 	}
@@ -166,14 +160,14 @@ func TestSplitList(t *testing.T) {
 	}
 }
 
-func TestOptFloatRejectsNonFinite(t *testing.T) {
+func TestParseStrictFloatRejectsNonFinite(t *testing.T) {
 	for _, in := range []string{"NaN", "Inf", "+Inf", "-Inf", "1e999", "abc"} {
-		if got := OptFloat(in); got != nil {
-			t.Errorf("OptFloat(%q) = %v，应拒绝", in, *got)
+		if got, err := ParseStrictFloat(in, "ABV", 0, 100, true); err == nil || got != nil {
+			t.Errorf("ParseStrictFloat(%q) = %v, %v，应拒绝", in, got, err)
 		}
 	}
-	if got := OptFloat(" 5.2 "); got == nil || *got != 5.2 {
-		t.Errorf("OptFloat(5.2) = %v", got)
+	if got, err := ParseStrictFloat(" 5.2 ", "ABV", 0, 100, true); err != nil || got == nil || *got != 5.2 {
+		t.Errorf("ParseStrictFloat(5.2) = %v, %v", got, err)
 	}
 }
 
@@ -213,7 +207,7 @@ func TestStrictBeerValidationAndUserErrorSanitization(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			_ = req.ParseForm()
-			_, err := ParseBeerForm(req)
+			_, err := ParseBeerFormWithCategories(req, DefaultBeerCategories)
 			if err == nil {
 				t.Fatalf("%s=%q 应返回错误", tc.field, tc.val)
 			}

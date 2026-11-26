@@ -291,32 +291,6 @@ func readZipEntryBounded(f *zip.File, maxEntryBytes int64, totalLeft *int64) ([]
 	return data, nil
 }
 
-type zipPosterRef struct {
-	PosterFile string `json:"poster_file"`
-	PosterURL  string `json:"poster_url"`
-	Poster     string `json:"poster"`
-}
-
-func extractZipPosterRefs(trimmedJSON []byte) ([]zipPosterRef, error) {
-	if len(trimmedJSON) == 0 {
-		return nil, nil
-	}
-	if trimmedJSON[0] == '[' {
-		var refs []zipPosterRef
-		if err := json.Unmarshal(trimmedJSON, &refs); err != nil {
-			return nil, err
-		}
-		return refs, nil
-	}
-	var env struct {
-		Items []zipPosterRef `json:"items"`
-	}
-	if err := json.Unmarshal(trimmedJSON, &env); err != nil {
-		return nil, err
-	}
-	return env.Items, nil
-}
-
 func (c ZIPCodec) Decode(raw []byte) ([]ImportItem, error) {
 	if !hasZIPMagic(raw) {
 		return nil, errors.New("请上传本系统导出的 .zip 历史酒单压缩包")
@@ -408,22 +382,14 @@ func (c ZIPCodec) DecodeReaderAt(r io.ReaderAt, size int64) ([]ImportItem, error
 	if err != nil {
 		return nil, err
 	}
-	refs, err := extractZipPosterRefs(catTrimmed)
-	if err != nil || len(refs) != len(items) {
-		return nil, errors.New("解析 catalog.json 中的酒标索引失败")
-	}
 
 	posterCache := make(map[string][]byte)
 	for i := range items {
 		rowNo := i + 1
-		refPath := strings.TrimSpace(refs[i].PosterFile)
+		refPath := strings.TrimSpace(items[i].PosterFile)
 		explicitRef := refPath != ""
 		if !explicitRef {
-			pURL := strings.TrimSpace(refs[i].PosterURL)
-			if pURL == "" {
-				pURL = strings.TrimSpace(refs[i].Poster)
-			}
-			if name, ok := ParsePosterFilename(pURL); ok {
+			if name, ok := ParsePosterFilename(items[i].Beer.PosterURL); ok {
 				refPath = "posters/" + name
 			}
 		}
@@ -574,7 +540,7 @@ func encodeCatalogCSVWithCategories(buf *bytes.Buffer, items []CatalogBeer, cats
 			escapeCSVFormula(c.Brewery),
 			escapeCSVFormula(c.Name),
 			escapeCSVFormula(c.Style),
-			catText,
+			escapeCSVFormula(catText),
 			c.ABVInput(),
 			c.IBUInput(),
 			c.UTInput(),
@@ -836,7 +802,7 @@ func ParseCatalogCSVWithCategories(raw []byte, allowed []string) ([]ImportItem, 
 			item.Mask.ABV = true
 		}
 		if v, ok := cell("ibu"); ok {
-			ibu, err := parseImportInt(v, "IBU")
+			ibu, err := platform.ParseStrictInt(v, "IBU", 0, platform.MaxBeerIBU)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 行：%w", lineNo, err)
 			}
@@ -1066,7 +1032,7 @@ func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem,
 			return nil, fmt.Errorf("第 %d 条 IBU 格式无效", rowNo)
 		} else if ok {
 			if !isNull {
-				ibu, err := parseImportInt(s, "IBU")
+				ibu, err := platform.ParseStrictInt(s, "IBU", 0, platform.MaxBeerIBU)
 				if err != nil {
 					return nil, fmt.Errorf("第 %d 条：%w", rowNo, err)
 				}
@@ -1135,6 +1101,11 @@ func ParseCatalogJSONWithCategories(raw []byte, allowed []string) ([]ImportItem,
 			}
 			item.Beer.PosterURL = s
 			item.Mask.PosterURL = true
+		}
+		if s, isNull, ok, err := getStr("poster_file"); err != nil {
+			return nil, fmt.Errorf("第 %d 条酒标文件路径无效", rowNo)
+		} else if ok && !isNull {
+			item.PosterFile = s
 		}
 
 		if s, isNull, ok, err := getStr("capacity_ml"); err != nil {

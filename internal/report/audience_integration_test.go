@@ -302,3 +302,35 @@ func TestLoadAudienceInsightsAndAnalyticsHTTP(t *testing.T) {
 		t.Fatal("页面出现被 html/template 拦截的 ZgotmplZ 样式")
 	}
 }
+
+func TestSpotPreferenceUsesTopCategoryCupsInSummary(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ipaKeg := seedBeerKeg(t, pool, "甲厂", "美式IPA", "IPA", "IPA", 6.5, 100000)
+	lagerKeg := seedBeerKeg(t, pool, "乙厂", "清冽拉格", "Lager", "拉格", 4.8, 80000)
+	ctx := context.Background()
+	at := time.Date(2026, 6, 3, 21, 0, 0, 0, platform.ReportZone)
+
+	var ordBar int64
+	if err := pool.QueryRow(ctx, `insert into orders (spot, closed_at) values ('bar-1', $1) returning id`, at).Scan(&ordBar); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into order_items (order_id, kind, ref_id, name, unit_cents, ml, qty, paid_at) values
+		($1, 'beer', $2, '美式IPA', 5000, 330, 2, $4),
+		($1, 'beer', $3, '清冽拉格', 4000, 330, 1, $4)`,
+		ordBar, ipaKeg, lagerKeg, at); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 6, 3, 7, 0, 0, 0, platform.ReportZone)
+	tx := beginTestTx(t, pool)
+	aud, err := LoadAudienceInsights(ctx, tx, start, start.AddDate(0, 0, 1), platform.DefaultBeerCategories)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aud.Spots.BarCups != 3 || aud.Spots.BarTopCat != "IPA" || aud.Spots.BarTopCups != 2 {
+		t.Fatalf("BarTopCups = %+v, want BarCups=3 BarTopCat=IPA BarTopCups=2", aud.Spots)
+	}
+	if got := aud.Spots.SummaryText(); !strings.Contains(got, "吧台客群偏爱 IPA（2 杯）") {
+		t.Fatalf("SummaryText should report top category cups (2), got %q", got)
+	}
+}

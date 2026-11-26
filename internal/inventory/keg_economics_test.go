@@ -94,7 +94,7 @@ func TestKegPricingWithCustomConfig(t *testing.T) {
 	}
 	now := time.Date(2026, 11, 20, 21, 0, 0, 0, time.Local)
 	k := Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 17000, RevenueCents: 266667}
-	econ := k.EconomicsWithConfig(nil, cfg)
+	econ := k.EconomicsWithConfig(cfg)
 	if econ.SellablePct != 85 || econ.TargetMarginPct != 55 || econ.LossPct() != 15 || !econ.TargetMet ||
 		econ.Verdict != "target_met" || !strings.Contains(econ.Diagnosis, "55%") {
 		t.Fatalf("EconomicsWithConfig(85/55) 不对: %+v", econ)
@@ -105,34 +105,34 @@ func TestKegEconomicsVerdictsAndDiagnosis(t *testing.T) {
 	now := time.Date(2026, 11, 20, 21, 0, 0, 0, time.Local)
 
 	// 1. 未填成本
-	eNoCost := (Keg{CapacityML: 20000, SoldML: 3300, RevenueCents: 45000, TappedAt: &now}).Economics(nil)
+	eNoCost := (Keg{CapacityML: 20000, SoldML: 3300, RevenueCents: 45000, TappedAt: &now}).Economics()
 	if eNoCost.Verdict != "no_cost" || eNoCost.HasCost {
 		t.Fatalf("未填成本判定不对: %+v", eNoCost)
 	}
 
 	// 2. 库存待开
-	eUntapped := (Keg{CapacityML: 20000, CostCents: 120000, PlacedAt: &now}).Economics(nil)
+	eUntapped := (Keg{CapacityML: 20000, CostCents: 120000, PlacedAt: &now}).Economics()
 	if eUntapped.Verdict != "untapped" || eUntapped.TheoreticalBreakEven != 8000 || eUntapped.TargetRevenueCents != 240000 {
 		t.Fatalf("待开桶判定不对: %+v", eUntapped)
 	}
 
 	// 3. 在售：回本中 -> 已回本盈利中 -> 已达 50% 目标
-	eRec := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 4000, RevenueCents: 60000}).Economics(nil)
+	eRec := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 4000, RevenueCents: 60000}).Economics()
 	if eRec.Verdict != "recovering" || eRec.BreakEvenPct != 50 || eRec.BreakEvenGapCents != 60000 || eRec.EstimatedBreakEvenML != 8000 {
 		t.Fatalf("在售回本中判定不对: %+v", eRec)
 	}
-	eProf := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 10000, RevenueCents: 150000}).Economics(nil)
+	eProf := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 10000, RevenueCents: 150000}).Economics()
 	if eProf.Verdict != "profitable" || !eProf.BreakEvenReached || eProf.TargetMet || eProf.TargetGapCents != 90000 {
 		t.Fatalf("在售盈利中判定不对: %+v", eProf)
 	}
-	eActMet := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 16000, RevenueCents: 240000}).Economics(nil)
+	eActMet := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, SoldML: 16000, RevenueCents: 240000}).Economics()
 	if eActMet.Verdict != "target_met" || !eActMet.TargetMet || eActMet.TargetProgressPct != 100 {
 		t.Fatalf("在售达标判定不对: %+v", eActMet)
 	}
 
 	// 4. 下架结桶：达标盈利
 	kFinMet := Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 16000, RevenueCents: 240000}
-	eFinMet := kFinMet.Economics(nil)
+	eFinMet := kFinMet.Economics()
 	if eFinMet.Verdict != "target_met" || eFinMet.ActualYieldPct != 80 || eFinMet.MarginText() != "50.0%" {
 		t.Fatalf("结桶达标判定不对: %+v", eFinMet)
 	}
@@ -141,27 +141,27 @@ func TestKegEconomicsVerdictsAndDiagnosis(t *testing.T) {
 	}
 
 	// 5. 下架结桶：盈利未达标 —— 区分「出酒率偏低」与「实售均价偏低」
-	eLowYield := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 11000, RevenueCents: 180000}).Economics(nil)
+	eLowYield := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 11000, RevenueCents: 180000}).Economics()
 	if eLowYield.Verdict != "below_target" || !strings.Contains(eLowYield.Diagnosis, "出酒率") {
 		t.Fatalf("低出酒率归因不对: %+v", eLowYield)
 	}
-	eLowPrice := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 16500, RevenueCents: 180000}).Economics(nil)
+	eLowPrice := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 16500, RevenueCents: 180000}).Economics()
 	if eLowPrice.Verdict != "below_target" || !strings.Contains(eLowPrice.Diagnosis, "实售均价") {
 		t.Fatalf("低均价归因不对: %+v", eLowPrice)
 	}
 
 	// 6. 下架结桶：刚好回本 & 亏损未回本（含零卖出）
 	kEven := Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 10000, RevenueCents: 120000}
-	if kEven.Economics(nil).Verdict != "breakeven" || !strings.Contains(kEven.UntapSummaryText(), "刚好回本") {
-		t.Fatalf("刚好回本判定不对: %+v / %q", kEven.Economics(nil), kEven.UntapSummaryText())
+	if kEven.Economics().Verdict != "breakeven" || !strings.Contains(kEven.UntapSummaryText(), "刚好回本") {
+		t.Fatalf("刚好回本判定不对: %+v / %q", kEven.Economics(), kEven.UntapSummaryText())
 	}
-	eZero := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now}).Economics(nil)
+	eZero := (Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now}).Economics()
 	if eZero.Verdict != "loss" || !strings.Contains(eZero.Diagnosis, "无售出") {
 		t.Fatalf("零卖出亏损判定不对: %+v", eZero)
 	}
 	kLoss := Keg{CapacityML: 20000, CostCents: 120000, TappedAt: &now, FinishedAt: &now, SoldML: 8000, RevenueCents: 90000}
-	if kLoss.Economics(nil).Verdict != "loss" || !strings.Contains(kLoss.UntapSummaryText(), "亏损") {
-		t.Fatalf("亏损摘要不对: %+v / %q", kLoss.Economics(nil), kLoss.UntapSummaryText())
+	if kLoss.Economics().Verdict != "loss" || !strings.Contains(kLoss.UntapSummaryText(), "亏损") {
+		t.Fatalf("亏损摘要不对: %+v / %q", kLoss.Economics(), kLoss.UntapSummaryText())
 	}
 }
 
@@ -193,5 +193,26 @@ func TestSummarizeKegs(t *testing.T) {
 	distSum := sum.FinishedTargetMetCount + sum.FinishedBelowTargetCount + sum.FinishedBreakevenCount + sum.FinishedLossCount + sum.FinishedUncostedCount
 	if distSum != sum.FinishedCount {
 		t.Fatalf("已结桶各分档之和 (%d) 不等于 FinishedCount (%d)", distSum, sum.FinishedCount)
+	}
+}
+
+func TestMarginTextNoCostAndLowYieldRounding(t *testing.T) {
+	now := time.Date(2026, 11, 20, 21, 0, 0, 0, time.Local)
+	eNoCost := (Keg{CapacityML: 20000, CostCents: 0, SoldML: 3300, RevenueCents: 45000, TappedAt: &now}).Economics()
+	if got := eNoCost.MarginText(); got != "—" {
+		t.Fatalf("未填成本毛利率应为 —，实际 %q", got)
+	}
+
+	// 15900/20000 = 79.5%，整数四舍五入为 80%，但按实际出酒低于 80% 判为 lowYield，文案应展示 79.5%。
+	eBoundary := (Keg{
+		CapacityML:   20000,
+		CostCents:    100000,
+		SoldML:       15900,
+		RevenueCents: 150000,
+		TappedAt:     &now,
+		FinishedAt:   &now,
+	}).Economics()
+	if eBoundary.Verdict != "below_target" || !strings.Contains(eBoundary.Diagnosis, "79.5%") {
+		t.Fatalf("接近阈值出酒率诊断应展示一位小数 79.5%%，实际: %+v", eBoundary)
 	}
 }

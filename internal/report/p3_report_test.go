@@ -511,3 +511,43 @@ func TestDashboardFlashErrDoesNotHideSalesAndInvalidPeriodReturns400(t *testing.
 		t.Fatalf("非法日期筛选应隐藏销售事实区块")
 	}
 }
+
+func TestSalesEmptyBreweryTopAndPreGroupedRetailQty(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	ctx := context.Background()
+	kegID := seedBeerKeg(t, pool, "", "无厂牌裸酒", "Lager", "拉格", 4.5, 80000)
+	at := time.Date(2026, 6, 4, 21, 0, 0, 0, platform.ReportZone)
+	insertKegPour(t, pool, kegID, 2, 660, 7000, at)
+
+	var saleID int64
+	if err := pool.QueryRow(ctx, `insert into retail_sales (total_cents, cost_cents, created_at) values (6000, 2000, $1) returning id`, at).Scan(&saleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into retail_sale_items (sale_id, name, qty, price_cents, cost_cents) values
+		($1, '花生', 2, 1500, 500),
+		($1, '薯片', 3, 1000, 333)`, saleID); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Date(2026, 6, 4, 7, 0, 0, 0, platform.ReportZone)
+	tx := beginTestTx(t, pool)
+	sales, err := LoadSalesInsights(ctx, tx, start, start.AddDate(0, 0, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sales.Retail.Qty != 5 {
+		t.Fatalf("Retail.Qty = %d, want 5", sales.Retail.Qty)
+	}
+	foundEmptyBrewery := false
+	for _, top := range sales.Top {
+		if strings.Contains(top.Name, "无厂牌裸酒") {
+			foundEmptyBrewery = true
+			if top.Name != "无厂牌裸酒" {
+				t.Fatalf("empty brewery should not leave leading dot, got %q", top.Name)
+			}
+		}
+	}
+	if !foundEmptyBrewery {
+		t.Fatalf("expected 无厂牌裸酒 in sales.Top, got %+v", sales.Top)
+	}
+}

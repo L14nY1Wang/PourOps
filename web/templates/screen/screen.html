@@ -297,8 +297,31 @@
 (function () {
   var q = new URLSearchParams(location.search);
   var allowDemo = q.get('demo') === '1' || q.get('demo') === 'true';
-  var SOURCES = [q.get('src'), '/api/screen/playlist', allowDemo ? 'playlist.json' : null].filter(Boolean);
-  var EVENTS = q.get('events') || '/api/screen/events';
+  function sameOriginURL(raw) {
+    if (!raw) return null;
+    var s = String(raw).trim();
+    if (!s || /^[\\/]{2}/.test(s) || /^\/\\/.test(s)) return null;
+    if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) {
+      try {
+        var rel = new URL(s, 'http://same-origin.local/');
+        if (rel.origin !== 'http://same-origin.local') return null;
+      } catch (e) {
+        return null;
+      }
+      return s;
+    }
+    try {
+      var curOrigin = (typeof location !== 'undefined' && location && location.origin) || '';
+      if (!curOrigin || curOrigin === 'null') return null;
+      var abs = new URL(s);
+      if (abs.origin !== curOrigin) return null;
+      return abs.pathname + abs.search + abs.hash;
+    } catch (e) {
+      return null;
+    }
+  }
+  var SOURCES = [sameOriginURL(q.get('src')), '/api/screen/playlist', allowDemo ? 'playlist.json' : null].filter(Boolean);
+  var EVENTS = sameOriginURL(q.get('events')) || '/api/screen/events';
   var CACHE_KEY = 'screen:menu:v3';
 
   var board = document.getElementById('board');
@@ -625,8 +648,9 @@
         .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
         .then(function (json) {
           if (seq !== loadSeq) return;
+          var prevSignature = signature;
           var ok = apply(json);                        /* 先上屏，缓存坏了不影响展示 */
-          if (ok && url.indexOf('/api/') !== -1) {
+          if (ok && url === '/api/screen/playlist' && signature !== prevSignature) {
             try { localStorage.setItem(CACHE_KEY, JSON.stringify(json)); } catch (e) {}
           }
           if (url.indexOf('/api/') !== -1) subscribe();   /* 静态文件没有 SSE */

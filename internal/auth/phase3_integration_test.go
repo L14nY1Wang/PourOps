@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"pourops/internal/platform"
+	"pourops/internal/ui"
 	"pourops/migrations"
+	"pourops/web"
 )
 
 func TestLoginThrottleCapEvictionAndTrustedProxyIPv6(t *testing.T) {
@@ -54,8 +56,13 @@ func TestLoginThrottleCapEvictionAndTrustedProxyIPv6(t *testing.T) {
 	realIPReq := httptest.NewRequest("GET", "/", nil)
 	realIPReq.Header.Set("X-Real-IP", "198.51.100.88")
 	realIPReq.Header.Set("X-Forwarded-For", "9.9.9.9")
-	if got := clientIPKey(realIPReq); got != "198.51.100.88" {
-		t.Fatalf("expected X-Real-IP to take precedence under TRUST_PROXY=1, got %q", got)
+	if got := clientIPKey(realIPReq); got != "9.9.9.9" {
+		t.Fatalf("expected X-Forwarded-For rightmost to take precedence over spoofable X-Real-IP under TRUST_PROXY=1, got %q", got)
+	}
+	realOnlyReq := httptest.NewRequest("GET", "/", nil)
+	realOnlyReq.Header.Set("X-Real-IP", "198.51.100.88")
+	if got := clientIPKey(realOnlyReq); got != "198.51.100.88" {
+		t.Fatalf("expected X-Real-IP fallback when X-Forwarded-For absent, got %q", got)
 	}
 }
 
@@ -199,5 +206,65 @@ func TestAccountLogoutAllBossReset2FAAndCookieSecure(t *testing.T) {
 	}
 	if afterMgr.TwoFactor || afterMgr.AuthVersion != mgr.AuthVersion+1 {
 		t.Fatalf("expected mgr 2FA disabled & auth_version bumped; got %+v", afterMgr)
+	}
+}
+
+func TestAuthRuneLimitPasswordMaxAndRequireBossMsg(t *testing.T) {
+	pool := platform.NewTestPool(t, migrations.FS)
+	svc := NewService(pool, []byte("test-secret"), ui.MustRenderer(web.TemplatesFS, nil, func() string { return "PourOps" }))
+	mux := http.NewServeMux()
+	svc.RegisterRoutes(mux)
+	ctx := context.Background()
+
+	// 32 个中文字符（96 字节）符合 32 字符限制且允许正常创建和登录。
+	longCJK := strings.Repeat("酿", 32)
+	if _, err := SaveUser(ctx, pool, User{Username: longCJK, Role: RoleManager, Active: true}, "pass1234"); err != nil {
+		t.Fatalf("32 rune CJK username rejected: %v", err)
+	}
+	recCJK := httptest.NewRecorder()
+	mux.ServeHTTP(recCJK, login2FAPost("/admin/login", url.Values{"username": {longCJK}, "password": {"pass1234"}}, "203.0.113.21"))
+	if recCJK.Code != http.StatusSeeOther || login2FACookie(recCJK, SessionCookie) == nil {
+		t.Fatalf("expected 32 rune CJK login success, code=%d", recCJK.Code)
+	}
+
+	// 33 个字符被登录拦截，且超过 1024 字节的密码被创建/改密拒绝。
+	tooLongUser := strings.Repeat("酿", 33)
+	recTooLong := httptest.NewRecorder()
+	mux.ServeHTTP(recTooLong, login2FAPost("/admin/login", url.Values{"username": {tooLongUser}, "password": {"pass1234"}}, "203.0.113.22"))
+	if login2FACookie(recTooLong, SessionCookie) != nil {
+		t.Fatal("33 rune username should not log in")
+	}
+	if _, err := SaveUser(ctx, pool, User{Username: "bigpass", Role: RoleStaff, Active: true}, strings.Repeat("p", 1025)); err == nil {
+		t.Fatal("SaveUser should reject >1024 byte password")
+	}
+
+	mgrSess := login2FACookie(recCJK, SessionCookie)
+	longPW := strings.Repeat("n", 1025)
+	formPW := url.Values{
+		"current_password": {"pass1234"},
+		"new_password":     {longPW},
+		"confirm_password": {longPW},
+	}
+	reqPW := httptest.NewRequest(http.MethodPost, "http://bar.local/account/security/password", strings.NewReader(formPW.Encode()))
+	reqPW.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqPW.AddCookie(mgrSess)
+	recPW := httptest.NewRecorder()
+	mux.ServeHTTP(recPW, reqPW)
+	if recPW.Code != http.StatusOK || !strings.Contains(recPW.Body.String(), "新密码过长") {
+		t.Fatalf("expected 200 error banner 新密码过长 on >1024 byte password change, got %d %q", recPW.Code, recPW.Body.String())
+	}
+	reqStillOK := httptest.NewRequest(http.MethodGet, "http://bar.local/account/security", nil)
+	reqStillOK.AddCookie(mgrSess)
+	if svc.CurrentUser(reqStillOK) == nil {
+		t.Fatal("rejected >1024 byte password change should keep current session valid")
+	}
+
+	recBoss := httptest.NewRecorder()
+	reqBoss := httptest.NewRequest(http.MethodGet, "http://bar.local/admin/users", nil)
+	reqBoss.AddCookie(mgrSess)
+	mux.ServeHTTP(recBoss, reqBoss)
+	_, errMsg := platform.ReadFlashCookies(recBoss.Result().Cookies())
+	if recBoss.Code != http.StatusSeeOther || recBoss.Header().Get("Location") != "/admin/" || errMsg != "只有 BOSS 有权限执行此操作" {
+		t.Fatalf("RequireBoss = %d loc=%q flash=%q", recBoss.Code, recBoss.Header().Get("Location"), errMsg)
 	}
 }

@@ -359,6 +359,9 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 	case len(nw) < 6:
 		s.securityPage(w, r, view, "新密码至少 6 位")
 		return
+	case len(nw) > 1024:
+		s.securityPage(w, r, view, "新密码过长")
+		return
 	case nw != r.FormValue("confirm_password"):
 		s.securityPage(w, r, view, "两次输入的新密码不一致")
 		return
@@ -384,8 +387,13 @@ func (s *Service) AccountChangePassword(w http.ResponseWriter, r *http.Request) 
 	err = tx.QueryRow(ctx,
 		`select password_hash, totp_secret <> '', auth_version from users where id=$1 and active for update`, u.ID).
 		Scan(&hash, &enabled, &version)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "账号状态已变化，请重新登录", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		log.Printf("change password lookup (%d): %v", u.ID, err)
+		http.Error(w, "修改密码暂时不可用，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	view.TwoFactor = enabled
@@ -597,8 +605,13 @@ func (s *Service) AccountEnable2FA(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(ctx,
 		`select auth_version, totp_secret <> '' from users where id=$1 and active for update`, u.ID).
 		Scan(&version, &enabled)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "账号状态已变化，请重新登录", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		log.Printf("enable 2fa lookup (%d): %v", u.ID, err)
+		http.Error(w, "启用两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if enabled || version != u.AuthVersion {
@@ -657,8 +670,13 @@ func (s *Service) AccountDisable2FA(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(ctx,
 		`select password_hash, totp_secret <> '', auth_version from users where id=$1 and active for update`, u.ID).
 		Scan(&hash, &enabled, &version)
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		http.Error(w, "账号状态已变化，请重新登录", http.StatusConflict)
+		return
+	}
+	if err != nil {
+		log.Printf("disable 2fa lookup (%d): %v", u.ID, err)
+		http.Error(w, "关闭两步验证失败，请稍后重试", http.StatusInternalServerError)
 		return
 	}
 	if version != u.AuthVersion {

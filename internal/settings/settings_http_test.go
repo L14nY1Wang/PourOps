@@ -45,21 +45,31 @@ func TestSettingsHTTPHandlerSaveAndTestWebhook(t *testing.T) {
 
 	svc := NewService(store, webhooks, testRenderer())
 
-	// 1. 合法保存
-	form := url.Values{
+	// 1. 合法保存常规与 Webhook 设置
+	genInit := url.Values{
 		"brand":                {"北岸精酿"},
 		"default_sellable_pct": {"85"},
 		"default_margin_pct":   {"55"},
-		"webhook_url":          {"https://example.com/hook"},
-		"webhook_secret":       {"top-secret"},
-		"webhook_events":       {"order.paid", "keg.finished"},
 	}
-	req := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(form.Encode()))
+	reqGenInit := httptest.NewRequest(http.MethodPost, "/admin/settings/general", strings.NewReader(genInit.Encode()))
+	reqGenInit.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recGenInit := httptest.NewRecorder()
+	svc.SaveGeneral(recGenInit, reqGenInit)
+	if recGenInit.Code != http.StatusSeeOther {
+		t.Fatalf("SaveGeneral status = %d, body = %s", recGenInit.Code, recGenInit.Body.String())
+	}
+
+	whInit := url.Values{
+		"webhook_url":    {"https://example.com/hook"},
+		"webhook_secret": {"top-secret"},
+		"webhook_events": {"order.paid", "keg.finished"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/settings/webhook", strings.NewReader(whInit.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
-	svc.Save(rec, req)
+	svc.SaveWebhook(rec, req)
 	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("Save status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("SaveWebhook status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	cfg := store.Get()
 	if cfg.Brand != "北岸精酿" || cfg.DefaultSellablePct != 85 || cfg.DefaultMarginPct != 55 || cfg.WebhookSecret != "top-secret" {
@@ -68,16 +78,13 @@ func TestSettingsHTTPHandlerSaveAndTestWebhook(t *testing.T) {
 
 	// 2. 不重填 secret 时保留现有密钥
 	formKeep := url.Values{
-		"brand":                {"北岸精酿"},
-		"default_sellable_pct": {"82"},
-		"default_margin_pct":   {"52"},
-		"webhook_url":          {"https://example.com/hook"},
-		"webhook_events":       {"order.paid"},
+		"webhook_url":    {"https://example.com/hook"},
+		"webhook_events": {"order.paid"},
 	}
-	reqKeep := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(formKeep.Encode()))
+	reqKeep := httptest.NewRequest(http.MethodPost, "/admin/settings/webhook", strings.NewReader(formKeep.Encode()))
 	reqKeep.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recKeep := httptest.NewRecorder()
-	svc.Save(recKeep, reqKeep)
+	svc.SaveWebhook(recKeep, reqKeep)
 	if store.Get().WebhookSecret != "top-secret" {
 		t.Fatalf("blank secret should keep existing secret, got %q", store.Get().WebhookSecret)
 	}
@@ -95,10 +102,10 @@ func TestSettingsHTTPHandlerSaveAndTestWebhook(t *testing.T) {
 		"default_sellable_pct": {"30"},
 		"default_margin_pct":   {"50"},
 	}
-	reqBad := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(badForm.Encode()))
+	reqBad := httptest.NewRequest(http.MethodPost, "/admin/settings/general", strings.NewReader(badForm.Encode()))
 	reqBad.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recBad := httptest.NewRecorder()
-	svc.Save(recBad, reqBad)
+	svc.SaveGeneral(recBad, reqBad)
 	if recBad.Code != http.StatusBadRequest {
 		t.Fatalf("bad sellable status = %d", recBad.Code)
 	}
@@ -130,21 +137,21 @@ func TestSettingsHTTPCategoryManagement(t *testing.T) {
 		t.Fatalf("duplicate category ipa should redirect with err, got %q", recDup.Header().Get("Location"))
 	}
 
-	// 2. 保存品牌/Webhook 设置不覆盖现有分类
+	// 2. 保存品牌设置不覆盖现有分类
 	saveForm := url.Values{
 		"brand":                {"北岸精酿"},
 		"default_sellable_pct": {"80"},
 		"default_margin_pct":   {"50"},
 	}
-	saveReq := httptest.NewRequest(http.MethodPost, "/admin/settings", strings.NewReader(saveForm.Encode()))
+	saveReq := httptest.NewRequest(http.MethodPost, "/admin/settings/general", strings.NewReader(saveForm.Encode()))
 	saveReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	recSave := httptest.NewRecorder()
-	svc.Save(recSave, saveReq)
+	svc.SaveGeneral(recSave, saveReq)
 	if recSave.Code != http.StatusSeeOther {
-		t.Fatalf("Save status = %d", recSave.Code)
+		t.Fatalf("SaveGeneral status = %d", recSave.Code)
 	}
 	if cats := store.BeerCategories(); cats[len(cats)-1] != "赛松" {
-		t.Fatalf("Save should preserve custom category 赛松, got %v", cats)
+		t.Fatalf("SaveGeneral should preserve custom category 赛松, got %v", cats)
 	}
 
 	// 3. 删除分类与至少保留 1 个约束
