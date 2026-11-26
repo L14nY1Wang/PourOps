@@ -324,12 +324,12 @@ func LoadSalesInsights(ctx context.Context, tx pgx.Tx, start, end time.Time) (Sa
 			       (array_agg(x.name order by x.created_at desc, x.sale_id desc, x.line_id desc))[1] as name,
 			       '件'::text as unit,
 			       sum(x.qty)::bigint as qty,
-			       sum(x.price_cents::bigint * x.qty)::bigint as revenue,
+			       sum(coalesce(x.net_cents, x.price_cents::bigint * x.qty))::bigint as revenue,
 			       sum(x.cost_cents::bigint * x.qty)::bigint as cost
 			from (
 				select case when i.item_id is null then 'name:' || i.name else 'item:' || i.item_id::text end as grp,
 				       i.name, s.created_at, s.id as sale_id, i.id as line_id,
-				       i.qty, i.price_cents, i.cost_cents
+				       i.qty, i.price_cents, i.cost_cents, i.net_cents
 				from retail_sale_items i
 				join retail_sales s on s.id = i.sale_id
 				where s.created_at >= $1 and s.created_at < $2

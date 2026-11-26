@@ -15,13 +15,16 @@ import (
 type EventType string
 
 const (
-	EventScreenChanged  EventType = "screen.changed"
-	EventBeerPurchased  EventType = "beer.purchased"
-	EventBeerTapped     EventType = "beer.tapped"
-	EventKegFinished    EventType = "keg.finished"
-	EventOrderPaid      EventType = "order.paid"
-	EventRetailLowStock EventType = "retail.low_stock"
-	EventWebhookTest    EventType = "webhook.test"
+	EventScreenChanged   EventType = "screen.changed"
+	EventBeerPurchased   EventType = "beer.purchased"
+	EventBeerTapped      EventType = "beer.tapped"
+	EventKegFinished     EventType = "keg.finished"
+	EventOrderPaid       EventType = "order.paid"
+	EventRetailLowStock  EventType = "retail.low_stock"
+	EventMemberRecharged EventType = "member.recharged"
+	EventPassPurchased   EventType = "pass.purchased"
+	EventPassRedeemed    EventType = "pass.redeemed"
+	EventWebhookTest     EventType = "webhook.test"
 )
 
 // Event 是领域事件的标准封装，所有敏感业务由调用方在事务提交后发布。

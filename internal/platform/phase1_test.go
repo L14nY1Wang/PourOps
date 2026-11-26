@@ -32,8 +32,8 @@ func TestMigrateExactCountAndChecksumVerification(t *testing.T) {
 			wantCount++
 		}
 	}
-	if wantCount != 13 || wantName == "" {
-		t.Fatalf("expected 13 sql migrations, got %d", wantCount)
+	if wantCount != 14 || wantName == "" {
+		t.Fatalf("expected 14 sql migrations, got %d", wantCount)
 	}
 
 	var gotCount int

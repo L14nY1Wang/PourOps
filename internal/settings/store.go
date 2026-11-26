@@ -15,17 +15,81 @@ import (
 )
 
 const (
-	DefaultSellablePct = 80
-	DefaultMarginPct   = 50
-	MinSellablePct     = 50
-	MaxSellablePct     = 100
-	MinMarginPct       = 10
-	MaxMarginPct       = 85
-	DefaultBarCount    = 3
-	DefaultTableCount  = 4
-	MinFixedSpots      = 0
-	MaxFixedSpots      = 50
+	DefaultSellablePct     = 80
+	DefaultMarginPct       = 50
+	MinSellablePct         = 50
+	MaxSellablePct         = 100
+	MinMarginPct           = 10
+	MaxMarginPct           = 85
+	DefaultBarCount        = 3
+	DefaultTableCount      = 4
+	MinFixedSpots          = 0
+	MaxFixedSpots          = 50
+	DefaultPointsPerYuan   = 1
+	DefaultPointsRedeem    = 100
+	DefaultPointsMaxPct    = 50
+	MaxPointsPerYuan       = 1000
+	MaxPointsRedeemRate    = 100000
+	MaxRechargePresetCount = 12
 )
+
+// RechargePreset 定义会员快捷充值档位（实充金额与赠送金额，均以分为单位）。
+type RechargePreset struct {
+	PayCents   int `json:"pay_cents"`
+	BonusCents int `json:"bonus_cents"`
+}
+
+func (p RechargePreset) PayText() string    { return platform.PriceText(p.PayCents) }
+func (p RechargePreset) BonusText() string  { return platform.PriceText(p.BonusCents) }
+func (p RechargePreset) PayInput() string   { return platform.MoneyInput(p.PayCents) }
+func (p RechargePreset) BonusInput() string { return platform.MoneyInput(p.BonusCents) }
+
+// LoyaltyConfig 控制会员积分获取、积分抵现比例与快捷充值档位。
+type LoyaltyConfig struct {
+	PointsPerYuan    int
+	PointsRedeemRate int // 多少积分抵 1 元（100 分）；0 表示关闭积分抵现
+	PointsMaxPct     int // 单笔最多可用积分抵扣百分比（0-100）
+	RechargePresets  []RechargePreset
+}
+
+func defaultRechargePresetsCopy() []RechargePreset {
+	return []RechargePreset{
+		{PayCents: 30000, BonusCents: 2000},
+		{PayCents: 50000, BonusCents: 5000},
+		{PayCents: 100000, BonusCents: 15000},
+	}
+}
+
+func DefaultLoyaltyConfig() LoyaltyConfig {
+	return LoyaltyConfig{
+		PointsPerYuan:    DefaultPointsPerYuan,
+		PointsRedeemRate: DefaultPointsRedeem,
+		PointsMaxPct:     DefaultPointsMaxPct,
+		RechargePresets:  defaultRechargePresetsCopy(),
+	}
+}
+
+// Normalized 返回合法范围内且去重排序后的会员积分与充值参数。
+func (c LoyaltyConfig) Normalized() LoyaltyConfig {
+	c.PointsPerYuan = platform.ClampRange(c.PointsPerYuan, 0, MaxPointsPerYuan)
+	c.PointsRedeemRate = platform.ClampRange(c.PointsRedeemRate, 0, MaxPointsRedeemRate)
+	c.PointsMaxPct = platform.ClampRange(c.PointsMaxPct, 0, 100)
+	clean := make([]RechargePreset, 0, len(c.RechargePresets))
+	for _, p := range c.RechargePresets {
+		if p.PayCents <= 0 || p.BonusCents < 0 {
+			continue
+		}
+		clean = append(clean, p)
+		if len(clean) >= MaxRechargePresetCount {
+			break
+		}
+	}
+	if len(clean) == 0 {
+		clean = defaultRechargePresetsCopy()
+	}
+	c.RechargePresets = clean
+	return c
+}
 
 // PricingConfig 控制桶装可售出酒率与目标毛利率（默认 80% / 50%）。
 type PricingConfig struct {
@@ -55,7 +119,7 @@ func (c PricingConfig) Normalized() PricingConfig {
 	return c
 }
 
-// StoreSettings 保存运营参数、点餐台固定台位数量、酒款分类与 Webhook 出站通知设置。
+// StoreSettings 保存运营参数、点餐台固定台位数量、酒款分类、会员积分配置与 Webhook 出站通知设置。
 type StoreSettings struct {
 	Brand              string
 	DefaultSellablePct int
@@ -66,6 +130,7 @@ type StoreSettings struct {
 	WebhookURL         string
 	WebhookSecret      string
 	WebhookEvents      []string
+	Loyalty            LoyaltyConfig
 }
 
 func (s StoreSettings) Pricing() PricingConfig {
@@ -104,6 +169,7 @@ func NewSettingsStore(pool *pgxpool.Pool, defaultBrand string) *SettingsStore {
 			TableCount:         DefaultTableCount,
 			BeerCategories:     defaultCategoriesCopy(),
 			WebhookEvents:      []string{},
+			Loyalty:            DefaultLoyaltyConfig(),
 		},
 	}
 }
@@ -117,6 +183,7 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 		TableCount:         DefaultTableCount,
 		BeerCategories:     defaultCategoriesCopy(),
 		WebhookEvents:      []string{},
+		Loyalty:            DefaultLoyaltyConfig(),
 	}
 	if s.pool == nil {
 		s.mu.Lock()
@@ -179,8 +246,26 @@ func (s *SettingsStore) Refresh(ctx context.Context) error {
 				}
 			}
 			base.WebhookEvents = clean
+		case "loyalty_points_per_yuan":
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 && n <= MaxPointsPerYuan {
+				base.Loyalty.PointsPerYuan = n
+			}
+		case "loyalty_points_redeem_rate":
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 && n <= MaxPointsRedeemRate {
+				base.Loyalty.PointsRedeemRate = n
+			}
+		case "loyalty_points_max_pct":
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 && n <= 100 {
+				base.Loyalty.PointsMaxPct = n
+			}
+		case "loyalty_recharge_presets":
+			var presets []RechargePreset
+			if err := json.Unmarshal([]byte(v), &presets); err == nil {
+				base.Loyalty.RechargePresets = presets
+			}
 		}
 	}
+	base.Loyalty = base.Loyalty.Normalized()
 	if err := rows.Err(); err != nil {
 		return err
 	}
@@ -201,7 +286,53 @@ func (s *SettingsStore) Get() StoreSettings {
 	} else {
 		cp.BeerCategories = defaultCategoriesCopy()
 	}
+	cp.Loyalty = s.cur.Loyalty.Normalized()
+	cp.Loyalty.RechargePresets = slices.Clone(cp.Loyalty.RechargePresets)
 	return cp
+}
+
+func (s *SettingsStore) Loyalty() LoyaltyConfig {
+	return s.Get().Loyalty
+}
+
+func (s *SettingsStore) SaveLoyalty(ctx context.Context, cfg LoyaltyConfig) (LoyaltyConfig, error) {
+	if cfg.PointsPerYuan < 0 || cfg.PointsPerYuan > MaxPointsPerYuan {
+		return LoyaltyConfig{}, platform.UserErrf("每元攒积分需在 0 到 %d 之间", MaxPointsPerYuan)
+	}
+	if cfg.PointsRedeemRate < 0 || cfg.PointsRedeemRate > MaxPointsRedeemRate {
+		return LoyaltyConfig{}, platform.UserErrf("抵现积分汇率需在 0 到 %d 之间", MaxPointsRedeemRate)
+	}
+	if cfg.PointsMaxPct < 0 || cfg.PointsMaxPct > 100 {
+		return LoyaltyConfig{}, platform.UserErr("单笔积分最高抵扣比例需在 0% 到 100% 之间")
+	}
+	for _, p := range cfg.RechargePresets {
+		if p.PayCents <= 0 || p.BonusCents < 0 {
+			return LoyaltyConfig{}, platform.UserErr("充值档位的实充金额必须大于 0，赠金不能为负")
+		}
+	}
+	norm := cfg.Normalized()
+	rawPresets, err := json.Marshal(norm.RechargePresets)
+	if err != nil {
+		return LoyaltyConfig{}, err
+	}
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if err := s.upsertPairs(ctx, map[string]string{
+		"loyalty_points_per_yuan":    strconv.Itoa(norm.PointsPerYuan),
+		"loyalty_points_redeem_rate": strconv.Itoa(norm.PointsRedeemRate),
+		"loyalty_points_max_pct":     strconv.Itoa(norm.PointsMaxPct),
+		"loyalty_recharge_presets":   string(rawPresets),
+	}); err != nil {
+		return LoyaltyConfig{}, err
+	}
+
+	s.mu.Lock()
+	s.cur.Loyalty = norm
+	s.cur.Loyalty.RechargePresets = slices.Clone(norm.RechargePresets)
+	s.mu.Unlock()
+	return s.Loyalty(), nil
 }
 
 func (s *SettingsStore) Pricing() PricingConfig {

@@ -15,7 +15,9 @@ import (
 
 	"pourops/internal/catalog"
 	"pourops/internal/inventory"
+	"pourops/internal/loyalty"
 	"pourops/internal/platform"
+	"pourops/internal/settings"
 )
 
 // ---------- 台位 ----------
@@ -258,17 +260,27 @@ func EnsureOrder(ctx context.Context, pool *pgxpool.Pool, key string) (int64, er
 // ---------- 账单 ----------
 
 type OrderItem struct {
-	ID        int64
-	Kind      string // beer | retail
-	Name      string
-	UnitCents int
-	Qty       int
-	ML        int
+	ID              int64
+	Kind            string // beer | retail
+	Name            string
+	UnitCents       int
+	Qty             int
+	ML              int
+	DiscountCents   int
+	PaidCents       *int
+	PassRedeemedQty int
 }
 
-func (i OrderItem) Amount() int        { return i.UnitCents * i.Qty }
-func (i OrderItem) AmountText() string { return platform.PriceText(i.Amount()) }
-func (i OrderItem) QtyText() string    { return fmt.Sprintf("×%d", i.Qty) }
+func (i OrderItem) Amount() int { return i.UnitCents * i.Qty }
+func (i OrderItem) NetAmount() int {
+	if i.PaidCents != nil {
+		return *i.PaidCents
+	}
+	return i.Amount()
+}
+func (i OrderItem) AmountText() string    { return platform.PriceText(i.Amount()) }
+func (i OrderItem) NetAmountText() string { return platform.PriceText(i.NetAmount()) }
+func (i OrderItem) QtyText() string       { return fmt.Sprintf("×%d", i.Qty) }
 func (i OrderItem) Detail() string {
 	if i.Kind == "beer" && i.ML > 0 {
 		return fmt.Sprintf("%dml/杯 · %s", i.ML, platform.PriceText(i.UnitCents))
@@ -277,13 +289,15 @@ func (i OrderItem) Detail() string {
 }
 
 type OrderView struct {
-	ID     int64
-	Spot   string
-	Label  string
-	Closed bool
-	Unpaid []OrderItem
-	Paid   []OrderItem
-	Total  int
+	ID       int64
+	Spot     string
+	Label    string
+	Closed   bool
+	MemberID *int64
+	Member   *loyalty.MemberSnapshot
+	Unpaid   []OrderItem
+	Paid     []OrderItem
+	Total    int
 }
 
 // ItemGroup 把同一款酒的不同杯型并在一条账单里显示，钱各自按杯型算。
@@ -321,13 +335,18 @@ func (o OrderView) TotalText() string { return platform.PriceText(o.Total) }
 
 func LoadOrder(ctx context.Context, pool *pgxpool.Pool, id int64) (OrderView, error) {
 	var o OrderView
-	err := pool.QueryRow(ctx, `select id, spot, closed_at is not null from orders where id=$1`, id).
-		Scan(&o.ID, &o.Spot, &o.Closed)
+	err := pool.QueryRow(ctx, `select id, spot, closed_at is not null, member_id from orders where id=$1`, id).
+		Scan(&o.ID, &o.Spot, &o.Closed, &o.MemberID)
 	o.Label = SpotLabel(o.Spot)
 	if err != nil {
 		return o, err
 	}
-	rows, err := pool.Query(ctx, `select id, kind, name, unit_cents, qty, ml, paid_at is null
+	if o.MemberID != nil && *o.MemberID > 0 {
+		if snap, merr := loyalty.LoadCheckoutMemberSnapshot(ctx, pool, *o.MemberID, 0, time.Now(), false); merr == nil {
+			o.Member = snap
+		}
+	}
+	rows, err := pool.Query(ctx, `select id, kind, name, unit_cents, qty, ml, paid_at is null, discount_cents, paid_cents, pass_redeemed_qty
 		from order_items where order_id=$1 order by id`, id)
 	if err != nil {
 		return o, err
@@ -336,7 +355,8 @@ func LoadOrder(ctx context.Context, pool *pgxpool.Pool, id int64) (OrderView, er
 	for rows.Next() {
 		var it OrderItem
 		var unpaid bool
-		if err := rows.Scan(&it.ID, &it.Kind, &it.Name, &it.UnitCents, &it.Qty, &it.ML, &unpaid); err != nil {
+		if err := rows.Scan(&it.ID, &it.Kind, &it.Name, &it.UnitCents, &it.Qty, &it.ML, &unpaid,
+			&it.DiscountCents, &it.PaidCents, &it.PassRedeemedQty); err != nil {
 			return o, err
 		}
 		if unpaid {
@@ -347,6 +367,39 @@ func LoadOrder(ctx context.Context, pool *pgxpool.Pool, id int64) (OrderView, er
 		}
 	}
 	return o, rows.Err()
+}
+
+// BindOrderMember 给未结台位账单绑定或解绑默认会员（memberID <= 0 表示解绑）。
+func BindOrderMember(ctx context.Context, pool *pgxpool.Pool, orderID, memberID int64) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockOpenOrder(ctx, tx, orderID); err != nil {
+		return err
+	}
+	if memberID <= 0 {
+		if _, err := tx.Exec(ctx, `update orders set member_id = null where id=$1`, orderID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	var active bool
+	err = tx.QueryRow(ctx, `select active from members where id=$1`, memberID).Scan(&active)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return platform.UserErr("找不到这个会员")
+	}
+	if err != nil {
+		return err
+	}
+	if !active {
+		return platform.UserErr("该会员已停用，无法绑定")
+	}
+	if _, err := tx.Exec(ctx, `update orders set member_id = $2 where id=$1`, orderID, memberID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // lockOpenOrder 锁住未结账单：加购、改量、结账都排这同一把行锁，返回台位 key。
@@ -557,36 +610,119 @@ func MoreOrderItem(ctx context.Context, pool *pgxpool.Pool, orderID, itemID int6
 // ---------- 结账 ----------
 
 type Payment struct {
-	ID      int64
-	OrderID int64
-	Label   string
-	Amount  int
-	Items   int
+	ID                  int64
+	OrderID             int64
+	Label               string
+	Amount              int
+	GrossCents          int
+	DiscountCents       int
+	PassDiscountCents   int
+	MemberDiscountCents int
+	ManualDiscountCents int
+	PointsDiscountCents int
+	BalancePaidCents    int
+	ExternalPaidCents   int
+	Items               int
+	Method              string
+	DiscountLabel       string
+	DiscountNote        string
+	MemberID            *int64
+	MemberName          string
+	MemberPhone         string
+	MemberBalanceAfter  *int
+	PointsSpent         int
+	PointsEarned        int
+	PassCupsUsed        int
 }
 
 func (p Payment) AmountText() string { return platform.PriceText(p.Amount) }
+func (p Payment) GrossText() string {
+	if p.GrossCents <= 0 && p.Amount > 0 {
+		return platform.PriceText(p.Amount)
+	}
+	return platform.PriceText(p.GrossCents)
+}
+func (p Payment) DiscountText() string     { return platform.PriceText(p.DiscountCents) }
+func (p Payment) BalancePaidText() string  { return platform.PriceText(p.BalancePaidCents) }
+func (p Payment) ExternalPaidText() string { return platform.PriceText(p.ExternalPaidCents) }
+func (p Payment) MemberBalanceText() string {
+	if p.MemberBalanceAfter == nil {
+		return "—"
+	}
+	return platform.PriceText(*p.MemberBalanceAfter)
+}
+func (p Payment) HasDiscount() bool { return p.DiscountCents > 0 || p.DiscountLabel != "" }
+func (p Payment) MethodText() string {
+	return PayMethodLabel(p.Method)
+}
+
+func PayMethodLabel(m string) string {
+	switch strings.ToLower(strings.TrimSpace(m)) {
+	case "cash":
+		return "现金"
+	case "card":
+		return "刷卡"
+	case "balance":
+		return "会员储值"
+	case "pass":
+		return "月卡抵扣"
+	case "comp":
+		return "免单"
+	case "other":
+		return "其他"
+	default:
+		return "扫码"
+	}
+}
 
 type PayOptions struct {
 	Method             string
 	IdempotencyKey     string
 	ExpectedTotalCents *int
+	MemberID           *int64 // nil 表示沿用订单默认会员；<=0 表示本次按散客结账
+	MemberPassID       *int64
+	UsePass            bool
+	PassCupsRequested  int
+	DiscountRuleID     *int64
+	CustomDiscount     *loyalty.CustomDiscount
+	DiscountNote       string
+	UsePoints          bool
+	UseBalance         bool
+	ActorRole          string
+	LoyaltyCfg         *settings.LoyaltyConfig
 }
 
 // PayResult 是结账事务提交后的完整摘要，供小票打印扩展与领域事件广播使用。
 type PayResult struct {
-	PaymentID     int64
-	OrderID       int64
-	Spot          string
-	SpotLabel     string
-	AmountCents   int
-	ItemsCount    int
-	Closed        bool
-	Method        string
-	SkippedCount  int
-	OverSoldCount int
-	Replayed      bool
-	Lines         []ReceiptLine
-	LowStock      []inventory.LowStockItem
+	PaymentID           int64
+	OrderID             int64
+	Spot                string
+	SpotLabel           string
+	GrossCents          int
+	DiscountCents       int
+	AmountCents         int
+	PassDiscountCents   int
+	MemberDiscountCents int
+	ManualDiscountCents int
+	PointsDiscountCents int
+	BalancePaidCents    int
+	ExternalPaidCents   int
+	DiscountLabel       string
+	MemberID            *int64
+	MemberName          string
+	MemberPhone         string
+	MemberPassID        *int64
+	PassCupsUsed        int
+	PointsSpent         int
+	PointsEarned        int
+	ItemsCount          int
+	Closed              bool
+	Method              string
+	SkippedCount        int
+	OverSoldCount       int
+	Replayed            bool
+	Lines               []ReceiptLine
+	LowStock            []inventory.LowStockItem
 }
 
 func normalizePayMethod(m string) string {
@@ -597,11 +733,141 @@ func normalizePayMethod(m string) string {
 		return "cash"
 	case "card":
 		return "card"
+	case "balance":
+		return "balance"
+	case "pass":
+		return "pass"
+	case "comp":
+		return "comp"
 	case "other":
 		return "other"
 	default:
 		return "qr"
 	}
+}
+
+func uniqPositiveIDs(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func effectiveLoyaltyConfig(cfg *settings.LoyaltyConfig) settings.LoyaltyConfig {
+	if cfg != nil {
+		return cfg.Normalized()
+	}
+	return settings.DefaultLoyaltyConfig()
+}
+
+// PreviewCheckout 在只读快照内试算勾选商品的折扣、月卡、积分与储值拆账结果（不锁表不落库）。
+func PreviewCheckout(ctx context.Context, pool *pgxpool.Pool, orderID int64, ids []int64, opts PayOptions) (loyalty.PricingResult, *loyalty.MemberSnapshot, error) {
+	uniqIDs := uniqPositiveIDs(ids)
+	if len(uniqIDs) == 0 {
+		return loyalty.PricingResult{}, nil, platform.UserErr("先勾选要结账的商品")
+	}
+
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return loyalty.PricingResult{}, nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var closedAt *time.Time
+	var orderMemberID *int64
+	err = tx.QueryRow(ctx, `select closed_at, member_id from orders where id=$1`, orderID).Scan(&closedAt, &orderMemberID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return loyalty.PricingResult{}, nil, platform.UserErr("找不到这张账单")
+	}
+	if err != nil {
+		return loyalty.PricingResult{}, nil, err
+	}
+	if closedAt != nil {
+		return loyalty.PricingResult{}, nil, platform.UserErr("这张单已经结了")
+	}
+
+	rows, err := tx.Query(ctx, `select id, kind, name, unit_cents, qty, ml
+		from order_items
+		where order_id=$1 and paid_at is null and id = any($2::bigint[])
+		order by id`, orderID, uniqIDs)
+	if err != nil {
+		return loyalty.PricingResult{}, nil, err
+	}
+	var lineInputs []loyalty.OrderLineInput
+	for rows.Next() {
+		var l loyalty.OrderLineInput
+		if err := rows.Scan(&l.ItemID, &l.Kind, &l.Name, &l.UnitCents, &l.Qty, &l.ML); err != nil {
+			rows.Close()
+			return loyalty.PricingResult{}, nil, err
+		}
+		lineInputs = append(lineInputs, l)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return loyalty.PricingResult{}, nil, err
+	}
+	if len(lineInputs) == 0 {
+		return loyalty.PricingResult{}, nil, platform.UserErr("这些商品已经结过账了")
+	}
+
+	var effMemberID int64
+	if opts.MemberID != nil {
+		if *opts.MemberID > 0 {
+			effMemberID = *opts.MemberID
+		}
+	} else if orderMemberID != nil && *orderMemberID > 0 {
+		effMemberID = *orderMemberID
+	}
+
+	var passID int64
+	if opts.MemberPassID != nil && *opts.MemberPassID > 0 {
+		passID = *opts.MemberPassID
+	}
+	memberSnap, err := loyalty.LoadCheckoutMemberSnapshot(ctx, tx, effMemberID, passID, time.Now(), false)
+	if err != nil {
+		return loyalty.PricingResult{}, nil, err
+	}
+
+	var rule *loyalty.DiscountRule
+	if opts.DiscountRuleID != nil && *opts.DiscountRuleID > 0 {
+		r, rerr := loyalty.GetDiscountRule(ctx, tx, *opts.DiscountRuleID)
+		if errors.Is(rerr, pgx.ErrNoRows) {
+			return loyalty.PricingResult{}, nil, platform.UserErr("找不到所选的折扣规则")
+		}
+		if rerr != nil {
+			return loyalty.PricingResult{}, nil, rerr
+		}
+		rule = &r
+	}
+
+	role := strings.TrimSpace(opts.ActorRole)
+	if role == "" {
+		role = platform.ActorRole(ctx)
+	}
+
+	res, err := loyalty.CalculateCheckout(loyalty.PricingRequest{
+		Lines:             lineInputs,
+		Member:            memberSnap,
+		UsePass:           opts.UsePass,
+		PassCupsRequested: opts.PassCupsRequested,
+		Rule:              rule,
+		Custom:            opts.CustomDiscount,
+		DiscountNote:      opts.DiscountNote,
+		UsePoints:         opts.UsePoints,
+		UseBalance:        opts.UseBalance,
+		PayMethod:         normalizePayMethod(opts.Method),
+		ActorRole:         role,
+		LoyaltyCfg:        effectiveLoyaltyConfig(opts.LoyaltyCfg),
+	})
+	if err != nil {
+		return loyalty.PricingResult{}, memberSnap, err
+	}
+	return res, memberSnap, tx.Commit(ctx)
 }
 
 func PayItems(ctx context.Context, pool *pgxpool.Pool, orderID int64, ids []int64) (int64, error) {
@@ -614,9 +880,11 @@ func PayItemsWithGateway(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 	return PayItemsWithOptions(ctx, pool, gw, orderID, ids, PayOptions{})
 }
 
-// PayItemsWithOptions 支持幂等键、支付方式、应收金额校验与跨桶/零售确定性升序加锁，彻底消除死锁与重复收款。
+// PayItemsWithOptions 支持幂等键、会员/月卡/折扣/积分/储值分账、应收金额校验与全局确定性加锁，消除死锁与重复收款。
+// 全局行锁顺序：orders -> order_items(ASC) -> members -> member_passes -> kegs(ASC) -> retail_items(ASC)。
 func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGateway, orderID int64, ids []int64, opts PayOptions) (PayResult, error) {
-	if len(ids) == 0 {
+	uniqIDs := uniqPositiveIDs(ids)
+	if len(uniqIDs) == 0 {
 		return PayResult{}, platform.UserErr("先勾选要结账的商品")
 	}
 	if gw == nil {
@@ -628,18 +896,6 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		idemKey = idemKey[:128]
 	}
 
-	seenIDs := make(map[int64]bool, len(ids))
-	uniqIDs := make([]int64, 0, len(ids))
-	for _, id := range ids {
-		if id > 0 && !seenIDs[id] {
-			seenIDs[id] = true
-			uniqIDs = append(uniqIDs, id)
-		}
-	}
-	if len(uniqIDs) == 0 {
-		return PayResult{}, platform.UserErr("先勾选要结账的商品")
-	}
-
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return PayResult{}, err
@@ -648,7 +904,9 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 
 	var spotKey string
 	var closedAt *time.Time
-	err = tx.QueryRow(ctx, `select spot, closed_at from orders where id=$1 for update`, orderID).Scan(&spotKey, &closedAt)
+	var orderMemberID *int64
+	err = tx.QueryRow(ctx, `select spot, closed_at, member_id from orders where id=$1 for update`, orderID).
+		Scan(&spotKey, &closedAt, &orderMemberID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PayResult{}, platform.UserErr("找不到这张账单")
 	}
@@ -658,38 +916,36 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 	spotLbl := SpotLabel(spotKey)
 
 	if idemKey != "" {
-		var existingPayID int64
-		var existingAmt, existingCnt int
-		var existingMethod string
-		err := tx.QueryRow(ctx, `select id, amount_cents, items_count, method
+		var existing PayResult
+		existing.OrderID = orderID
+		existing.Spot = spotKey
+		existing.SpotLabel = spotLbl
+		existing.Closed = closedAt != nil
+		existing.Replayed = true
+		err := tx.QueryRow(ctx, `select id, amount_cents, coalesce(gross_cents, amount_cents), discount_cents,
+			pass_discount_cents, member_discount_cents, manual_discount_cents, points_discount_cents,
+			balance_paid_cents, coalesce(external_paid_cents, amount_cents), discount_label,
+			member_id, member_pass_id, points_spent, points_earned, items_count, method
 			from payments where order_id=$1 and idempotency_key=$2`, orderID, idemKey).
-			Scan(&existingPayID, &existingAmt, &existingCnt, &existingMethod)
+			Scan(&existing.PaymentID, &existing.AmountCents, &existing.GrossCents, &existing.DiscountCents,
+				&existing.PassDiscountCents, &existing.MemberDiscountCents, &existing.ManualDiscountCents, &existing.PointsDiscountCents,
+				&existing.BalancePaidCents, &existing.ExternalPaidCents, &existing.DiscountLabel,
+				&existing.MemberID, &existing.MemberPassID, &existing.PointsSpent, &existing.PointsEarned,
+				&existing.ItemsCount, &existing.Method)
 		if err == nil {
-			if len(uniqIDs) > 0 {
-				var hasSelectedUnpaid bool
-				if uerr := tx.QueryRow(ctx, `select exists(
-					select 1 from order_items where order_id=$1 and paid_at is null and id = any($2::bigint[])
-				)`, orderID, uniqIDs).Scan(&hasSelectedUnpaid); uerr != nil {
-					return PayResult{}, uerr
-				}
-				if hasSelectedUnpaid {
-					return PayResult{}, platform.UserErr("页面状态已过期，请刷新账单后再结账")
-				}
+			var hasSelectedUnpaid bool
+			if uerr := tx.QueryRow(ctx, `select exists(
+				select 1 from order_items where order_id=$1 and paid_at is null and id = any($2::bigint[])
+			)`, orderID, uniqIDs).Scan(&hasSelectedUnpaid); uerr != nil {
+				return PayResult{}, uerr
+			}
+			if hasSelectedUnpaid {
+				return PayResult{}, platform.UserErr("页面状态已过期，请刷新账单后再结账")
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return PayResult{}, err
 			}
-			return PayResult{
-				PaymentID:   existingPayID,
-				OrderID:     orderID,
-				Spot:        spotKey,
-				SpotLabel:   spotLbl,
-				AmountCents: existingAmt,
-				ItemsCount:  existingCnt,
-				Closed:      closedAt != nil,
-				Method:      existingMethod,
-				Replayed:    true,
-			}, nil
+			return existing, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return PayResult{}, err
@@ -736,15 +992,96 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		return PayResult{}, err
 	}
 
-	total, count := 0, 0
+	// 确定本次结账绑定的会员（优先本次显式传参，否则沿用订单默认会员）并锁住 members -> member_passes。
+	var effMemberID int64
+	if opts.MemberID != nil {
+		if *opts.MemberID > 0 {
+			effMemberID = *opts.MemberID
+		}
+	} else if orderMemberID != nil && *orderMemberID > 0 {
+		effMemberID = *orderMemberID
+	}
+	var passID int64
+	if opts.MemberPassID != nil && *opts.MemberPassID > 0 {
+		passID = *opts.MemberPassID
+	}
+	now := time.Now()
+	memberSnap, err := loyalty.LoadCheckoutMemberSnapshot(ctx, tx, effMemberID, passID, now, true)
+	if err != nil {
+		return PayResult{}, err
+	}
+
+	var rule *loyalty.DiscountRule
+	if opts.DiscountRuleID != nil && *opts.DiscountRuleID > 0 {
+		r, rerr := loyalty.GetDiscountRule(ctx, tx, *opts.DiscountRuleID)
+		if errors.Is(rerr, pgx.ErrNoRows) {
+			return PayResult{}, platform.UserErr("找不到所选的折扣规则")
+		}
+		if rerr != nil {
+			return PayResult{}, rerr
+		}
+		rule = &r
+	}
+
+	role := strings.TrimSpace(opts.ActorRole)
+	if role == "" {
+		role = platform.ActorRole(ctx)
+	}
+
+	lineInputs := make([]loyalty.OrderLineInput, len(lines))
+	for i, l := range lines {
+		lineInputs[i] = loyalty.OrderLineInput{
+			ItemID:    l.id,
+			Kind:      l.kind,
+			Name:      l.name,
+			UnitCents: l.unit,
+			Qty:       l.qty,
+			ML:        l.ml,
+		}
+	}
+	pricing, err := loyalty.CalculateCheckout(loyalty.PricingRequest{
+		Lines:             lineInputs,
+		Member:            memberSnap,
+		UsePass:           opts.UsePass,
+		PassCupsRequested: opts.PassCupsRequested,
+		Rule:              rule,
+		Custom:            opts.CustomDiscount,
+		DiscountNote:      opts.DiscountNote,
+		UsePoints:         opts.UsePoints,
+		UseBalance:        opts.UseBalance,
+		PayMethod:         method,
+		ActorRole:         role,
+		LoyaltyCfg:        effectiveLoyaltyConfig(opts.LoyaltyCfg),
+	})
+	if err != nil {
+		return PayResult{}, err
+	}
+	if opts.ExpectedTotalCents != nil && *opts.ExpectedTotalCents != pricing.AmountCents {
+		return PayResult{}, platform.UserErr("账单金额已变动，请刷新核对后再收款")
+	}
+
+	// 若 0 元全免或全额储值扣款，自动修正更准确的支付渠道标记（不强改用户选定的现金/扫码/刷卡除非本来就是 0 元月卡/免单）
+	if pricing.AmountCents == 0 && method == "qr" {
+		if pricing.PassCupsUsed > 0 && pricing.ManualDiscountCents == 0 {
+			method = "pass"
+		} else if rule != nil && rule.Kind == "comp" {
+			method = "comp"
+		}
+	}
+
+	count := 0
 	lineIDs := make([]int64, 0, len(lines))
+	lineDiscs := make([]int, 0, len(lines))
+	linePaids := make([]int, 0, len(lines))
+	linePassQtys := make([]int, 0, len(lines))
 	receiptLines := make([]ReceiptLine, 0, len(lines))
 	var retail []inventory.SaleLine
 	kegLockMap := make(map[int64]bool)
-	retailLockMap := make(map[int64]bool)
-	var kegLockIDs, retailLockIDs []int64
+	var kegLockIDs []int64
 
-	for _, l := range lines {
+	for i, l := range lines {
+		lp := pricing.Lines[i]
+		netCopy := lp.PaidCents
 		switch l.kind {
 		case "beer":
 			if !kegLockMap[l.refID] {
@@ -752,18 +1089,18 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 				kegLockIDs = append(kegLockIDs, l.refID)
 			}
 		case "retail":
-			if !retailLockMap[l.refID] {
-				retailLockMap[l.refID] = true
-				retailLockIDs = append(retailLockIDs, l.refID)
-			}
 			retail = append(retail, inventory.SaleLine{
-				Item: inventory.RetailItem{ID: l.refID, Name: l.name, PriceCents: l.unit},
-				Qty:  l.qty,
+				Item:     inventory.RetailItem{ID: l.refID, Name: l.name, PriceCents: l.unit},
+				Qty:      l.qty,
+				NetCents: &netCopy,
 			})
 		default:
 			return PayResult{}, platform.UserErr("账单里有不认识的商品")
 		}
 		lineIDs = append(lineIDs, l.id)
+		lineDiscs = append(lineDiscs, lp.DiscountCents)
+		linePaids = append(linePaids, lp.PaidCents)
+		linePassQtys = append(linePassQtys, lp.PassRedeemedQty)
 		receiptLines = append(receiptLines, ReceiptLine{
 			Name:      l.name,
 			Kind:      l.kind,
@@ -771,11 +1108,7 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 			Qty:       l.qty,
 			UnitCents: l.unit,
 		})
-		total += l.unit * l.qty
 		count += l.qty
-	}
-	if opts.ExpectedTotalCents != nil && *opts.ExpectedTotalCents != total {
-		return PayResult{}, platform.UserErr("账单金额已变动，请刷新核对后再收款")
 	}
 
 	// 按固定顺序先锁所有涉及的酒桶，零售 SKU 在 SellRetailTx 内按 ID 升序统一加锁。
@@ -785,10 +1118,14 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		return PayResult{}, err
 	}
 
-	for _, l := range lines {
+	for i, l := range lines {
 		if l.kind == "beer" {
 			snap, ok := kegSnaps[l.refID]
-			if err := inventory.CheckKegOrderSnap(snap, ok, l.qty, l.ml*l.qty, l.unit*l.qty, l.addedAt); err != nil {
+			checkAmt := pricing.Lines[i].PaidCents
+			if l.ml == 0 && checkAmt == 0 {
+				checkAmt = l.unit * l.qty
+			}
+			if err := inventory.CheckKegOrderSnap(snap, ok, l.qty, l.ml*l.qty, checkAmt, l.addedAt); err != nil {
 				return PayResult{}, err
 			}
 		}
@@ -801,15 +1138,30 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		}
 	}
 
+	var effMemberPtr *int64
+	var memberName, memberPhone string
+	if memberSnap != nil {
+		idCopy := memberSnap.ID
+		effMemberPtr = &idCopy
+		memberName = memberSnap.Name
+		memberPhone = memberSnap.Phone
+	}
+
 	actor := platform.OperationActor(ctx)
 	gwRes, err := gw.Settle(ctx, PaymentRequest{
-		OrderID:        orderID,
-		SpotLabel:      spotLbl,
-		AmountCents:    total,
-		ItemsCount:     count,
-		Actor:          actor,
-		Method:         method,
-		IdempotencyKey: idemKey,
+		OrderID:           orderID,
+		SpotLabel:         spotLbl,
+		GrossCents:        pricing.GrossCents,
+		DiscountCents:     pricing.DiscountCents,
+		AmountCents:       pricing.AmountCents,
+		BalancePaidCents:  pricing.BalancePaidCents,
+		ExternalPaidCents: pricing.ExternalPaidCents,
+		ItemsCount:        count,
+		Actor:             actor,
+		Method:            method,
+		IdempotencyKey:    idemKey,
+		MemberID:          effMemberPtr,
+		DiscountLabel:     pricing.DiscountLabel,
 	})
 	if err != nil {
 		return PayResult{}, err
@@ -825,9 +1177,17 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 
 	var payID int64
 	if err := tx.QueryRow(ctx, `insert into payments
-		(order_id, amount_cents, items_count, actor, method, provider, reference, idempotency_key)
-		values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
-		orderID, total, count, actor, method, provider, strings.TrimSpace(gwRes.Reference), idemPtr).Scan(&payID); err != nil {
+		(order_id, amount_cents, items_count, actor, method, provider, reference, idempotency_key,
+		 member_id, gross_cents, discount_cents, pass_discount_cents, member_discount_cents,
+		 manual_discount_cents, points_discount_cents, balance_paid_cents, external_paid_cents,
+		 discount_rule_id, discount_label, discount_note, member_pass_id, points_spent, points_earned)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+		returning id`,
+		orderID, pricing.AmountCents, count, actor, method, provider, strings.TrimSpace(gwRes.Reference), idemPtr,
+		effMemberPtr, pricing.GrossCents, pricing.DiscountCents, pricing.PassDiscountCents, pricing.MemberDiscountCents,
+		pricing.ManualDiscountCents, pricing.PointsDiscountCents, pricing.BalancePaidCents, pricing.ExternalPaidCents,
+		pricing.DiscountRuleID, pricing.DiscountLabel, pricing.DiscountNote, pricing.MemberPassID,
+		pricing.PointsSpent, pricing.PointsEarned).Scan(&payID); err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return PayResult{}, platform.UserErr("这笔支付已提交，请勿重复操作")
@@ -836,9 +1196,9 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 	}
 
 	overSoldCount := 0
-	for _, l := range lines {
+	for i, l := range lines {
 		if l.kind == "beer" {
-			over, err := inventory.AddPourForOrderWithSnapTx(ctx, tx, kegSnaps[l.refID], l.qty, l.ml*l.qty, l.unit*l.qty, payID)
+			over, err := inventory.AddPourForOrderWithSnapTx(ctx, tx, kegSnaps[l.refID], l.qty, l.ml*l.qty, pricing.Lines[i].PaidCents, payID)
 			if err != nil {
 				return PayResult{}, err
 			}
@@ -848,10 +1208,26 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		}
 	}
 
-	if _, err := tx.Exec(ctx, `update order_items set paid_at = now(), payment_id = $2
-		where order_id = $3 and paid_at is null and id = any($1::bigint[])`, lineIDs, payID, orderID); err != nil {
+	if err := loyalty.ApplyCheckoutTx(ctx, tx, loyalty.CheckoutApplyRequest{
+		OrderID:   orderID,
+		PaymentID: payID,
+		SpotLabel: spotLbl,
+		Member:    memberSnap,
+		Pricing:   pricing,
+		Now:       now,
+	}); err != nil {
 		return PayResult{}, err
 	}
+
+	if _, err := tx.Exec(ctx, `update order_items oi
+		set paid_at = now(), payment_id = $2,
+		    discount_cents = v.disc, paid_cents = v.paid, pass_redeemed_qty = v.pass_qty
+		from unnest($3::bigint[], $4::int[], $5::int[], $6::int[]) as v(id, disc, paid, pass_qty)
+		where oi.id = v.id and oi.order_id = $1 and oi.paid_at is null`,
+		orderID, payID, lineIDs, lineDiscs, linePaids, linePassQtys); err != nil {
+		return PayResult{}, err
+	}
+
 	ct, err := tx.Exec(ctx, `update orders set closed_at = now()
 		where id=$1 and not exists (select 1 from order_items where order_id=$1 and paid_at is null)`, orderID)
 	if err != nil {
@@ -861,28 +1237,67 @@ func PayItemsWithOptions(ctx context.Context, pool *pgxpool.Pool, gw PaymentGate
 		return PayResult{}, err
 	}
 	return PayResult{
-		PaymentID:     payID,
-		OrderID:       orderID,
-		Spot:          spotKey,
-		SpotLabel:     spotLbl,
-		AmountCents:   total,
-		ItemsCount:    count,
-		Closed:        ct.RowsAffected() > 0,
-		Method:        method,
-		SkippedCount:  skippedCount,
-		OverSoldCount: overSoldCount,
-		Lines:         receiptLines,
-		LowStock:      lowStock,
+		PaymentID:           payID,
+		OrderID:             orderID,
+		Spot:                spotKey,
+		SpotLabel:           spotLbl,
+		GrossCents:          pricing.GrossCents,
+		DiscountCents:       pricing.DiscountCents,
+		AmountCents:         pricing.AmountCents,
+		PassDiscountCents:   pricing.PassDiscountCents,
+		MemberDiscountCents: pricing.MemberDiscountCents,
+		ManualDiscountCents: pricing.ManualDiscountCents,
+		PointsDiscountCents: pricing.PointsDiscountCents,
+		BalancePaidCents:    pricing.BalancePaidCents,
+		ExternalPaidCents:   pricing.ExternalPaidCents,
+		DiscountLabel:       pricing.DiscountLabel,
+		MemberID:            effMemberPtr,
+		MemberName:          memberName,
+		MemberPhone:         memberPhone,
+		MemberPassID:        pricing.MemberPassID,
+		PassCupsUsed:        pricing.PassCupsUsed,
+		PointsSpent:         pricing.PointsSpent,
+		PointsEarned:        pricing.PointsEarned,
+		ItemsCount:          count,
+		Closed:              ct.RowsAffected() > 0,
+		Method:              method,
+		SkippedCount:        skippedCount,
+		OverSoldCount:       overSoldCount,
+		Lines:               receiptLines,
+		LowStock:            lowStock,
 	}, nil
 }
 
 func LoadPayment(ctx context.Context, pool *pgxpool.Pool, id int64) (Payment, error) {
 	var p Payment
 	var spotKey string
-	err := pool.QueryRow(ctx, `select p.id, p.order_id, p.amount_cents, p.items_count, o.spot
-		from payments p join orders o on o.id = p.order_id where p.id=$1`, id).
-		Scan(&p.ID, &p.OrderID, &p.Amount, &p.Items, &spotKey)
+	var memberName, memberPhone *string
+	err := pool.QueryRow(ctx, `select p.id, p.order_id, p.amount_cents,
+		coalesce(p.gross_cents, p.amount_cents), p.discount_cents,
+		p.pass_discount_cents, p.member_discount_cents, p.manual_discount_cents, p.points_discount_cents,
+		p.balance_paid_cents, coalesce(p.external_paid_cents, p.amount_cents),
+		p.items_count, p.method, p.discount_label, p.discount_note,
+		p.member_id, m.name, m.phone, m.balance_cents,
+		p.points_spent, p.points_earned,
+		coalesce((select sum(u.cups)::int from member_pass_usages u where u.payment_id = p.id), 0),
+		o.spot
+		from payments p
+		join orders o on o.id = p.order_id
+		left join members m on m.id = p.member_id
+		where p.id=$1`, id).
+		Scan(&p.ID, &p.OrderID, &p.Amount, &p.GrossCents, &p.DiscountCents,
+			&p.PassDiscountCents, &p.MemberDiscountCents, &p.ManualDiscountCents, &p.PointsDiscountCents,
+			&p.BalancePaidCents, &p.ExternalPaidCents,
+			&p.Items, &p.Method, &p.DiscountLabel, &p.DiscountNote,
+			&p.MemberID, &memberName, &memberPhone, &p.MemberBalanceAfter,
+			&p.PointsSpent, &p.PointsEarned, &p.PassCupsUsed, &spotKey)
 	p.Label = SpotLabel(spotKey)
+	if memberName != nil {
+		p.MemberName = *memberName
+	}
+	if memberPhone != nil {
+		p.MemberPhone = *memberPhone
+	}
 	return p, err
 }
 

@@ -33,6 +33,10 @@
     <a class="sidebar-link {{if eq .Nav "beers"}}active{{end}}" href="/admin/beers"><i class="bi bi-cup-straw" aria-hidden="true"></i>酒单 · 桶装</a>
     <a class="sidebar-link {{if eq .Nav "kegs"}}active{{end}}" href="/admin/kegs"><i class="bi bi-bar-chart-steps" aria-hidden="true"></i>桶装盈亏</a>
     <a class="sidebar-link {{if eq .Nav "retail"}}active{{end}}" href="/admin/retail"><i class="bi bi-box-seam" aria-hidden="true"></i>零售商品</a>
+    <span class="nav-section">会员与营销</span>
+    <a class="sidebar-link {{if eq .Nav "members"}}active{{end}}" href="/admin/members"><i class="bi bi-person-vcard" aria-hidden="true"></i>会员管理</a>
+    <a class="sidebar-link {{if eq .Nav "passes"}}active{{end}}" href="/admin/passes"><i class="bi bi-ticket-perforated" aria-hidden="true"></i>月卡管理</a>
+    <a class="sidebar-link {{if eq .Nav "discounts"}}active{{end}}" href="/admin/discounts"><i class="bi bi-percent" aria-hidden="true"></i>优惠规则</a>
     <span class="nav-section">记录</span>
     <a class="sidebar-link {{if eq .Nav "orders"}}active{{end}}" href="/admin/records"><i class="bi bi-receipt" aria-hidden="true"></i>销售订单</a>
     <a class="sidebar-link {{if eq .Nav "operations"}}active{{end}}" href="/admin/records/operations"><i class="bi bi-journal-text" aria-hidden="true"></i>营运流水</a>

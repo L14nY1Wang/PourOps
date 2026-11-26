@@ -40,22 +40,28 @@ type RecordsPage struct {
 }
 
 type RecordOrder struct {
-	ID       int64
-	Spot     string
-	OpenedAt time.Time
-	ClosedAt *time.Time
-	Total    int64
-	Paid     int64
-	Pending  int64
-	Status   string
+	ID         int64
+	Spot       string
+	OpenedAt   time.Time
+	ClosedAt   *time.Time
+	Total      int64
+	Gross      int64
+	Discount   int64
+	Paid       int64
+	Pending    int64
+	MemberName string
+	Status     string
 }
 
 func (o RecordOrder) Label() string { return pos.SpotLabel(o.Spot) }
 
 // 金额用 int64 版本；MoneyText64 保留原来模板上的「¥」前缀，PriceText64 只有裸数字。
-func (o RecordOrder) TotalText() string   { return platform.MoneyText64(o.Total) }
-func (o RecordOrder) PaidText() string    { return platform.MoneyText64(o.Paid) }
-func (o RecordOrder) PendingText() string { return platform.MoneyText64(o.Pending) }
+func (o RecordOrder) TotalText() string    { return platform.MoneyText64(o.Total) }
+func (o RecordOrder) GrossText() string    { return platform.MoneyText64(o.Gross) }
+func (o RecordOrder) DiscountText() string { return platform.MoneyText64(o.Discount) }
+func (o RecordOrder) PaidText() string     { return platform.MoneyText64(o.Paid) }
+func (o RecordOrder) PendingText() string  { return platform.MoneyText64(o.Pending) }
+func (o RecordOrder) HasDiscount() bool    { return o.Discount > 0 }
 
 func (o RecordOrder) OpenedText() string {
 	return platform.DateTimeText(&o.OpenedAt)
@@ -80,19 +86,29 @@ func (o RecordOrder) StatusText() string {
 }
 
 type RecordItem struct {
-	ID        int64
-	Kind      string
-	Name      string
-	UnitCents int
-	Qty       int
-	ML        int
-	PaidAt    *time.Time
-	PaymentID *int64
+	ID              int64
+	Kind            string
+	Name            string
+	UnitCents       int
+	Qty             int
+	ML              int
+	DiscountCents   int
+	PaidCents       *int
+	PassRedeemedQty int
+	PaidAt          *time.Time
+	PaymentID       *int64
 }
 
-func (i RecordItem) Amount() int        { return i.UnitCents * i.Qty }
-func (i RecordItem) AmountText() string { return platform.PriceText(i.Amount()) }
-func (i RecordItem) QtyText() string    { return "×" + strconv.Itoa(i.Qty) }
+func (i RecordItem) Amount() int { return i.UnitCents * i.Qty }
+func (i RecordItem) NetAmount() int {
+	if i.PaidCents != nil {
+		return *i.PaidCents
+	}
+	return i.Amount()
+}
+func (i RecordItem) AmountText() string    { return platform.PriceText(i.Amount()) }
+func (i RecordItem) NetAmountText() string { return platform.PriceText(i.NetAmount()) }
+func (i RecordItem) QtyText() string       { return "×" + strconv.Itoa(i.Qty) }
 
 func (i RecordItem) KindText() string {
 	switch i.Kind {
@@ -112,14 +128,31 @@ func (i RecordItem) Detail() string {
 }
 
 type RecordPayment struct {
-	ID        int64
-	Amount    int
-	Items     int
-	Actor     string
-	CreatedAt time.Time
+	ID            int64
+	Amount        int
+	Gross         int
+	Discount      int
+	BalancePaid   int
+	ExternalPaid  int
+	Items         int
+	Actor         string
+	Method        string
+	DiscountLabel string
+	DiscountNote  string
+	MemberName    string
+	PointsSpent   int
+	PointsEarned  int
+	PassCups      int
+	CreatedAt     time.Time
 }
 
-func (p RecordPayment) AmountText() string { return platform.PriceText(p.Amount) }
+func (p RecordPayment) AmountText() string       { return platform.PriceText(p.Amount) }
+func (p RecordPayment) GrossText() string        { return platform.PriceText(p.Gross) }
+func (p RecordPayment) DiscountText() string     { return platform.PriceText(p.Discount) }
+func (p RecordPayment) BalancePaidText() string  { return platform.PriceText(p.BalancePaid) }
+func (p RecordPayment) ExternalPaidText() string { return platform.PriceText(p.ExternalPaid) }
+func (p RecordPayment) HasDiscount() bool        { return p.Discount > 0 || p.DiscountLabel != "" }
+func (p RecordPayment) MethodText() string       { return pos.PayMethodLabel(p.Method) }
 func (p RecordPayment) CreatedText() string {
 	return platform.DateTimeText(&p.CreatedAt)
 }
@@ -167,6 +200,12 @@ var RecordKinds = []RecordOption{
 	{platform.OpRetailOff, "零售下架"},
 	{platform.OpScreenOn, "酒单上屏"},
 	{platform.OpScreenOff, "酒单下屏"},
+	{platform.OpMemberCreate, "新增会员"},
+	{platform.OpMemberRecharge, "会员充值"},
+	{platform.OpMemberAdjust, "会员调账"},
+	{platform.OpPassIssue, "办理月卡"},
+	{platform.OpPassRevoke, "作废月卡"},
+	{platform.OpDiscount, "人工折扣"},
 }
 
 var RecordKindOptions = append([]RecordOption{{"", "全部"}}, RecordKinds...)
@@ -211,7 +250,9 @@ func validOperationKind(v string) bool {
 
 // 单价 × 数量按 bigint 相乘后再聚合，避免 int32 溢出把大额订单算成负数。
 const recordItemsAgg = `
-	select (sum(unit_cents::bigint * qty))::bigint as total,
+	select (sum(coalesce(paid_cents, unit_cents::bigint * qty)))::bigint as total,
+	       (sum(unit_cents::bigint * qty))::bigint as gross,
+	       (sum(discount_cents))::bigint as discount,
 	       (sum(unit_cents::bigint * qty) filter (where paid_at is null))::bigint as pending
 	from order_items where order_id = o.id`
 
@@ -221,8 +262,11 @@ const recordPaysAgg = `
 
 const recordOrderCols = `
 	coalesce(s.total, 0)::bigint as total,
+	coalesce(s.gross, 0)::bigint as gross,
+	coalesce(s.discount, 0)::bigint as discount,
 	coalesce(s.pending, 0)::bigint as pending,
 	coalesce(p.paid, 0)::bigint as paid,
+	coalesce(m.name, '') as member_name,
 	case when o.closed_at is not null then 'settled'
 	     when coalesce(p.pays, 0) > 0 then 'partial'
 	     else 'unsettled' end as status`
@@ -230,13 +274,14 @@ const recordOrderCols = `
 const recordDetailSelect = `
 	select o.id, o.spot, o.opened_at, o.closed_at,` + recordOrderCols + `
 	from orders o
+	left join members m on m.id = o.member_id
 	left join lateral (` + recordItemsAgg + `) s on true
 	left join lateral (` + recordPaysAgg + `) p on true
 	where o.id = $1`
 
 func scanRecordOrder(row pgx.Row) (RecordOrder, error) {
 	var o RecordOrder
-	err := row.Scan(&o.ID, &o.Spot, &o.OpenedAt, &o.ClosedAt, &o.Total, &o.Pending, &o.Paid, &o.Status)
+	err := row.Scan(&o.ID, &o.Spot, &o.OpenedAt, &o.ClosedAt, &o.Total, &o.Gross, &o.Discount, &o.Pending, &o.Paid, &o.MemberName, &o.Status)
 	return o, err
 }
 
@@ -302,7 +347,7 @@ func recordCursorListQuery(status string, beforeID int64) (string, []any) {
 	limitParam := fmt.Sprintf("$%d", len(args))
 	q := `
 	with page as (
-		select o.id, o.spot, o.opened_at, o.closed_at
+		select o.id, o.spot, o.opened_at, o.closed_at, o.member_id
 		from orders o
 		` + whereClause + `
 		order by o.id desc
@@ -310,6 +355,7 @@ func recordCursorListQuery(status string, beforeID int64) (string, []any) {
 	)
 	select o.id, o.spot, o.opened_at, o.closed_at,` + recordOrderCols + `
 	from page o
+	left join members m on m.id = o.member_id
 	left join lateral (` + recordItemsAgg + `) s on true
 	left join lateral (` + recordPaysAgg + `) p on true
 	order by o.id desc`
@@ -357,8 +403,13 @@ func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (Record
 	if err != nil {
 		return o, nil, nil, nil, err
 	}
-	prows, err := tx.Query(ctx, `select id, amount_cents, items_count, actor, created_at
-		from payments where order_id=$1 order by id`, id)
+	prows, err := tx.Query(ctx, `select p.id, p.amount_cents, coalesce(p.gross_cents, p.amount_cents), p.discount_cents,
+		p.balance_paid_cents, coalesce(p.external_paid_cents, p.amount_cents), p.items_count, p.actor, p.method,
+		p.discount_label, p.discount_note, coalesce(m.name, ''), p.points_spent, p.points_earned,
+		coalesce((select sum(u.cups)::int from member_pass_usages u where u.payment_id = p.id), 0), p.created_at
+		from payments p
+		left join members m on m.id = p.member_id
+		where p.order_id=$1 order by p.id`, id)
 	if err != nil {
 		return o, nil, nil, nil, err
 	}
@@ -366,7 +417,9 @@ func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (Record
 	at := make(map[int64]int)
 	for prows.Next() {
 		var p RecordPayment
-		if err := prows.Scan(&p.ID, &p.Amount, &p.Items, &p.Actor, &p.CreatedAt); err != nil {
+		if err := prows.Scan(&p.ID, &p.Amount, &p.Gross, &p.Discount, &p.BalancePaid, &p.ExternalPaid,
+			&p.Items, &p.Actor, &p.Method, &p.DiscountLabel, &p.DiscountNote, &p.MemberName,
+			&p.PointsSpent, &p.PointsEarned, &p.PassCups, &p.CreatedAt); err != nil {
 			prows.Close()
 			return o, nil, nil, nil, err
 		}
@@ -378,7 +431,7 @@ func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (Record
 		return o, nil, nil, nil, err
 	}
 
-	irows, err := tx.Query(ctx, `select id, kind, name, unit_cents, qty, ml, paid_at, payment_id
+	irows, err := tx.Query(ctx, `select id, kind, name, unit_cents, qty, ml, discount_cents, paid_cents, pass_redeemed_qty, paid_at, payment_id
 		from order_items where order_id=$1 order by id`, id)
 	if err != nil {
 		return o, nil, nil, nil, err
@@ -387,7 +440,8 @@ func LoadRecordDetail(ctx context.Context, pool *pgxpool.Pool, id int64) (Record
 	var unpaid, unlinked []RecordItem
 	for irows.Next() {
 		var it RecordItem
-		if err := irows.Scan(&it.ID, &it.Kind, &it.Name, &it.UnitCents, &it.Qty, &it.ML, &it.PaidAt, &it.PaymentID); err != nil {
+		if err := irows.Scan(&it.ID, &it.Kind, &it.Name, &it.UnitCents, &it.Qty, &it.ML,
+			&it.DiscountCents, &it.PaidCents, &it.PassRedeemedQty, &it.PaidAt, &it.PaymentID); err != nil {
 			return o, nil, nil, nil, err
 		}
 		if it.PaidAt == nil {

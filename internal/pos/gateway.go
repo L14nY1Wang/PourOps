@@ -4,13 +4,19 @@ import "context"
 
 // PaymentRequest 传给收银渠道扩展点的结账上下文快照。
 type PaymentRequest struct {
-	OrderID        int64
-	SpotLabel      string
-	AmountCents    int
-	ItemsCount     int
-	Actor          string
-	Method         string
-	IdempotencyKey string
+	OrderID           int64
+	SpotLabel         string
+	GrossCents        int
+	DiscountCents     int
+	AmountCents       int
+	BalancePaidCents  int
+	ExternalPaidCents int
+	ItemsCount        int
+	Actor             string
+	Method            string
+	IdempotencyKey    string
+	MemberID          *int64
+	DiscountLabel     string
 }
 
 // PaymentResult 是收银渠道扩展点确认记账后的返回信息。
@@ -48,13 +54,21 @@ type ReceiptLine struct {
 
 // Receipt 描述一次已提交结账后交给硬件打印器扩展点的票据内容。
 type Receipt struct {
-	PaymentID   int64
-	OrderID     int64
-	SpotLabel   string
-	AmountCents int
-	ItemsCount  int
-	Actor       string
-	Lines       []ReceiptLine
+	PaymentID         int64
+	OrderID           int64
+	SpotLabel         string
+	GrossCents        int
+	DiscountCents     int
+	AmountCents       int
+	BalancePaidCents  int
+	ExternalPaidCents int
+	DiscountLabel     string
+	MemberName        string
+	PointsEarned      int
+	PassCupsUsed      int
+	ItemsCount        int
+	Actor             string
+	Lines             []ReceiptLine
 }
 
 // ReceiptPrinter 是 POS 小票打印扩展点；在结账事务提交后按 best-effort 调用。

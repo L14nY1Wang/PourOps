@@ -50,10 +50,11 @@ type LowStockItem struct {
 	Active bool
 }
 
-// SaleLine 是收银台里的一行：确定了的商品 + 份数。
+// SaleLine 是收银台里的一行：确定了的商品 + 份数（可选折扣后实收总额 NetCents）。
 type SaleLine struct {
-	Item RetailItem
-	Qty  int
+	Item     RetailItem
+	Qty      int
+	NetCents *int
 }
 
 // RetailStats 是零售页顶部的几个数字。
@@ -404,14 +405,22 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 	}
 
 	type line struct {
-		id               int64
-		name             string
-		price, cost, qty int
+		id                    int64
+		name                  string
+		price, cost, qty, net int
 	}
 	sold := make([]line, 0, len(lines))
-	var total, cost int
+	var grossTotal, netTotal, cost int
 	for _, l := range lines {
 		s := snaps[l.Item.ID]
+		lineGross := l.Item.PriceCents * l.Qty
+		lineNet := lineGross
+		if l.NetCents != nil {
+			if *l.NetCents < 0 || *l.NetCents > lineGross {
+				return 0, nil, platform.UserErr("零售商品实收金额无效")
+			}
+			lineNet = *l.NetCents
+		}
 		if _, err := tx.Exec(ctx, `update retail_items
 			set stock = stock - $2,
 			    active = case when stock - $2 > 0 then active else false end
@@ -422,8 +431,9 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 		if s.curStock == 0 {
 			s.curAct = false
 		}
-		sold = append(sold, line{id: l.Item.ID, name: s.name, price: l.Item.PriceCents, cost: s.cost, qty: l.Qty})
-		total += l.Item.PriceCents * l.Qty
+		sold = append(sold, line{id: l.Item.ID, name: s.name, price: l.Item.PriceCents, cost: s.cost, qty: l.Qty, net: lineNet})
+		grossTotal += lineGross
+		netTotal += lineNet
 		cost += s.cost * l.Qty
 	}
 
@@ -440,14 +450,16 @@ func SellRetailTx(ctx context.Context, tx pgx.Tx, lines []SaleLine) (int64, []Lo
 		}
 	}
 
+	discountTotal := max(grossTotal-netTotal, 0)
 	var saleID int64
-	if err := tx.QueryRow(ctx, `insert into retail_sales (total_cents, cost_cents) values ($1,$2) returning id`,
-		total, cost).Scan(&saleID); err != nil {
+	if err := tx.QueryRow(ctx, `insert into retail_sales (total_cents, cost_cents, gross_cents, discount_cents)
+		values ($1,$2,$3,$4) returning id`,
+		netTotal, cost, grossTotal, discountTotal).Scan(&saleID); err != nil {
 		return 0, nil, err
 	}
 	for _, l := range sold {
-		if _, err := tx.Exec(ctx, `insert into retail_sale_items (sale_id, item_id, name, qty, price_cents, cost_cents)
-			values ($1,$2,$3,$4,$5,$6)`, saleID, l.id, l.name, l.qty, l.price, l.cost); err != nil {
+		if _, err := tx.Exec(ctx, `insert into retail_sale_items (sale_id, item_id, name, qty, price_cents, cost_cents, net_cents)
+			values ($1,$2,$3,$4,$5,$6,$7)`, saleID, l.id, l.name, l.qty, l.price, l.cost, l.net); err != nil {
 			return 0, nil, err
 		}
 		if _, err := tx.Exec(ctx, `insert into retail_moves (item_id, delta, reason, ref_id) values ($1,$2,'售出',$3)`,

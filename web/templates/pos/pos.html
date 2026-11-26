@@ -220,15 +220,99 @@
     position:sticky;bottom:0;margin:.95rem -.2rem 0;padding:.9rem .2rem .2rem;
     border-top:1px solid var(--line);background:var(--card);
   }
-  .dock-sum{display:flex;align-items:baseline;flex-wrap:wrap;gap:.35rem .55rem;margin-bottom:.7rem}
+  .dock-sum{display:flex;align-items:baseline;flex-wrap:wrap;gap:.35rem .55rem;margin-bottom:.55rem}
   .dock-label{font-size:.78rem;color:var(--ink-2)}
   .dock-label b{font-family:var(--mono);color:var(--ink)}
   .dock-sum strong{
     font-family:var(--mono);font-size:1.6rem;font-weight:800;letter-spacing:-.035em;
     font-variant-numeric:tabular-nums;color:var(--ink);
   }
+  .dock-gross{font-family:var(--mono);font-size:.82rem;color:var(--ink-3);text-decoration:line-through;font-variant-numeric:tabular-nums}
   .dock-note{margin-left:auto;font-size:.71rem;color:var(--ink-3)}
   .btn.pay{width:100%;min-height:52px;border-radius:var(--r);font-size:.98rem;letter-spacing:.02em}
+
+  /* ---------- 会员条、优惠折叠面板与弹框 ---------- */
+  .member-bar{
+    margin-bottom:.85rem;padding:.68rem .78rem;border:1px solid var(--line);border-radius:var(--r);
+    background:linear-gradient(180deg,var(--inset),var(--card));
+  }
+  .member-search-row{position:relative;display:flex;gap:.45rem;align-items:center}
+  .member-search-input{
+    flex:1;min-width:0;min-height:36px;padding:.3rem .65rem;border:1px solid var(--line);border-radius:var(--r-sm);
+    background:var(--card);color:var(--ink);font-size:.8rem;outline:none;
+  }
+  .member-search-input:focus{border-color:var(--cobalt);box-shadow:0 0 0 3px rgba(34,81,216,.14)}
+  .member-results{
+    position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:25;max-height:220px;overflow:auto;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:var(--shadow-hover);
+  }
+  .member-result-item{
+    display:flex;flex-direction:column;gap:.12rem;width:100%;padding:.52rem .72rem;border:0;border-bottom:1px solid var(--line-soft);
+    background:transparent;text-align:left;
+  }
+  .member-result-item:last-child{border-bottom:0}
+  .member-result-item:hover{background:var(--cobalt-soft)}
+  .member-result-item strong{font-size:.82rem;color:var(--ink)}
+  .member-result-item span{font-size:.72rem;color:var(--ink-2)}
+  .member-result-empty{padding:.68rem .75rem;font-size:.76rem;color:var(--ink-3);text-align:center}
+  .member-bound-top{display:flex;align-items:center;justify-content:space-between;gap:.45rem}
+  .member-bound-top strong{font-size:.86rem;color:var(--cobalt-ink)}
+  .member-bound-meta{margin-top:.22rem;font-size:.73rem;color:var(--ink-2);line-height:1.45}
+  .member-bound-actions{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.5rem}
+
+  .preview-badges{display:flex;flex-wrap:wrap;gap:.32rem;margin-bottom:.5rem}
+  .preview-chip{
+    display:inline-flex;align-items:center;padding:.14rem .48rem;border-radius:999px;
+    background:var(--foam-soft);color:var(--foam);font-size:.7rem;font-weight:700;
+  }
+  .preview-err{margin:0 0 .5rem;padding:.45rem .65rem;border-radius:8px;background:var(--danger-soft);color:var(--danger);font-size:.75rem;font-weight:600}
+  .loyalty-toggle{
+    width:100%;display:flex;align-items:center;justify-content:space-between;margin-bottom:.55rem;padding:.38rem .65rem;
+    border:1px dashed var(--line);border-radius:var(--r-sm);background:var(--inset);color:var(--ink-2);font-size:.76rem;font-weight:650;
+  }
+  .loyalty-toggle:hover{border-color:var(--cobalt);color:var(--cobalt-ink)}
+  .loyalty-panel{
+    margin-bottom:.65rem;padding:.72rem;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--inset);
+    display:flex;flex-direction:column;gap:.65rem;
+  }
+  .loyalty-sec-title{display:block;margin-bottom:.3rem;font-size:.71rem;font-weight:750;color:var(--ink-3)}
+  .chip-row{display:flex;flex-wrap:wrap;gap:.35rem}
+  .chip-btn{
+    min-height:30px;padding:.18rem .58rem;border:1px solid var(--line);border-radius:999px;background:var(--card);
+    color:var(--ink-2);font-size:.74rem;font-weight:650;
+  }
+  .chip-btn.is-active{background:var(--cobalt-soft);border-color:var(--cobalt);color:var(--cobalt-ink)}
+  .method-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.35rem}
+  .method-pill{
+    position:relative;display:flex;align-items:center;justify-content:center;min-height:34px;border:1px solid var(--line);
+    border-radius:var(--r-sm);background:var(--card);font-size:.75rem;font-weight:650;color:var(--ink-2);cursor:pointer;
+  }
+  .method-pill input{position:absolute;opacity:0;pointer-events:none}
+  .method-pill:has(input:checked){background:var(--cobalt-soft);border-color:var(--cobalt);color:var(--cobalt-ink)}
+  .method-pill:has(input:disabled){opacity:.42;cursor:not-allowed}
+  .loyalty-check{display:flex;align-items:center;justify-content:space-between;gap:.45rem;font-size:.78rem;color:var(--ink)}
+  .loyalty-check label{display:flex;align-items:center;gap:.42rem;font-weight:650;cursor:pointer}
+  .loyalty-check span{font-size:.72rem;color:var(--ink-3)}
+  .custom-disc-grid{display:grid;grid-template-columns:1fr 1fr;gap:.4rem;margin-top:.4rem}
+  .custom-disc-grid input,.custom-disc-grid select,.loyalty-note-input{
+    width:100%;min-height:32px;padding:.24rem .5rem;border:1px solid var(--line);border-radius:8px;background:var(--card);font-size:.76rem;color:var(--ink);
+  }
+  .loyalty-note-input{margin-top:.4rem}
+
+  dialog.pos-modal{
+    width:min(28rem,calc(100vw - 2rem));padding:0;border:1px solid var(--line);border-radius:var(--r-lg);
+    background:var(--card);color:var(--ink);box-shadow:0 24px 60px rgba(15,28,46,.28);
+  }
+  dialog.pos-modal::backdrop{background:rgba(15,28,46,.45);backdrop-filter:blur(3px)}
+  .pos-modal-head{display:flex;align-items:center;justify-content:space-between;padding:.95rem 1.15rem;border-bottom:1px solid var(--line-soft)}
+  .pos-modal-head h3{font-size:1rem;font-weight:800}
+  .pos-modal-body{padding:1rem 1.15rem;display:flex;flex-direction:column;gap:.75rem}
+  .pos-modal-field label{display:block;margin-bottom:.25rem;font-size:.75rem;font-weight:700;color:var(--ink-2)}
+  .pos-modal-field input,.pos-modal-field select{
+    width:100%;min-height:38px;padding:.35rem .65rem;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--card);font-size:.84rem;
+  }
+  .pos-modal-grid{display:grid;grid-template-columns:1fr 1fr;gap:.6rem}
+  .pos-modal-foot{display:flex;justify-content:flex-end;gap:.5rem;padding:.85rem 1.15rem;border-top:1px solid var(--line-soft);background:var(--inset)}
 
   /* ---------- 目录 ---------- */
   .catalog{
@@ -464,16 +548,40 @@
           <p class="paid-title">已付 · {{len .Order.Paid}} 行</p>
           <ul>
             {{range .Order.Paid}}
-            <li><span class="p-name">{{.Name}}</span><span>{{.Detail}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.AmountText}}</span></li>
+            <li><span class="p-name">{{.Name}}</span><span>{{.Detail}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.NetAmountText}}</span></li>
             {{end}}
           </ul>
         </section>
         {{end}}
         <p class="side-cta"><a class="btn primary block" href="/pos/">回台位开新单</a></p>
       {{else}}
+        <section class="member-bar" aria-label="订单会员">
+          <div id="member-search-box"{{if .Order.Member}} hidden{{end}}>
+            <div class="member-search-row">
+              <input class="member-search-input" id="member-search-input" type="search" placeholder="输手机号 / 后4位 / 姓名找会员…" autocomplete="off" aria-label="检索会员">
+              <button class="mini" type="button" data-open-member-modal="quick">+ 建档/办卡</button>
+              <div class="member-results" id="member-search-results" hidden></div>
+            </div>
+          </div>
+          <div id="member-bound-box"{{if not .Order.Member}} hidden{{end}}>
+            <div class="member-bound-top">
+              <strong id="member-bound-name">{{if .Order.Member}}{{.Order.Member.Name}} · {{.Order.Member.Phone}}{{end}}</strong>
+              <button class="mini" type="button" id="member-unbind-btn">散客</button>
+            </div>
+            <p class="member-bound-meta" id="member-bound-meta"></p>
+            <div class="member-bound-actions">
+              <button class="mini" type="button" data-open-member-modal="recharge">充值</button>
+              <button class="mini" type="button" data-open-member-modal="pass">办/续月卡</button>
+            </div>
+          </div>
+        </section>
+
         <form method="post" action="/pos/order/{{.Order.ID}}/pay" id="pay-form">
           <input type="hidden" name="idempotency_key" value="{{.PayToken}}">
           <input type="hidden" name="expected_total_cents" id="expected-total-cents" value="">
+          <input type="hidden" name="member_id" id="member-id-input" value="{{if .Order.Member}}{{.Order.Member.ID}}{{end}}">
+          <input type="hidden" name="pass_id" id="pass-id-input" value="{{if and .Order.Member .Order.Member.ActivePass}}{{.Order.Member.ActivePass.ID}}{{end}}">
+          <input type="hidden" name="discount_rule_id" id="discount-rule-input" value="">
           <div class="basket-head">
             <h2>待结账</h2>
             {{if .Order.Unpaid}}
@@ -514,7 +622,7 @@
             <summary>已付 {{len .Order.Paid}} 行 · 已锁定，不能改量</summary>
             <ul>
               {{range .Order.Paid}}
-              <li><span class="p-name">{{.Name}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.AmountText}}</span></li>
+              <li><span class="p-name">{{.Name}}</span><span>{{.QtyText}}</span><span class="p-amount">{{.NetAmountText}}</span></li>
               {{end}}
             </ul>
             <p class="paid-note">这些行已经结过账，不会再计入下面的小计。</p>
@@ -523,8 +631,73 @@
 
           {{if .Order.Unpaid}}
           <div class="dock">
+            <button class="loyalty-toggle" type="button" id="toggle-loyalty-panel" aria-expanded="false" aria-controls="loyalty-panel">
+              <span>优惠 / 月卡 / 收款方式</span>
+              <span>展开/收起</span>
+            </button>
+            <div class="loyalty-panel" id="loyalty-panel" hidden>
+              <div class="loyalty-check" id="loyalty-pass-row" hidden>
+                <label><input type="checkbox" name="use_pass" id="use-pass-check" value="1"> 使用月卡权益</label>
+                <span id="loyalty-pass-meta"></span>
+              </div>
+
+              <div>
+                <span class="loyalty-sec-title">优惠方案（默认不与会员折叠加，抹零可叠加）</span>
+                <div class="chip-row">
+                  <button class="chip-btn is-active" type="button" data-rule-pick="" aria-pressed="true">自动/原价</button>
+                  {{range .DiscountRules}}
+                  <button class="chip-btn" type="button" data-rule-pick="{{.ID}}" aria-pressed="false">{{.Name}}</button>
+                  {{end}}
+                  {{if .CanCustomDiscount}}
+                  <button class="chip-btn" type="button" data-rule-pick="custom" aria-pressed="false">自定义</button>
+                  {{end}}
+                </div>
+                {{if .CanCustomDiscount}}
+                <div id="custom-discount-wrap" hidden>
+                  <div class="custom-disc-grid">
+                    <select name="custom_discount_kind" id="custom-discount-kind" aria-label="自定义折扣类型">
+                      <option value="">不启用自定义</option>
+                      <option value="percent">按折率（如 8.5 折）</option>
+                      <option value="fixed">按立减（元）</option>
+                    </select>
+                    <input type="text" name="custom_discount_value" id="custom-discount-value" inputmode="decimal" placeholder="8.5 或 20">
+                    <select name="custom_discount_scope" id="custom-discount-scope" aria-label="自定义适用范围">
+                      <option value="all">全场商品</option>
+                      <option value="beer">仅桶装</option>
+                      <option value="retail">仅零售</option>
+                    </select>
+                  </div>
+                </div>
+                {{end}}
+                <input class="loyalty-note-input" type="text" name="discount_note" id="discount-note" maxlength="200" placeholder="优惠备注（如老客抹零/老板请客）">
+              </div>
+
+              <div class="loyalty-check" id="loyalty-points-row" hidden>
+                <label><input type="checkbox" name="use_points" id="use-points-check" value="1"> 积分抵现</label>
+                <span id="loyalty-points-meta"></span>
+              </div>
+
+              <div>
+                <span class="loyalty-sec-title">收款方式</span>
+                <div class="method-row">
+                  <label class="method-pill"><input type="radio" name="method" value="qr" checked><span>扫码</span></label>
+                  <label class="method-pill"><input type="radio" name="method" value="cash"><span>现金</span></label>
+                  <label class="method-pill"><input type="radio" name="method" value="card"><span>刷卡</span></label>
+                  <label class="method-pill"><input type="radio" name="method" value="balance"{{if not .Order.Member}} disabled{{end}}><span>储值</span></label>
+                </div>
+              </div>
+
+              <div class="loyalty-check" id="loyalty-balance-row" hidden>
+                <label><input type="checkbox" name="use_balance" id="use-balance-check" value="1"> 优先扣储值余额（不足时由所选方式补差）</label>
+                <span id="loyalty-balance-meta"></span>
+              </div>
+            </div>
+
+            <div class="preview-badges" id="preview-badges"></div>
+            <p class="preview-err" id="preview-err" hidden></p>
             <div class="dock-sum" aria-live="polite">
               <span class="dock-label">已选 <b id="sel-count">0</b> 行</span>
+              <span class="dock-gross" id="sel-gross" hidden></span>
               <strong id="sel-total">{{.Order.TotalText}}</strong>
               <span class="dock-note">合计 = 勾选行</span>
             </div>
@@ -764,6 +937,7 @@
             pay.disabled = n === 0;
             pay.textContent = n === 0 ? '先勾选要结的行' : '结账所选 · ' + money(cents);
           }
+          if (window.PourOpsPosLoyalty) window.PourOpsPosLoyalty.refresh();
         };
         syncPay = sync;
         form.addEventListener('change', ev => {
@@ -849,6 +1023,91 @@
     });
   })();
 </script>
+{{if and .Order (not .Order.Closed)}}
+<dialog class="pos-modal" id="member-modal" aria-labelledby="member-modal-title">
+  <form method="dialog" id="member-modal-form">
+    <input type="hidden" id="modal-mode-input" value="quick">
+    <input type="hidden" name="idempotency_key" id="modal-idem-input" value="">
+    <div class="pos-modal-head">
+      <h3 id="member-modal-title">快捷会员建档 / 开卡</h3>
+      <button class="mini" type="button" data-close-member-modal>关闭</button>
+    </div>
+    <div class="pos-modal-body">
+      <p class="preview-err" id="member-modal-err" hidden></p>
+
+      <div id="modal-quick-fields" class="pos-modal-grid">
+        <div class="pos-modal-field">
+          <label for="modal-member-name">姓名 / 昵称 *</label>
+          <input id="modal-member-name" name="name" type="text" maxlength="40" placeholder="张三">
+        </div>
+        <div class="pos-modal-field">
+          <label for="modal-member-phone">手机号 *</label>
+          <input id="modal-member-phone" name="phone" type="tel" maxlength="20" placeholder="13800138000">
+        </div>
+      </div>
+
+      <div id="modal-recharge-fields">
+        {{if .LoyaltyCfg.RechargePresets}}
+        <div class="pos-modal-field">
+          <label>快捷充值档位（选填）</label>
+          <div class="chip-row">
+            {{range .LoyaltyCfg.RechargePresets}}
+            <button class="chip-btn" type="button" data-preset-pay="{{.PayInput}}" data-preset-bonus="{{.BonusInput}}">充 {{.PayText}}{{if gt .BonusCents 0}} 送 {{.BonusText}}{{end}}</button>
+            {{end}}
+          </div>
+        </div>
+        {{end}}
+        <div class="pos-modal-grid">
+          <div class="pos-modal-field">
+            <label for="modal-pay-amount">充值实收（元）</label>
+            <input id="modal-pay-amount" name="pay_amount" type="text" inputmode="decimal" placeholder="0 或 300">
+          </div>
+          <div class="pos-modal-field">
+            <label for="modal-bonus-amount">赠金（元）</label>
+            <input id="modal-bonus-amount" name="bonus_amount" type="text" inputmode="decimal" placeholder="0"{{if not .CanCustomDiscount}} readonly{{end}}>
+          </div>
+        </div>
+        <div class="pos-modal-field">
+          <label for="modal-recharge-method">充值收款方式</label>
+          <select id="modal-recharge-method" name="recharge_method">
+            <option value="qr">扫码</option>
+            <option value="cash">现金</option>
+            <option value="card">刷卡</option>
+            <option value="other">其他</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="modal-pass-fields" class="pos-modal-grid">
+        <div class="pos-modal-field">
+          <label for="modal-pass-plan">月卡方案</label>
+          <select id="modal-pass-plan" name="pass_plan_id">
+            <option value="">暂不办理</option>
+            {{range .PassPlans}}
+            <option value="{{.ID}}">{{.Name}} · {{.PriceText}}</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="pos-modal-field">
+          <label for="modal-pass-method">购卡方式</label>
+          <select id="modal-pass-method" name="pass_method">
+            <option value="qr">扫码</option>
+            <option value="cash">现金</option>
+            <option value="card">刷卡</option>
+            <option value="balance">会员储值扣款</option>
+          </select>
+        </div>
+      </div>
+    </div>
+    <div class="pos-modal-foot">
+      <button class="btn ghost small" type="button" data-close-member-modal>取消</button>
+      <button class="btn primary small" id="member-modal-submit" type="submit">确认提交</button>
+    </div>
+  </form>
+</dialog>
+<script type="application/json" id="bound-member-json">{{.BoundMemberJSON}}</script>
+<script src="{{asset "/static/js/pos-loyalty.js"}}"></script>
+{{end}}
 </body>
 </html>
 {{end}}

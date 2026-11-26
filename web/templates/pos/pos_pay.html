@@ -161,11 +161,12 @@
   {{if .Err}}<p class="notice is-err" role="alert">{{.Err}}</p>{{end}}
   {{if .Msg}}<p class="notice" role="status">{{.Msg}}</p>{{end}}
   <div class="amount-box">
-    <p class="amount-label">本次收款</p>
+    <p class="amount-label">本次实付</p>
     <p class="amount">{{.Pay.AmountText}}</p>
-    <p class="amount-meta">共 {{.Pay.Items}} 件商品</p>
+    <p class="amount-meta">共 {{.Pay.Items}} 件商品{{if .Pay.HasDiscount}} · 原价 {{.Pay.GrossText}} · 优惠 -{{.Pay.DiscountText}}{{end}}</p>
   </div>
 
+  {{if or (gt .Pay.ExternalPaidCents 0) (and (gt .Pay.Amount 0) (eq .Pay.BalancePaidCents 0))}}
   <div class="qr">
     <span class="qr-icon" aria-hidden="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -178,9 +179,18 @@
       <p class="qr-note">当前没有在线支付通道，也不会生成二维码。这单按店员人工确认收款记账，请勿让顾客扫任何屏幕收款。</p>
     </div>
   </div>
+  {{else}}
+  <p class="notice">本单已通过会员储值/月卡/免单结清，无需外部收款。</p>
+  {{end}}
 
   <div class="ledger">
-    <p><span>记账方式</span><b>人工确认 · 无在线支付</b></p>
+    <p><span>记账方式</span><b>{{.Pay.MethodText}} · 人工确认</b></p>
+    {{if .Pay.DiscountLabel}}<p><span>优惠明细</span><b>{{.Pay.DiscountLabel}}</b></p>{{end}}
+    {{if gt .Pay.BalancePaidCents 0}}<p><span>储值扣款</span><b>{{.Pay.BalancePaidText}}</b></p>{{end}}
+    {{if and (gt .Pay.BalancePaidCents 0) (gt .Pay.ExternalPaidCents 0)}}<p><span>外部补差</span><b>{{.Pay.ExternalPaidText}}</b></p>{{end}}
+    {{if .Pay.MemberName}}<p><span>绑定会员</span><b>{{.Pay.MemberName}} ({{.Pay.MemberPhone}})</b></p><p><span>当前储值余额</span><b>{{.Pay.MemberBalanceText}}</b></p>{{end}}
+    {{if gt .Pay.PassCupsUsed 0}}<p><span>月卡核销</span><b>免 {{.Pay.PassCupsUsed}} 杯</b></p>{{end}}
+    {{if or (gt .Pay.PointsSpent 0) (gt .Pay.PointsEarned 0)}}<p><span>积分变动</span><b>{{if gt .Pay.PointsSpent 0}}抵扣 -{{.Pay.PointsSpent}}{{end}}{{if and (gt .Pay.PointsSpent 0) (gt .Pay.PointsEarned 0)}} · {{end}}{{if gt .Pay.PointsEarned 0}}获得 +{{.Pay.PointsEarned}}{{end}}</b></p>{{end}}
     <p><span>台位</span><b>{{.Pay.Label}}</b></p>
     <p><span>流水状态</span><b>已计入当日营业流水</b></p>
   </div>

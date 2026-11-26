@@ -36,6 +36,9 @@ var WebhookEventOptions = []platform.Option{
 	{Value: string(EventBeerTapped), Label: "酒款开桶上架 (beer.tapped)"},
 	{Value: string(EventKegFinished), Label: "下架结桶复盘 (keg.finished)"},
 	{Value: string(EventRetailLowStock), Label: "零售低库存 / 售罄预警 (retail.low_stock)"},
+	{Value: string(EventMemberRecharged), Label: "会员储值充值 (member.recharged)"},
+	{Value: string(EventPassPurchased), Label: "办理或续费月卡 (pass.purchased)"},
+	{Value: string(EventPassRedeemed), Label: "月卡核销免单 (pass.redeemed)"},
 }
 
 func ValidWebhookEvent(name string) bool {
@@ -145,6 +148,9 @@ func (d *WebhookDispatcher) Attach(bus *EventBus) {
 		EventBeerTapped,
 		EventKegFinished,
 		EventRetailLowStock,
+		EventMemberRecharged,
+		EventPassPurchased,
+		EventPassRedeemed,
 	)
 	bus.RegisterCloser(d.Close)
 }

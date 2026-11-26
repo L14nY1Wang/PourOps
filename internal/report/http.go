@@ -22,6 +22,7 @@ type DashboardPage struct {
 	Overview      Overview
 	Sales         SalesInsights
 	POS           POSInsights
+	Loyalty       LoyaltyInsights
 	InvalidPeriod bool
 	ReportPeriod  string
 	ReportStart   string
@@ -140,6 +141,10 @@ func (s *Service) Dashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data.POS, err = LoadPOSInsights(ctx, tx, win.start, win.end); err != nil {
+		down(err)
+		return
+	}
+	if data.Loyalty, err = LoadLoyaltyInsights(ctx, tx, win.start, win.end, time.Now()); err != nil {
 		down(err)
 		return
 	}

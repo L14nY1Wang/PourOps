@@ -12,6 +12,7 @@ import (
 	"pourops/internal/event"
 	"pourops/internal/inventory"
 	"pourops/internal/lookup"
+	"pourops/internal/loyalty"
 	"pourops/internal/platform"
 	"pourops/internal/pos"
 	"pourops/internal/report"
@@ -78,7 +79,9 @@ func NewHandler(deps Deps) http.Handler {
 	// screen.Service.PlaylistJSON 从 static/screen/playlist.json 读取，需传入根 StaticFS。
 	screenSvc := screen.NewService(deps.Pool, deps.ScreenHub, deps.Settings, deps.Renderer, web.StaticFS)
 	invSvc := inventory.NewService(deps.Pool, deps.Renderer, deps.Settings, deps.Bus, deps.Posters)
+	loyaltySvc := loyalty.NewService(deps.Pool, deps.Renderer, deps.Settings, deps.Bus)
 	posSvc := pos.NewService(deps.Pool, deps.Renderer, deps.Bus, pos.ManualGateway{}, pos.NoopPrinter{})
+	posSvc.SetSettingsStore(deps.Settings)
 	reportSvc := report.NewService(deps.Pool, deps.Renderer, deps.Settings)
 	settingsSvc := settings.NewService(deps.Settings, deps.Webhooks, deps.Renderer)
 	settingsSvc.SetCatalogCountFn(func(ctx context.Context) (int, error) {
@@ -93,6 +96,7 @@ func NewHandler(deps Deps) http.Handler {
 	catalogSvc.RegisterRoutes(mux, guards)
 	lookupSvc.RegisterRoutes(mux, guards)
 	invSvc.RegisterRoutes(mux, guards)
+	loyaltySvc.RegisterRoutes(mux, guards)
 	posSvc.RegisterRoutes(mux, guards)
 	reportSvc.RegisterRoutes(mux, guards)
 	settingsSvc.RegisterRoutes(mux, guards)

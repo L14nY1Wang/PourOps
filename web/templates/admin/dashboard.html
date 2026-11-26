@@ -86,6 +86,22 @@
   <div class="empty-state"><i class="bi bi-clock-history" aria-hidden="true"></i><p>所选时间内还没有 POS 收款</p></div>
   {{end}}
 </section>
+
+<section class="card chart-panel pos-panel" aria-labelledby="loyalty-title">
+  <div class="panel-heading">
+    <div>
+      <h2 id="loyalty-title">会员与预收资金</h2>
+      <p>储值充值与售卖月卡单独计入预收资金，不与商品营业额重复计算</p>
+    </div>
+    <a class="subtle-link" href="/admin/members">会员管理<i class="bi bi-chevron-right" aria-hidden="true"></i></a>
+  </div>
+  <div class="pos-figures">
+    <div class="pos-figure"><span>周期现金总流入</span><strong>{{.Loyalty.TotalCashInflowText}}</strong><small class="text-muted">POS外部 {{.Loyalty.ExternalReceivedText}} + 储值 {{.Loyalty.RechargeCashText}} + 售卡 {{.Loyalty.PassSalesCashText}}</small></div>
+    <div class="pos-figure"><span>优惠让利 / 月卡</span><strong>{{.Loyalty.DiscountTotalText}}</strong><small class="text-muted">月卡核销 {{.Loyalty.PassCupsRedeemed}} 杯（省 {{.Loyalty.PassSavedText}}）</small></div>
+    <div class="pos-figure"><span>储值充消情况</span><strong>{{.Loyalty.RechargeCashText}}</strong><small class="text-muted">赠金 {{.Loyalty.RechargeBonusText}} · 储值消费 {{.Loyalty.BalanceConsumedText}}</small></div>
+    <div class="pos-figure"><span>会员负债快照</span><strong>{{.Loyalty.TotalBalanceLiabilityText}}</strong><small class="text-muted">{{.Loyalty.TotalMembers}} 位会员 · {{.Loyalty.ActivePasses}} 张有效月卡</small></div>
+  </div>
+</section>
 {{end}}
 
 <div class="dashboard-bottom">

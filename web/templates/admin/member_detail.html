@@ -1,0 +1,279 @@
+{{define "content"}}
+{{with .Detail}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{.Member.Name}} {{if not .Member.Active}}<span class="badge bg-secondary ms-1">已停用</span>{{end}}</h1>
+    <p class="mono-num">卡号 {{if .Member.MemberNo}}{{.Member.MemberNo}}{{else}}—{{end}} · 手机 {{.Member.Phone}}{{if .Member.Birthday}} · 生日 {{.Member.Birthday}}{{end}}{{if .Member.Note}} · {{.Member.Note}}{{end}}</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="/admin/members/{{.Member.ID}}/edit">编辑资料</a>
+    <form class="inline-form" method="post" action="/admin/members/{{.Member.ID}}/toggle">
+      <button class="button button--tertiary" type="submit">{{if .Member.Active}}停用会员{{else}}启用会员{{end}}</button>
+    </form>
+    <a class="button button--secondary" href="/admin/members"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回列表</a>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>储值余额</span><i class="bi bi-wallet2" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Member.BalanceText}}</strong>
+    <div class="stat-meta">其中实充本金 <strong>{{.Member.PrincipalText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>当前积分</span><i class="bi bi-stars stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Member.Points}}</strong>
+    <div class="stat-meta">结账时可按设置比例抵现</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>会员等级</span><i class="bi bi-award stat-icon--success" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Member.TierName}}</strong>
+    <div class="stat-meta">默认自动享受 <strong>{{.Member.TierDiscountText}}</strong></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>累计消费</span><i class="bi bi-receipt stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Member.LifetimeSpentText}}</strong>
+    <div class="stat-meta">共结账 <strong>{{.Member.LifetimeOrders}}</strong> 笔</div>
+  </div>
+</div>
+
+<div class="row g-3 mb-3">
+  <div class="col-lg-6">
+    <form class="admin-form card editor-card h-100" method="post" action="/admin/members/{{.Member.ID}}/recharge">
+      <input type="hidden" name="idempotency_key" value="{{$.Token}}-rc">
+      <div class="card__content">
+        <fieldset class="form-section mb-0">
+          <div class="form-section-head">
+            <h2><i class="bi bi-cash-stack" aria-hidden="true"></i>储值充值</h2>
+            <span>充值单独记入预收储值，不重复计入商品营收</span>
+          </div>
+          {{if $.RechargePresets}}
+          <div class="d-flex flex-wrap gap-2 mb-3">
+            {{range $.RechargePresets}}
+            <button type="button" class="button button--secondary button--sm" data-fill-recharge="{{.PayInput}}" data-fill-bonus="{{.BonusInput}}">充 {{.PayText}}{{if gt .BonusCents 0}} 送 {{.BonusText}}{{end}}</button>
+            {{end}}
+          </div>
+          {{end}}
+          <div class="editor-grid">
+            <div class="editor-field">
+              <label class="label" for="rc-pay">实充金额（元）*</label>
+              <input class="form-control" id="rc-pay" name="pay_amount" type="text" inputmode="decimal" required placeholder="500">
+            </div>
+            <div class="editor-field">
+              <label class="label" for="rc-bonus">赠送金额（元）</label>
+              <input class="form-control" id="rc-bonus" name="bonus_amount" type="text" inputmode="decimal" value="0" placeholder="0">
+            </div>
+            <div class="editor-field">
+              <label class="label" for="rc-method">收款方式</label>
+              <select class="form-select" id="rc-method" name="pay_method">
+                <option value="qr">扫码</option>
+                <option value="cash">现金</option>
+                <option value="card">刷卡</option>
+                <option value="other">其他</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label class="label" for="rc-note">备注</label>
+              <input class="form-control" id="rc-note" name="note" type="text" maxlength="120" placeholder="如：店庆充500送50">
+            </div>
+          </div>
+        </fieldset>
+      </div>
+      <div class="card__footer editor-actions">
+        <button class="button button--primary" type="submit">确认充值</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="col-lg-6">
+    <form class="admin-form card editor-card h-100" method="post" action="/admin/members/{{.Member.ID}}/passes">
+      <input type="hidden" name="idempotency_key" value="{{$.Token}}-ps">
+      <div class="card__content">
+        <fieldset class="form-section mb-0">
+          <div class="form-section-head">
+            <h2><i class="bi bi-ticket-perforated" aria-hidden="true"></i>办理 / 续费月卡</h2>
+            <span>已有同方案有效月卡时自动顺延到期时间</span>
+          </div>
+          <div class="editor-grid">
+            <div class="editor-field editor-wide">
+              <label class="label" for="ps-plan">选择月卡方案 *</label>
+              <select class="form-select" id="ps-plan" name="plan_id" required>
+                {{range $.Plans}}
+                <option value="{{.ID}}">{{.Name}} · {{.PriceText}}（{{.RuleSummary}}）</option>
+                {{else}}
+                <option value="">暂无启用方案</option>
+                {{end}}
+              </select>
+            </div>
+            <div class="editor-field">
+              <label class="label" for="ps-method">付款方式</label>
+              <select class="form-select" id="ps-method" name="pay_method">
+                <option value="qr">扫码</option>
+                <option value="cash">现金</option>
+                <option value="card">刷卡</option>
+                <option value="balance">扣会员储值余额</option>
+                <option value="other">其他</option>
+              </select>
+            </div>
+            <div class="editor-field">
+              <label class="label" for="ps-note">备注</label>
+              <input class="form-control" id="ps-note" name="note" type="text" maxlength="120" placeholder="选填">
+            </div>
+          </div>
+        </fieldset>
+      </div>
+      <div class="card__footer editor-actions">
+        <button class="button button--primary" type="submit"{{if not $.Plans}} disabled{{end}}>立即发卡 / 续费</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="panel-heading">
+      <div><h2>持有月卡</h2><p>按 07:00–次日 07:00 营业日计次，退卡或作废请点右侧「作废」</p></div>
+    </div>
+    {{if .Passes}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr><th>方案</th><th>规则</th><th>付款</th><th class="num">今日 / 累计已用</th><th>有效期</th><th>状态</th><th class="num">操作</th></tr>
+        </thead>
+        <tbody>
+        {{range .Passes}}
+          <tr>
+            <td><strong>{{.PlanName}}</strong></td>
+            <td class="text-muted small">{{.ScopeText}} · {{.BenefitTypeText}}{{if .HasFreeQuota}} · 日限{{.DailyLimit}}杯{{if gt .TotalLimit 0}}/共{{.TotalLimit}}杯{{end}}{{end}}{{if .HasDiscount}} · {{.DiscountText}}{{end}}</td>
+            <td>{{.PriceText}} <small class="text-muted">({{.PayMethod}})</small></td>
+            <td class="num mono-num">{{.UsedToday}} / {{.UsedTotal}} 杯</td>
+            <td class="small mono-num">{{.StartsText}} 至 {{.ExpiresText}}</td>
+            <td><span class="badge {{.StatusBadgeClass}}">{{.StatusLabel}}</span></td>
+            <td class="num">
+              {{if and (eq .Status "active") (not .IsExpired)}}
+              <form class="inline-form" method="post" action="/admin/members/{{$.Detail.Member.ID}}/passes/{{.ID}}/revoke" onsubmit="return confirm('确认作废该月卡？作废后不可恢复。')">
+                <button class="button button--danger-soft button--sm" type="submit">作废</button>
+              </form>
+              {{end}}
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-ticket-perforated" aria-hidden="true"></i><p>暂未办理过月卡</p></div>
+    {{end}}
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="panel-heading"><div><h2>人工调账（需填原因并记入营运流水）</h2></div></div>
+    <div class="row g-3">
+      <div class="col-md-6">
+        <form class="d-flex flex-wrap gap-2 align-items-end" method="post" action="/admin/members/{{.Member.ID}}/adjust-balance">
+          <div>
+            <label class="form-label small mb-1" for="adj-bal">余额变动（元，如 +50 或 -20）</label>
+            <input class="form-control" id="adj-bal" name="delta_amount" type="text" required placeholder="-20">
+          </div>
+          <div class="flex-grow-1">
+            <label class="form-label small mb-1" for="adj-bal-note">原因备注 *</label>
+            <input class="form-control" id="adj-bal-note" name="note" type="text" required placeholder="退卡结算 / 误操作冲正">
+          </div>
+          <button class="button button--secondary" type="submit">调整余额</button>
+        </form>
+      </div>
+      <div class="col-md-6">
+        <form class="d-flex flex-wrap gap-2 align-items-end" method="post" action="/admin/members/{{.Member.ID}}/adjust-points">
+          <div>
+            <label class="form-label small mb-1" for="adj-pts">积分变动（整数，如 100 或 -50）</label>
+            <input class="form-control" id="adj-pts" name="delta_points" type="number" required placeholder="100">
+          </div>
+          <div class="flex-grow-1">
+            <label class="form-label small mb-1" for="adj-pts-note">原因备注 *</label>
+            <input class="form-control" id="adj-pts-note" name="note" type="text" required placeholder="活动补发积分">
+          </div>
+          <button class="button button--secondary" type="submit">调整积分</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="panel-heading"><div><h2>最近储值流水</h2></div></div>
+        {{if .BalanceTxns}}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead class="table-light"><tr><th>时间</th><th>类型</th><th class="num">变动</th><th class="num">余额</th><th>备注 / 操作者</th></tr></thead>
+            <tbody>
+            {{range .BalanceTxns}}
+              <tr>
+                <td class="small text-muted mono-num">{{.CreatedText}}</td>
+                <td>{{.KindText}}</td>
+                <td class="num {{if gt .DeltaCents 0}}text-success{{else}}text-danger{{end}}"><strong>{{.DeltaText}}</strong></td>
+                <td class="num mono-num">{{.BalanceAfterText}}</td>
+                <td class="small text-muted">{{.Note}}{{if .Actor}} · {{.Actor}}{{end}}</td>
+              </tr>
+            {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}<p class="text-muted small mb-0">暂无储值流水</p>{{end}}
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="panel-heading"><div><h2>最近积分与核销流水</h2></div></div>
+        {{if or .PointTxns .PassUsages}}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead class="table-light"><tr><th>时间</th><th>记录</th><th class="num">变动</th><th>详情</th></tr></thead>
+            <tbody>
+            {{range .PassUsages}}
+              <tr>
+                <td class="small text-muted mono-num">{{.CreatedText}}</td>
+                <td>月卡核销</td>
+                <td class="num text-success">免 {{.Cups}} 杯</td>
+                <td class="small text-muted">{{.PlanName}} · 省 {{.SavedText}} · <a href="/admin/records/orders/{{.OrderID}}">单 #{{.OrderID}}</a></td>
+              </tr>
+            {{end}}
+            {{range .PointTxns}}
+              <tr>
+                <td class="small text-muted mono-num">{{.CreatedText}}</td>
+                <td>{{.KindText}}</td>
+                <td class="num {{if gt .DeltaPoints 0}}text-success{{else}}text-danger{{end}}">{{.DeltaText}}</td>
+                <td class="small text-muted">余 {{.PointsAfter}} · {{.Note}}</td>
+              </tr>
+            {{end}}
+            </tbody>
+          </table>
+        </div>
+        {{else}}<p class="text-muted small mb-0">暂无积分或月卡核销流水</p>{{end}}
+      </div>
+    </div>
+  </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+(() => {
+  const pay = document.getElementById('rc-pay');
+  const bonus = document.getElementById('rc-bonus');
+  document.querySelectorAll('[data-fill-recharge]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (pay) pay.value = btn.dataset.fillRecharge || '';
+      if (bonus) bonus.value = btn.dataset.fillBonus || '0';
+    });
+  });
+})();
+</script>
+{{end}}

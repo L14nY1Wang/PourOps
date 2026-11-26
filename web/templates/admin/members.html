@@ -1,0 +1,120 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">会员管理</h1>
+    <p>管理会员档案、储值余额、积分与 31 天月卡状态；现场也可在点餐台快捷建档与办卡。</p>
+  </div>
+  <div class="heading-actions">
+    <span class="date-label"><i class="bi bi-person-vcard" aria-hidden="true"></i>共 {{.Summary.TotalCount}} 位会员</span>
+    <a class="button button--primary" href="/admin/members/new"><i class="bi bi-plus-lg" aria-hidden="true"></i>新增会员</a>
+  </div>
+</div>
+
+<div class="stats-grid">
+  <div class="card stat-card stat-card--ink">
+    <div class="stat-top"><span>会员总数</span><i class="bi bi-people" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Summary.TotalCount}}</strong>
+    <div class="stat-meta">在效启用 <strong>{{.Summary.ActiveCount}}</strong> 位</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>有效月卡</span><i class="bi bi-ticket-perforated stat-icon--success" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Summary.ActivePassCount}}</strong>
+    <div class="stat-meta"><a class="subtle-link" href="/admin/passes">进入月卡管理<i class="bi bi-chevron-right" aria-hidden="true"></i></a></div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>储值总余额</span><i class="bi bi-wallet2 stat-icon--amber" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Summary.TotalBalanceText}}</strong>
+    <div class="stat-meta">门店待履约预收余额</div>
+  </div>
+  <div class="card stat-card">
+    <div class="stat-top"><span>流通积分</span><i class="bi bi-stars stat-icon--purple" aria-hidden="true"></i></div>
+    <strong class="stat-value">{{.Summary.TotalPoints}}</strong>
+    <div class="stat-meta"><a class="subtle-link" href="/admin/discounts">设置积分与等级<i class="bi bi-chevron-right" aria-hidden="true"></i></a></div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-body">
+    <div class="bar">
+      <form class="d-flex flex-wrap gap-2 align-items-center" method="get" action="/admin/members">
+        <input class="form-control" style="width:240px" type="search" name="q" value="{{.Q}}" placeholder="搜索姓名 / 手机号 / 卡号">
+        <select class="form-select" style="width:auto" name="tier">
+          <option value="0">全部等级</option>
+          {{range .Tiers}}
+          <option value="{{.ID}}"{{if eq .ID $.TierID}} selected{{end}}>{{.Name}}</option>
+          {{end}}
+        </select>
+        {{if .PassFilter}}<input type="hidden" name="pass" value="{{.PassFilter}}">{{end}}
+        <button class="button button--secondary" type="submit">筛选</button>
+      </form>
+      <div class="d-flex flex-wrap gap-2 align-items-center spacer">
+        <nav class="filter-pills" aria-label="月卡持有筛选">
+          <a class="filter-pill{{if not .PassFilter}} active{{end}}" href="/admin/members{{if or .Q (gt .TierID 0)}}?q={{.Q}}{{if gt .TierID 0}}&tier={{.TierID}}{{end}}{{end}}">全部</a>
+          <a class="filter-pill{{if eq .PassFilter "has_pass"}} active{{end}}" href="/admin/members?pass=has_pass{{if .Q}}&q={{.Q}}{{end}}{{if gt .TierID 0}}&tier={{.TierID}}{{end}}">有月卡</a>
+          <a class="filter-pill{{if eq .PassFilter "no_pass"}} active{{end}}" href="/admin/members?pass=no_pass{{if .Q}}&q={{.Q}}{{end}}{{if gt .TierID 0}}&tier={{.TierID}}{{end}}">无月卡</a>
+        </nav>
+        {{if or .Q (gt .TierID 0) .PassFilter}}<a class="button button--tertiary button--sm" href="/admin/members">清空筛选</a>{{end}}
+      </div>
+    </div>
+
+    {{if .Members}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>卡号 / 姓名</th>
+            <th>手机号</th>
+            <th>等级与折扣</th>
+            <th class="num">储值余额</th>
+            <th class="num">积分</th>
+            <th>有效月卡</th>
+            <th class="num">累计消费</th>
+            <th>状态</th>
+            <th class="num">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+        {{range .Members}}
+          <tr>
+            <td>
+              <a href="/admin/members/{{.ID}}"><strong>{{.Name}}</strong></a>
+              {{if .MemberNo}}<div class="text-muted small mono-num">{{.MemberNo}}</div>{{end}}
+            </td>
+            <td class="mono-num">{{.Phone}}</td>
+            <td>
+              <span>{{.TierName}}</span>
+              <span class="badge bg-light text-dark ms-1">{{.TierDiscountText}}</span>
+            </td>
+            <td class="num"><strong>{{.BalanceText}}</strong></td>
+            <td class="num mono-num">{{.Points}}</td>
+            <td>
+              {{if .ActivePass}}
+                <span class="badge bg-success">{{.ActivePass.PlanName}}</span>
+                <div class="text-muted small">今日剩 {{.ActivePass.RemainingToday}} 杯 · 至 {{.ActivePass.ExpiresText}}</div>
+              {{else}}
+                <span class="text-muted small">未开通</span>
+              {{end}}
+            </td>
+            <td class="num text-muted">{{.LifetimeSpentText}} <small>({{.LifetimeOrders}}单)</small></td>
+            <td>{{if .Active}}<span class="badge bg-success">启用</span>{{else}}<span class="badge bg-secondary">停用</span>{{end}}</td>
+            <td class="num">
+              <div class="table-actions">
+                <a class="button button--primary button--sm" href="/admin/members/{{.ID}}">详情 / 充值办卡</a>
+                <a class="button button--secondary button--sm" href="/admin/members/{{.ID}}/edit">编辑</a>
+              </div>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state">
+      <i class="bi bi-person-vcard" aria-hidden="true"></i>
+      <p>没有匹配的会员</p>
+      <a class="button button--primary" href="/admin/members/new">新增会员</a>
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}

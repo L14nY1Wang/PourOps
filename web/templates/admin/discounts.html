@@ -1,0 +1,286 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">优惠与会员规则</h1>
+    <p>统一配置 POS 预设折扣权限、会员等级自动折率、积分兑换与快捷储值档位。</p>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="panel-heading">
+      <div><h2>预设折扣方案</h2><p>勾选「店员可用」后，普通店员可在点餐台点击；未勾选仅店长和 BOSS 可用</p></div>
+    </div>
+    <div class="table-responsive mb-3">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr><th>名称</th><th>规则</th><th>范围</th><th>门槛</th><th>店员可用</th><th>叠会员折</th><th>状态</th><th class="num">操作</th></tr>
+        </thead>
+        <tbody>
+        {{range .Rules}}
+          <tr>
+            <td><strong>{{.Name}}</strong></td>
+            <td>{{.Summary}}</td>
+            <td>{{.ScopeText}}</td>
+            <td class="mono-num">{{if gt .MinAmountCents 0}}满 {{.MinInput}} 元{{else}}无{{end}}</td>
+            <td>{{if .AllowStaff}}<span class="badge bg-success">允许</span>{{else}}<span class="badge bg-secondary">仅店长/BOSS</span>{{end}}</td>
+            <td>{{if .StackWithMember}}<span class="badge bg-info text-dark">可叠加</span>{{else}}<span class="text-muted small">互斥</span>{{end}}</td>
+            <td>
+              <form class="inline-form" method="post" action="/admin/discounts/rules/{{.ID}}/toggle">
+                <button class="status-toggle{{if .Active}} is-on{{end}}" type="submit">{{if .Active}}启用{{else}}停用{{end}}</button>
+              </form>
+            </td>
+            <td class="num">
+              <div class="table-actions">
+                <button class="button button--secondary button--sm" type="button"
+                  data-edit-rule="{{.ID}}" data-name="{{.Name}}" data-kind="{{.Kind}}"
+                  data-fold="{{.DiscountInput}}" data-fixed="{{.FixedInput}}" data-round="{{.RoundInput}}"
+                  data-scope="{{.Scope}}" data-min="{{.MinInput}}" data-sort="{{.SortOrder}}"
+                  data-staff="{{if .AllowStaff}}1{{else}}0{{end}}"
+                  data-stack="{{if .StackWithMember}}1{{else}}0{{end}}"
+                  data-active="{{if .Active}}1{{else}}0{{end}}">编辑</button>
+                <form class="inline-form" method="post" action="/admin/discounts/rules/{{.ID}}/delete" onsubmit="return confirm('删除折扣「{{.Name}}」？已结历史订单不受影响。')">
+                  <button class="button button--danger-soft button--sm" type="submit">删除</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    <form class="admin-form border-top pt-3" method="post" action="/admin/discounts/rules" id="rule-form">
+      <input type="hidden" name="id" id="rule-id" value="0">
+      <h3 class="h6 mb-3">新增 / 编辑预设折扣</h3>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="rl-name">名称 *</label>
+          <input class="form-control" id="rl-name" name="name" type="text" required placeholder="如：88 折 / 抹零到元">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-kind">类型</label>
+          <select class="form-select" id="rl-kind" name="kind">
+            <option value="percent">百分比折扣</option>
+            <option value="fixed">立减金额</option>
+            <option value="round_down">抹零</option>
+            <option value="comp">全额免单</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-fold">折率（0.1–10 折，百分比类型用）</label>
+          <input class="form-control" id="rl-fold" name="discount_fold" type="text" inputmode="decimal" value="9">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-fixed">立减金额（元，立减类型用）</label>
+          <input class="form-control" id="rl-fixed" name="fixed_amount" type="text" inputmode="decimal" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-round">抹零单位（元，如 1 或 10）</label>
+          <input class="form-control" id="rl-round" name="round_unit" type="text" inputmode="decimal" value="1">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-scope">适用范围</label>
+          <select class="form-select" id="rl-scope" name="scope">
+            <option value="all">全场</option>
+            <option value="beer">仅桶装</option>
+            <option value="retail">仅零售</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-min">最低消费门槛（元）</label>
+          <input class="form-control" id="rl-min" name="min_amount" type="text" inputmode="decimal" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="rl-sort">排序</label>
+          <input class="form-control" id="rl-sort" name="sort_order" type="number" value="10">
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="rl-staff"><input class="form-check-input" type="checkbox" id="rl-staff" name="allow_staff" value="1"> 允许店员在点餐台选用</label>
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="rl-stack"><input class="form-check-input" type="checkbox" id="rl-stack" name="stack_with_member" value="1"> 抹零时可叠加在会员折后</label>
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="rl-active"><input class="form-check-input" type="checkbox" id="rl-active" name="active" value="1" checked> 启用规则</label>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mt-3">
+        <button class="button button--primary" type="submit">保存折扣规则</button>
+        <button class="button button--secondary" type="button" id="rule-reset-btn">清空重填</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="panel-heading">
+      <div><h2>会员等级体系</h2><p>会员累计消费达到门槛后自动升档，享受对应折率与积分倍率</p></div>
+    </div>
+    <div class="table-responsive mb-3">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr><th>等级名</th><th class="num">升级门槛</th><th>折扣</th><th>范围</th><th>积分倍率</th><th>状态</th><th class="num">操作</th></tr>
+        </thead>
+        <tbody>
+        {{range .Tiers}}
+          <tr>
+            <td><strong>{{.Name}}</strong></td>
+            <td class="num mono-num">{{.MinSpentText}}</td>
+            <td><span class="badge bg-primary">{{.DiscountText}}</span></td>
+            <td>{{.ScopeText}}</td>
+            <td class="mono-num">{{.PointsRateText}}</td>
+            <td>
+              <form class="inline-form" method="post" action="/admin/discounts/tiers/{{.ID}}/toggle">
+                <button class="status-toggle{{if .Active}} is-on{{end}}" type="submit">{{if .Active}}启用{{else}}停用{{end}}</button>
+              </form>
+            </td>
+            <td class="num">
+              <button class="button button--secondary button--sm" type="button"
+                data-edit-tier="{{.ID}}" data-name="{{.Name}}" data-min="{{.MinSpentInput}}"
+                data-fold="{{.DiscountInput}}" data-scope="{{.ApplyScope}}" data-rate="{{.PointsRateInput}}"
+                data-sort="{{.SortOrder}}" data-active="{{if .Active}}1{{else}}0{{end}}">编辑</button>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    <form class="admin-form border-top pt-3" method="post" action="/admin/discounts/tiers" id="tier-form">
+      <input type="hidden" name="id" id="tier-id" value="0">
+      <h3 class="h6 mb-3">新增 / 编辑会员等级</h3>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="tr-name">等级名称 *</label>
+          <input class="form-control" id="tr-name" name="name" type="text" required placeholder="如：黑金会员">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tr-min">累计消费升级门槛（元）</label>
+          <input class="form-control" id="tr-min" name="min_spent" type="text" inputmode="decimal" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tr-fold">折率（0.1–10 折，10 为无折扣）</label>
+          <input class="form-control" id="tr-fold" name="discount_fold" type="text" inputmode="decimal" value="10">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tr-scope">适用范围</label>
+          <select class="form-select" id="tr-scope" name="apply_scope">
+            <option value="all">全场</option>
+            <option value="beer">仅桶装</option>
+            <option value="retail">仅零售</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tr-rate">积分倍率（如 1.5 表示 1.5 倍）</label>
+          <input class="form-control" id="tr-rate" name="points_rate" type="text" inputmode="decimal" value="1">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tr-sort">排序</label>
+          <input class="form-control" id="tr-sort" name="sort_order" type="number" value="10">
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="tr-active"><input class="form-check-input" type="checkbox" id="tr-active" name="active" value="1" checked> 启用等级</label>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mt-3">
+        <button class="button button--primary" type="submit">保存等级</button>
+        <button class="button button--secondary" type="button" id="tier-reset-btn">清空重填</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/discounts/config">
+  <div class="card__content">
+    <fieldset class="form-section mb-0">
+      <div class="form-section-head">
+        <div><h2><i class="bi bi-stars" aria-hidden="true"></i>积分汇率与快捷充值档位</h2><span>作用于点餐台和后台快捷充值按钮</span></div>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="cfg-ppy">每消费 1 元攒积分</label>
+          <input class="form-control" id="cfg-ppy" name="points_per_yuan" type="number" min="0" max="1000" value="{{.Cfg.PointsPerYuan}}">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="cfg-rate">多少积分抵 1 元（0 关闭抵现）</label>
+          <input class="form-control" id="cfg-rate" name="points_redeem_rate" type="number" min="0" max="100000" value="{{.Cfg.PointsRedeemRate}}">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="cfg-maxpct">单笔积分最高抵扣比例（%）</label>
+          <input class="form-control" id="cfg-maxpct" name="points_max_pct" type="number" min="0" max="100" value="{{.Cfg.PointsMaxPct}}">
+        </div>
+      </div>
+      <div class="mt-3">
+        <p class="small text-muted mb-2">快捷充值档位（实充元数 + 赠金元数；留空实充行不保存）</p>
+        {{range .Cfg.RechargePresets}}
+        <div class="d-flex gap-2 mb-2 align-items-center" style="max-width:420px">
+          <input class="form-control" name="preset_pay" type="text" inputmode="decimal" value="{{.PayInput}}" placeholder="实充(元)">
+          <span class="text-muted">送</span>
+          <input class="form-control" name="preset_bonus" type="text" inputmode="decimal" value="{{.BonusInput}}" placeholder="赠金(元)">
+        </div>
+        {{end}}
+        <div class="d-flex gap-2 mb-2 align-items-center" style="max-width:420px">
+          <input class="form-control" name="preset_pay" type="text" inputmode="decimal" placeholder="新增档位实充(元)">
+          <span class="text-muted">送</span>
+          <input class="form-control" name="preset_bonus" type="text" inputmode="decimal" placeholder="赠金(元)">
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <button class="button button--primary" type="submit">保存积分与充值配置</button>
+  </div>
+</form>
+{{end}}
+
+{{define "scripts"}}
+<script>
+(() => {
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  const setChk = (id, on) => { const el = document.getElementById(id); if (el) el.checked = on; };
+  const rf = document.getElementById('rule-form');
+  if (rf) {
+    document.querySelectorAll('[data-edit-rule]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setVal('rule-id', btn.dataset.editRule);
+        setVal('rl-name', btn.dataset.name);
+        setVal('rl-kind', btn.dataset.kind);
+        setVal('rl-fold', btn.dataset.fold);
+        setVal('rl-fixed', btn.dataset.fixed);
+        setVal('rl-round', btn.dataset.round);
+        setVal('rl-scope', btn.dataset.scope);
+        setVal('rl-min', btn.dataset.min);
+        setVal('rl-sort', btn.dataset.sort);
+        setChk('rl-staff', btn.dataset.staff === '1');
+        setChk('rl-stack', btn.dataset.stack === '1');
+        setChk('rl-active', btn.dataset.active === '1');
+        rf.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    });
+    const rReset = document.getElementById('rule-reset-btn');
+    if (rReset) rReset.addEventListener('click', () => { rf.reset(); setVal('rule-id', '0'); });
+  }
+
+  const tf = document.getElementById('tier-form');
+  if (tf) {
+    document.querySelectorAll('[data-edit-tier]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        setVal('tier-id', btn.dataset.editTier);
+        setVal('tr-name', btn.dataset.name);
+        setVal('tr-min', btn.dataset.min);
+        setVal('tr-fold', btn.dataset.fold);
+        setVal('tr-scope', btn.dataset.scope);
+        setVal('tr-rate', btn.dataset.rate);
+        setVal('tr-sort', btn.dataset.sort);
+        setChk('tr-active', btn.dataset.active === '1');
+        tf.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      });
+    });
+    const tReset = document.getElementById('tier-reset-btn');
+    if (tReset) tReset.addEventListener('click', () => { tf.reset(); setVal('tier-id', '0'); });
+  }
+})();
+</script>
+{{end}}

@@ -1,0 +1,224 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">月卡管理</h1>
+    <p>配置月卡方案模板（默认 31 天每天免费喝 1 杯）并查看有效持卡会员与核销明细。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--primary" href="/admin/members"><i class="bi bi-person-plus" aria-hidden="true"></i>去会员页发卡</a>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="panel-heading">
+      <div><h2>月卡方案模板</h2><p>发卡时会将方案规则快照到持卡实例，修改模板不会破坏已售出月卡的权益</p></div>
+    </div>
+    <div class="table-responsive mb-3">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light">
+          <tr><th>方案名</th><th class="num">售价</th><th>规则说明</th><th>状态</th><th class="num">操作</th></tr>
+        </thead>
+        <tbody>
+        {{range .Plans}}
+          <tr>
+            <td><strong>{{.Name}}</strong>{{if .Note}}<div class="text-muted small">{{.Note}}</div>{{end}}</td>
+            <td class="num"><strong>{{.PriceText}}</strong></td>
+            <td class="small">{{.RuleSummary}}</td>
+            <td>
+              <form class="inline-form" method="post" action="/admin/passes/plans/{{.ID}}/toggle">
+                <button class="status-toggle{{if .Active}} is-on{{end}}" type="submit">{{if .Active}}启用{{else}}停用{{end}}</button>
+              </form>
+            </td>
+            <td class="num">
+              <button class="button button--secondary button--sm" type="button"
+                data-edit-plan="{{.ID}}" data-name="{{.Name}}" data-price="{{.PriceInput}}"
+                data-days="{{.DurationDays}}" data-scope="{{.Scope}}" data-benefit="{{.BenefitType}}"
+                data-daily="{{.DailyLimit}}" data-total="{{.TotalLimit}}" data-maxml="{{.MaxML}}"
+                data-maxunit="{{.MaxUnitInput}}" data-capmode="{{.CapMode}}" data-fold="{{.DiscountInput}}"
+                data-sort="{{.SortOrder}}" data-note="{{.Note}}" data-active="{{if .Active}}1{{else}}0{{end}}">编辑</button>
+            </td>
+          </tr>
+        {{else}}
+          <tr><td colspan="5" class="text-center text-muted py-3">暂无月卡方案</td></tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+
+    <form class="admin-form border-top pt-3" method="post" action="/admin/passes/plans" id="plan-form">
+      <input type="hidden" name="id" id="plan-id" value="0">
+      <h3 class="h6 mb-3" id="plan-form-title">新增 / 编辑月卡方案</h3>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="pl-name">方案名称 *</label>
+          <input class="form-control" id="pl-name" name="name" type="text" required placeholder="如：31天畅饮月卡（每日1杯）">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-price">售价（元）*</label>
+          <input class="form-control" id="pl-price" name="price" type="text" inputmode="decimal" required placeholder="299">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-days">有效天数 *</label>
+          <input class="form-control" id="pl-days" name="duration_days" type="number" min="1" max="3650" value="31" required>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-benefit">权益模式</label>
+          <select class="form-select" id="pl-benefit" name="benefit_type">
+            <option value="free_quota">配额免单型（如每日1杯）</option>
+            <option value="discount">包月折扣型</option>
+            <option value="hybrid">免单 + 折扣混合</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-scope">适用范围</label>
+          <select class="form-select" id="pl-scope" name="scope">
+            <option value="beer">仅桶装生啤</option>
+            <option value="all">全场（桶装+零售）</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-daily">每日限杯（0为不限）</label>
+          <input class="form-control" id="pl-daily" name="daily_limit" type="number" min="0" max="99" value="1">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-total">周期总限杯（0为不限）</label>
+          <input class="form-control" id="pl-total" name="total_limit" type="number" min="0" max="9999" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-maxml">杯型上限 ml（0为不限）</label>
+          <input class="form-control" id="pl-maxml" name="max_ml" type="number" min="0" max="5000" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-maxunit">单杯封顶价（元，0不限）</label>
+          <input class="form-control" id="pl-maxunit" name="max_unit" type="text" inputmode="decimal" value="0">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-capmode">超封顶价处理</label>
+          <select class="form-select" id="pl-capmode" name="cap_mode">
+            <option value="pay_diff">超额补差价</option>
+            <option value="block">超额不可核销</option>
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-fold">超出/包月折率（0.1–10 折）</label>
+          <input class="form-control" id="pl-fold" name="discount_fold" type="text" inputmode="decimal" value="10">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="pl-sort">排序</label>
+          <input class="form-control" id="pl-sort" name="sort_order" type="number" value="10">
+        </div>
+        <div class="editor-field editor-wide">
+          <label class="label" for="pl-note">说明备注</label>
+          <input class="form-control" id="pl-note" name="note" type="text" maxlength="200" placeholder="如：31天内按营业日每天免费喝1杯">
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="pl-active"><input class="form-check-input" type="checkbox" id="pl-active" name="active" value="1" checked> 启用方案</label>
+        </div>
+      </div>
+      <div class="d-flex gap-2 mt-3">
+        <button class="button button--primary" type="submit">保存月卡方案</button>
+        <button class="button button--secondary" type="button" id="plan-reset-btn">清空重填</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-body">
+    <div class="bar">
+      <h2 class="h6 mb-0">持卡会员名单</h2>
+      <nav class="filter-pills spacer" aria-label="持卡状态筛选">
+        <a class="filter-pill{{if eq .Status ""}} active{{end}}" href="/admin/passes">全部</a>
+        <a class="filter-pill{{if eq .Status "active"}} active{{end}}" href="/admin/passes?status=active">生效中</a>
+        <a class="filter-pill{{if eq .Status "expired"}} active{{end}}" href="/admin/passes?status=expired">已过期/作废</a>
+      </nav>
+    </div>
+    {{if .Passes}}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light"><tr><th>会员</th><th>月卡方案</th><th>实收 / 渠道</th><th class="num">今日 / 累计</th><th>有效期</th><th>状态</th></tr></thead>
+        <tbody>
+        {{range .Passes}}
+          <tr>
+            <td><a href="/admin/members/{{.Pass.MemberID}}"><strong>{{.MemberName}}</strong></a> <span class="text-muted small mono-num">{{.MemberPhone}}</span></td>
+            <td>{{.Pass.PlanName}}</td>
+            <td>{{.Pass.PriceText}} <small class="text-muted">({{.Pass.PayMethod}})</small></td>
+            <td class="num mono-num">{{.Pass.UsedToday}} / {{.Pass.UsedTotal}} 杯</td>
+            <td class="small mono-num">{{.Pass.StartsText}} ~ {{.Pass.ExpiresText}}</td>
+            <td><span class="badge {{.Pass.StatusBadgeClass}}">{{.Pass.StatusLabel}}</span></td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <div class="empty-state"><i class="bi bi-ticket-perforated" aria-hidden="true"></i><p>暂无持卡记录</p></div>
+    {{end}}
+  </div>
+</div>
+
+{{if .Usages}}
+<div class="card">
+  <div class="card-body">
+    <div class="panel-heading"><div><h2>最近核销记录</h2></div></div>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light"><tr><th>核销时间</th><th>营业日</th><th>会员</th><th>月卡</th><th class="num">杯数</th><th class="num">减免</th><th>订单</th></tr></thead>
+        <tbody>
+        {{range .Usages}}
+          <tr>
+            <td class="small text-muted mono-num">{{.CreatedText}}</td>
+            <td class="small mono-num">{{.BusinessDay}}</td>
+            <td><a href="/admin/members/{{.MemberID}}">{{.MemberName}}</a></td>
+            <td>{{.PlanName}}</td>
+            <td class="num">{{.Cups}}</td>
+            <td class="num text-success"><strong>{{.SavedText}}</strong></td>
+            <td><a href="/admin/records/orders/{{.OrderID}}">#{{.OrderID}}</a></td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{{end}}
+{{end}}
+
+{{define "scripts"}}
+<script>
+(() => {
+  const f = document.getElementById('plan-form');
+  if (!f) return;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  document.querySelectorAll('[data-edit-plan]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      setVal('plan-id', btn.dataset.editPlan);
+      setVal('pl-name', btn.dataset.name);
+      setVal('pl-price', btn.dataset.price);
+      setVal('pl-days', btn.dataset.days);
+      setVal('pl-scope', btn.dataset.scope);
+      setVal('pl-benefit', btn.dataset.benefit);
+      setVal('pl-daily', btn.dataset.daily);
+      setVal('pl-total', btn.dataset.total);
+      setVal('pl-maxml', btn.dataset.maxml);
+      setVal('pl-maxunit', btn.dataset.maxunit);
+      setVal('pl-capmode', btn.dataset.capmode);
+      setVal('pl-fold', btn.dataset.fold);
+      setVal('pl-sort', btn.dataset.sort);
+      setVal('pl-note', btn.dataset.note);
+      const act = document.getElementById('pl-active');
+      if (act) act.checked = btn.dataset.active === '1';
+      f.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  });
+  const resetBtn = document.getElementById('plan-reset-btn');
+  if (resetBtn) {
+    resetBtn.addEventListener('click', () => {
+      f.reset();
+      setVal('plan-id', '0');
+    });
+  }
+})();
+</script>
+{{end}}

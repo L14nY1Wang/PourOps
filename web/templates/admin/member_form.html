@@ -1,0 +1,63 @@
+{{define "content"}}
+<div class="page-heading">
+  <div>
+    <h1 class="page-title mb-0">{{if .Member.ID}}编辑会员{{else}}新增会员{{end}}</h1>
+    <p>填写会员姓名、手机号与等级；新建后可在详情页充值、办理月卡或调整积分。</p>
+  </div>
+  <div class="heading-actions">
+    <a class="button button--secondary" href="{{if .Member.ID}}/admin/members/{{.Member.ID}}{{else}}/admin/members{{end}}"><i class="bi bi-arrow-left" aria-hidden="true"></i>返回</a>
+  </div>
+</div>
+
+<form class="admin-form card editor-card" method="post" action="/admin/members">
+  <input type="hidden" name="id" value="{{.Member.ID}}">
+  <div class="card__content">
+    <fieldset class="form-section">
+      <div class="form-section-head">
+        <h2><i class="bi bi-person-vcard" aria-hidden="true"></i>会员资料</h2>
+        <span>手机号全店唯一，用于点餐台快速检索</span>
+      </div>
+      <div class="editor-grid">
+        <div class="editor-field">
+          <label class="label" for="name">姓名 / 昵称<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="text" id="name" name="name" value="{{.Member.Name}}" maxlength="40" required placeholder="如：张三 / 小李">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="phone">手机号<span class="field-required" aria-hidden="true"> *</span></label>
+          <input class="form-control" type="tel" id="phone" name="phone" value="{{.Member.Phone}}" maxlength="20" required placeholder="13800138000">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="member_no">会员卡号（可选）</label>
+          <input class="form-control" type="text" id="member_no" name="member_no" value="{{.Member.MemberNo}}" maxlength="32" placeholder="留空自动生成 M000001">
+        </div>
+        <div class="editor-field">
+          <label class="label" for="tier_id">会员等级</label>
+          <select class="form-select" id="tier_id" name="tier_id">
+            <option value="0">自动分配初始等级</option>
+            {{$cur := .Member.TierIDVal}}
+            {{range .Tiers}}
+            <option value="{{.ID}}"{{if eq .ID $cur}} selected{{end}}>{{.Name}}（{{.DiscountText}}）</option>
+            {{end}}
+          </select>
+        </div>
+        <div class="editor-field">
+          <label class="label" for="birthday">生日（可选）</label>
+          <input class="form-control" type="text" id="birthday" name="birthday" value="{{.Member.Birthday}}" maxlength="20" placeholder="如 08-15 或 1995-08-15">
+        </div>
+        <div class="editor-field editor-checkbox">
+          <label class="label" for="active"><input class="form-check-input" type="checkbox" id="active" name="active" value="1" {{if .Member.Active}}checked{{end}}> 启用该会员</label>
+          <div class="description">停用后无法在点餐台使用会员折、储值与月卡。</div>
+        </div>
+        <div class="editor-field editor-wide">
+          <label class="label" for="note">备注（口味偏好等）</label>
+          <input class="form-control" type="text" id="note" name="note" value="{{.Member.Note}}" maxlength="300" placeholder="偏好浑浊 IPA / 少冰">
+        </div>
+      </div>
+    </fieldset>
+  </div>
+  <div class="card__footer editor-actions">
+    <a class="button button--secondary" href="{{if .Member.ID}}/admin/members/{{.Member.ID}}{{else}}/admin/members{{end}}">取消</a>
+    <button class="button button--primary" type="submit"><i class="bi bi-check2" aria-hidden="true"></i>保存会员</button>
+  </div>
+</form>
+{{end}}

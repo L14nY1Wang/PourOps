@@ -7,7 +7,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-type actorKey struct{}
+type (
+	actorKey     struct{}
+	actorRoleKey struct{}
+)
 
 // WithActor 让请求链把已认证用户名带进 SQL/事件层，写流水与发布事件时保留操作者快照。
 func WithActor(ctx context.Context, username string) context.Context {
@@ -20,18 +23,35 @@ func OperationActor(ctx context.Context) string {
 	return name
 }
 
+// WithActorRole 让请求链把已认证角色带进业务与结账鉴权层。
+func WithActorRole(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, actorRoleKey{}, role)
+}
+
+// ActorRole 返回当前操作角色；后台任务或未注入时返回空串。
+func ActorRole(ctx context.Context) string {
+	role, _ := ctx.Value(actorRoleKey{}).(string)
+	return role
+}
+
 // 流水类型，和记录页筛选项一一对应。
 const (
-	OpPurchase   = "purchase"
-	OpTap        = "tap"
-	OpUntap      = "untap"
-	OpManualSale = "manual_sale"
-	OpSaleVoid   = "sale_void"
-	OpStock      = "stock"
-	OpRetailOn   = "retail_on"
-	OpRetailOff  = "retail_off"
-	OpScreenOn   = "screen_on"
-	OpScreenOff  = "screen_off"
+	OpPurchase       = "purchase"
+	OpTap            = "tap"
+	OpUntap          = "untap"
+	OpManualSale     = "manual_sale"
+	OpSaleVoid       = "sale_void"
+	OpStock          = "stock"
+	OpRetailOn       = "retail_on"
+	OpRetailOff      = "retail_off"
+	OpScreenOn       = "screen_on"
+	OpScreenOff      = "screen_off"
+	OpMemberCreate   = "member_create"
+	OpMemberRecharge = "member_recharge"
+	OpMemberAdjust   = "member_adjust"
+	OpPassIssue      = "pass_issue"
+	OpPassRevoke     = "pass_revoke"
+	OpDiscount       = "discount"
 )
 
 // LogOperation 在业务事务里写入一条营运流水：业务回滚，流水同步回滚。
@@ -49,3 +69,15 @@ func BeerSubject(brewery, name string) string {
 }
 
 func RetailSubject(name string) string { return "零售 · " + name }
+
+func MemberSubject(name, phone string) string {
+	n := strings.TrimSpace(name)
+	p := strings.TrimSpace(phone)
+	if n == "" {
+		return "会员 · " + p
+	}
+	if p == "" {
+		return "会员 · " + n
+	}
+	return "会员 · " + n + " (" + p + ")"
+}

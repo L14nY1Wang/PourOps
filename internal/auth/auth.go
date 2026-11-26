@@ -519,7 +519,8 @@ func (s *Service) RequireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, u.Landing(), http.StatusSeeOther)
 			return
 		}
-		ctx := context.WithValue(platform.WithActor(r.Context(), u.Username), ctxUserKey{}, u)
+		ctx := platform.WithActorRole(platform.WithActor(r.Context(), u.Username), u.Role)
+		ctx = context.WithValue(ctx, ctxUserKey{}, u)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -541,7 +542,8 @@ func (s *Service) RequireAny(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 			return
 		}
-		ctx := context.WithValue(platform.WithActor(r.Context(), u.Username), ctxUserKey{}, u)
+		ctx := platform.WithActorRole(platform.WithActor(r.Context(), u.Username), u.Role)
+		ctx = context.WithValue(ctx, ctxUserKey{}, u)
 		next(w, r.WithContext(ctx))
 	}
 }

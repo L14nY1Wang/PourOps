@@ -12,6 +12,7 @@ import (
 	"pourops/internal/catalog"
 	"pourops/internal/event"
 	"pourops/internal/inventory"
+	"pourops/internal/loyalty"
 	"pourops/internal/platform"
 	"pourops/internal/pos"
 	"pourops/internal/report"
@@ -55,7 +56,9 @@ func TestAllTemplatesRender(t *testing.T) {
 	finKeg.RevenueCents = 240000
 
 	item := inventory.RetailItem{ID: 5, Name: "健力士罐装", Category: "罐装", Spec: "440ml", PriceCents: 3800, CostCents: 2100, Stock: 2, Active: true}
-	ord := report.RecordOrder{ID: 88, Spot: "bar-1", OpenedAt: now, Total: 14600, Paid: 8800, Pending: 5800, Status: "partial"}
+	ord := report.RecordOrder{ID: 88, Spot: "bar-1", OpenedAt: now, Total: 14600, Paid: 8800, Pending: 5800, MemberName: "张三", Status: "partial"}
+	tierID := int64(1)
+	balAfter := 25000
 
 	cases := []struct {
 		name      string
@@ -160,6 +163,36 @@ func TestAllTemplatesRender(t *testing.T) {
 				Events: []report.LedgerEvent{{ID: 1, OccurredAt: now, Kind: platform.OpTap, Subject: "树屋 · 尤利乌斯", Detail: "上架 01", Actor: "boss"}},
 			},
 		}, nil, false},
+		{"members", "admin/members.html", "layout", &loyalty.MembersPage{
+			Layout:  ui.Layout{Title: "会员管理", Nav: "members", Me: me},
+			Summary: loyalty.MemberSummary{TotalCount: 1, ActiveCount: 1, ActivePassCount: 1, TotalBalanceCents: 30000, TotalPoints: 120},
+			Members: []loyalty.Member{{ID: 1, MemberNo: "M000001", Name: "张三", Phone: "13800138000", TierName: "常客会员", TierDiscountBPS: 9500, BalanceCents: 30000, Points: 120, Active: true}},
+		}, []string{`/admin/members/new`, `张三`, `13800138000`}, false},
+		{"member_form", "admin/member_form.html", "layout", &loyalty.MemberFormPage{
+			Layout: ui.Layout{Title: "编辑会员", Nav: "members", Me: me},
+			Member: loyalty.Member{ID: 1, Name: "张三", Phone: "13800138000", TierID: &tierID, Active: true},
+			Tiers:  []loyalty.Tier{{ID: 1, Name: "普通会员", DiscountBPS: 10000}},
+		}, []string{`action="/admin/members"`, `name="phone"`, `selected`}, false},
+		{"member_detail", "admin/member_detail.html", "layout", &loyalty.MemberDetailPage{
+			Layout: ui.Layout{Title: "张三 · 会员详情", Nav: "members", Me: me},
+			Detail: loyalty.MemberDetail{
+				Member: loyalty.Member{ID: 1, MemberNo: "M000001", Name: "张三", Phone: "13800138000", TierName: "普通会员", TierDiscountBPS: 10000, BalanceCents: 30000, Points: 100, Active: true},
+				Passes: []loyalty.PassInfo{{ID: 9, PlanName: "31天畅饮月卡（每日1杯）", Scope: "beer", BenefitType: "free_quota", DailyLimit: 1, StartsAt: now, ExpiresAt: now.AddDate(0, 0, 31), Status: "active"}},
+			},
+			Plans:           []loyalty.PassPlan{{ID: 1, Name: "31天畅饮月卡（每日1杯）", PriceCents: 29900, DurationDays: 31, Scope: "beer", BenefitType: "free_quota", DailyLimit: 1}},
+			RechargePresets: settings.DefaultLoyaltyConfig().RechargePresets,
+			Token:           "tok-1",
+		}, []string{`/admin/members/1/recharge`, `/admin/members/1/passes`, `31天畅饮月卡`}, false},
+		{"passes", "admin/passes.html", "layout", &loyalty.PassesPage{
+			Layout: ui.Layout{Title: "月卡管理", Nav: "passes", Me: me},
+			Plans:  []loyalty.PassPlan{{ID: 1, Name: "31天畅饮月卡（每日1杯）", PriceCents: 29900, DurationDays: 31, Scope: "beer", BenefitType: "free_quota", DailyLimit: 1, Active: true}},
+		}, []string{`/admin/passes/plans`, `31天畅饮月卡`}, false},
+		{"discounts", "admin/discounts.html", "layout", &loyalty.DiscountsPage{
+			Layout: ui.Layout{Title: "优惠与会员规则", Nav: "discounts", Me: me},
+			Rules:  []loyalty.DiscountRule{{ID: 1, Name: "95 折", Kind: "percent", DiscountBPS: 9500, Scope: "all", AllowStaff: true, Active: true}},
+			Tiers:  []loyalty.Tier{{ID: 1, Name: "常客会员", MinSpentCents: 100000, DiscountBPS: 9500, ApplyScope: "all", PointsRateBPS: 12000, Active: true}},
+			Cfg:    settings.DefaultLoyaltyConfig(),
+		}, []string{`/admin/discounts/rules`, `/admin/discounts/tiers`, `/admin/discounts/config`}, false},
 		{"users", "admin/users.html", "layout", &auth.UsersPage{
 			Layout: ui.Layout{Title: "账号", Nav: "users", Me: me}, Users: []auth.User{{ID: 1, Username: "boss", Role: auth.RoleBoss, Active: true, TwoFactor: true}},
 		}, nil, false},
@@ -190,16 +223,24 @@ func TestAllTemplatesRender(t *testing.T) {
 			PosItems: []inventory.RetailItem{item},
 		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`, `固定 1 位`, `固定 1 桌`, `/pos/temp/add`, `/pos/temp/remove`, `临时 1`}, true},
 		{"pos-order", "pos/pos.html", "pos", &pos.PosPage{
-			Layout:     ui.Layout{Me: me},
-			PosOrderID: 88,
-			Order:      &pos.OrderView{ID: 88, Spot: "bar-1", Label: "吧台 1", Unpaid: []pos.OrderItem{{ID: 1, Kind: "beer", Name: "尤利乌斯", UnitCents: 5800, Qty: 2, ML: 330}}, Total: 11600},
-			PosBeers:   []pos.PosBeer{{KegID: 10, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "Hazy IPA", Price150: 2800, Price330: 5800, Price500: 7800}},
-			PosItems:   []inventory.RetailItem{item},
-		}, nil, true},
+			Layout:            ui.Layout{Me: me},
+			PosOrderID:        88,
+			CanCustomDiscount: true,
+			DiscountRules:     []loyalty.DiscountRule{{ID: 1, Name: "95 折", Kind: "percent", DiscountBPS: 9500, AllowStaff: true, Active: true}},
+			PassPlans:         []loyalty.PassPlan{{ID: 1, Name: "31天畅饮月卡（每日1杯）", PriceCents: 29900, DurationDays: 31, Scope: "beer", BenefitType: "free_quota", DailyLimit: 1}},
+			LoyaltyCfg:        settings.DefaultLoyaltyConfig(),
+			Order: &pos.OrderView{
+				ID: 88, Spot: "bar-1", Label: "吧台 1",
+				Member: &loyalty.MemberSnapshot{ID: 1, Name: "张三", Phone: "13800138000", TierName: "常客会员", TierDiscountBPS: 9500, BalanceCents: 30000, Points: 120, Active: true},
+				Unpaid: []pos.OrderItem{{ID: 1, Kind: "beer", Name: "尤利乌斯", UnitCents: 5800, Qty: 2, ML: 330}}, Total: 11600,
+			},
+			PosBeers: []pos.PosBeer{{KegID: 10, No: "01", Brewery: "树屋", Name: "尤利乌斯", Style: "Hazy IPA", Price150: 2800, Price330: 5800, Price500: 7800}},
+			PosItems: []inventory.RetailItem{item},
+		}, []string{`张三`, `95 折`, `/static/js/pos-loyalty.js?v=`}, true},
 		{"pos_pay", "pos/pos_pay.html", "pos_pay", &pos.PayPage{
 			Layout: ui.Layout{Me: me},
-			Pay:    &pos.Payment{ID: 301, OrderID: 88, Label: "吧台 1", Amount: 11600, Items: 2},
-		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`}, true},
+			Pay:    &pos.Payment{ID: 301, OrderID: 88, Label: "吧台 1", Amount: 11020, GrossCents: 11600, DiscountCents: 580, ExternalPaidCents: 11020, DiscountLabel: "常客会员(95折)", MemberName: "张三", MemberPhone: "13800138000", MemberBalanceAfter: &balAfter, Items: 2},
+		}, []string{`/static/brand/pourops.svg?v=`, `/static/brand/pourops-dark.svg?v=`, `常客会员(95折)`}, true},
 		{"screen", "screen/screen.html", "screen", &screen.ScreenPage{
 			Layout: ui.Layout{Brand: "北岸精酿"},
 		}, []string{`<title>酒单 - 北岸精酿</title>`, `/static/brand/pourops.svg?v=`, `/static/brand/pourops-light.svg?v=`, `mix-blend-mode:multiply`, `mask-image:radial-gradient`, `cup-tier`}, true},
@@ -444,7 +485,7 @@ func TestNewHandlerSmoke(t *testing.T) {
 			t.Fatalf("GET %s = %d ct=%q bodyLen=%d", path, rec.Code, rec.Header().Get("Content-Type"), rec.Body.Len())
 		}
 	}
-	for _, path := range []string{"/static/js/theme.js", "/static/js/admin.js", "/static/js/beer-lookup.js", "/static/js/keg-pricing.js"} {
+	for _, path := range []string{"/static/js/theme.js", "/static/js/admin.js", "/static/js/beer-lookup.js", "/static/js/keg-pricing.js", "/static/js/pos-loyalty.js"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusOK || rec.Body.Len() == 0 {
@@ -484,14 +525,14 @@ func TestNewHandlerSmoke(t *testing.T) {
 	if recLogin.Code != http.StatusOK || !strings.Contains(recLogin.Body.String(), "/static/css/admin.bundle.css?v=") {
 		t.Fatalf("GET /admin/login = %d", recLogin.Code)
 	}
-	for _, path := range []string{"/admin/analytics", "/admin/settings", "/admin/settings/catalog/export"} {
+	for _, path := range []string{"/admin/analytics", "/admin/settings", "/admin/settings/catalog/export", "/admin/members", "/admin/passes", "/admin/discounts", "/pos/members/search"} {
 		recAnon := httptest.NewRecorder()
 		h.ServeHTTP(recAnon, httptest.NewRequest(http.MethodGet, path, nil))
 		if recAnon.Code != http.StatusSeeOther || recAnon.Header().Get("Location") != "/admin/login" {
 			t.Fatalf("GET %s 未登录应 303 -> /admin/login，实际 %d loc=%q", path, recAnon.Code, recAnon.Header().Get("Location"))
 		}
 	}
-	for _, postPath := range []string{"/admin/settings/general", "/admin/settings/spots", "/admin/settings/webhook", "/admin/settings/categories/add", "/admin/settings/catalog/import", "/pos/temp/add", "/pos/temp/remove"} {
+	for _, postPath := range []string{"/admin/settings/general", "/admin/settings/spots", "/admin/settings/webhook", "/admin/settings/categories/add", "/admin/settings/catalog/import", "/admin/members", "/admin/passes/plans", "/admin/discounts/rules", "/pos/temp/add", "/pos/temp/remove", "/pos/members/quick"} {
 		recCatAnon := httptest.NewRecorder()
 		h.ServeHTTP(recCatAnon, httptest.NewRequest(http.MethodPost, postPath, nil))
 		if recCatAnon.Code != http.StatusSeeOther || recCatAnon.Header().Get("Location") != "/admin/login" {
